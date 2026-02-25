@@ -1,0 +1,31 @@
+# Rust build output
+target/
+
+# Experiment artifacts (not part of cream itself)
+tcfp256/
+xsim.dir/
+clockInfo.txt
+tight_setup_hold_pins.txt
+
+# Vivado drops these in cwd when run from batch mode
+vivado.jou
+vivado.log
+vivado_*.backup.jou
+vivado_*.backup.log
+*.backup.jou
+*.backup.log
+xvlog.log
+xvlog.pb
+xelab.log
+xsim.log
+webtalk*.jou
+webtalk*.log
+.Xil/
+
+# Python
+__pycache__/
+*.pyc
+
+# Editor
+.vscode/
+*.swp

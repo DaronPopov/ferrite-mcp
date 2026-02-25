@@ -1,0 +1,12 @@
+[package]
+name        = "shell-parser"
+description = "Recursive-descent parser: token stream → AST"
+version.workspace   = true
+edition.workspace   = true
+authors.workspace   = true
+license.workspace   = true
+
+[dependencies]
+shell-core  = { workspace = true }
+shell-lexer = { workspace = true }
+thiserror   = { workspace = true }

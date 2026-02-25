@@ -1,0 +1,21 @@
+[package]
+name        = "shell-bin"
+description = "Main binary — wires all crates into an interactive shell REPL"
+version.workspace   = true
+edition.workspace   = true
+authors.workspace   = true
+license.workspace   = true
+
+[[bin]]
+name = "cream"
+path = "src/main.rs"
+
+[dependencies]
+shell-core    = { workspace = true }
+shell-lexer   = { workspace = true }
+shell-parser  = { workspace = true }
+shell-runtime = { workspace = true }
+shell-hooks   = { workspace = true }
+shell-tui     = { workspace = true }
+shell-mcp     = { workspace = true }
+anyhow        = { workspace = true }

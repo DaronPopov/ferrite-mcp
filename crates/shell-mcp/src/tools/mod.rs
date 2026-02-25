@@ -1,0 +1,854 @@
+pub mod binary;
+pub mod code;
+pub mod debug;
+pub mod discovery;
+pub mod eda;
+pub mod execution;
+pub mod filesystem;
+pub mod git;
+pub mod hardware;
+pub mod history;
+pub mod http;
+pub mod ml;
+pub mod perf_tools;
+pub mod profiling;
+pub mod rust_tools;
+pub mod state;
+pub mod symbols;
+pub mod system;
+pub mod workspace;
+
+use crate::protocol::ToolDef;
+use serde_json::json;
+
+pub fn all_tool_definitions() -> Vec<ToolDef> {
+    vec![
+        // ── Discovery ─────────────────────────────────────────────────────────
+        ToolDef {
+            name: "find_lib",
+            description: "Find a system library — pkg-config, ldconfig, env vars, common paths. Returns path, version, include dirs, link flags.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string", "description": "Library name (e.g. 'torch', 'cublas', 'opencv')" },
+                    "version_hint": { "type": "string", "description": "Optional minimum version" }
+                },
+                "required": ["name"]
+            }),
+        },
+        ToolDef {
+            name: "discover",
+            description: "Scan a category for all available toolchains, libraries, and SDKs.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "category": { "type": "string", "enum": ["cuda","rocm","ml","build-tools","all"] }
+                },
+                "required": ["category"]
+            }),
+        },
+
+        // ── Hardware ──────────────────────────────────────────────────────────
+        ToolDef {
+            name: "gpu_info",
+            description: "Full GPU device properties: compute capability, SM count, VRAM, \
+                           warp size, shared memory, peak bandwidth, live utilization. \
+                           Compiles a CUDA device query when nvcc is available. Cached per session.",
+            input_schema: json!({ "type": "object", "properties": {} }),
+        },
+        ToolDef {
+            name: "cpu_info",
+            description: "CPU topology: model, core count, frequency, SIMD (AVX2/AVX-512/NEON/SVE), cache sizes.",
+            input_schema: json!({ "type": "object", "properties": {} }),
+        },
+        ToolDef {
+            name: "occupancy_calc",
+            description: "Calculate theoretical CUDA kernel occupancy for this GPU. \
+                           Given threads_per_block, shared_mem_bytes, and optional registers_per_thread, \
+                           returns active warps/blocks per SM, occupancy %, the limiting resource, \
+                           and actionable tips. Auto-reads compute capability from the live GPU.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "threads_per_block":    { "type": "integer", "description": "Threads per CUDA block (1–1024)" },
+                    "shared_mem_bytes":     { "type": "integer", "description": "Dynamic shared memory per block in bytes (0 if none)" },
+                    "registers_per_thread": { "type": "integer", "description": "Registers per thread (0 to skip register limiter)" },
+                    "compute_major":        { "type": "integer", "description": "Override compute capability major (e.g. 8)" },
+                    "compute_minor":        { "type": "integer", "description": "Override compute capability minor (e.g. 6)" }
+                },
+                "required": ["threads_per_block"]
+            }),
+        },
+
+        // ── Code navigation ───────────────────────────────────────────────────
+        ToolDef {
+            name: "read_context",
+            description: "Read lines surrounding a specific location in a file. \
+                           Called automatically after build_check errors to show the \
+                           code at the error site without a separate Read round-trip.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "file":   { "type": "string",  "description": "Absolute or relative file path" },
+                    "line":   { "type": "integer", "description": "Target line number (1-indexed)" },
+                    "radius": { "type": "integer", "description": "Lines above and below to include (default 10)" }
+                },
+                "required": ["file", "line"]
+            }),
+        },
+        ToolDef {
+            name: "grep_code",
+            description: "Regex search across a file tree. Returns matches with file, line, column, \
+                           content, and surrounding context. Uses ripgrep when available, pure-Rust fallback otherwise. \
+                           Prefer this over the built-in Grep tool for dev work — no permission prompts and \
+                           returns structured JSON instead of raw text. Use max_chars= to cap response size (0 = unlimited).",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "pattern":          { "type": "string",  "description": "Regex pattern (e.g. 'cudaMalloc', '__global__\\s+void\\s+\\w+')" },
+                    "path":             { "type": "string",  "description": "Root directory to search (default: cwd)" },
+                    "glob":             { "type": "string",  "description": "File glob filter (default: **/*.{rs,cu,c,cpp,h,cuh,py,toml})" },
+                    "max_results":      { "type": "integer", "description": "Result cap (default 50)" },
+                    "context_lines":    { "type": "integer", "description": "Context lines above/below each match (default 2)" },
+                    "case_insensitive": { "type": "boolean", "description": "Case-insensitive match (default false)" },
+                    "max_chars":        { "type": "integer", "description": "Max response chars (default 1024 ≈ 256 tokens; 0 = unlimited)" }
+                },
+                "required": ["pattern"]
+            }),
+        },
+
+        // ── Filesystem ────────────────────────────────────────────────────────
+        ToolDef {
+            name: "read_file",
+            description: "Read a file's contents. Optionally slice to a line range. \
+                           Returns both a plain content string and a numbered lines array. \
+                           Capped at 2000 lines per call — use start_line/end_line to paginate large files. \
+                           Use filter= to keep only matching lines. Use max_chars= to cap response size (0 = unlimited). \
+                           Prefer this over the built-in Read tool when you need pagination, filtering, or line-ranged reads.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "path":       { "type": "string",  "description": "Absolute or relative file path" },
+                    "start_line": { "type": "integer", "description": "First line to return (1-indexed, default 1)" },
+                    "end_line":   { "type": "integer", "description": "Last line to return (inclusive, default: end of file)" },
+                    "filter":     { "type": "string",  "description": "Keep only lines containing this string (case-insensitive)" },
+                    "max_chars":  { "type": "integer", "description": "Max response chars (default 1024 ≈ 256 tokens; 0 = unlimited)" }
+                },
+                "required": ["path"]
+            }),
+        },
+        ToolDef {
+            name: "list_dir",
+            description: "List a directory's contents with type, size, and modified time. \
+                           Supports recursive depth up to 5. Skips target/, node_modules/, .git/ automatically.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "path":        { "type": "string",  "description": "Directory to list (default: cwd)" },
+                    "depth":       { "type": "integer", "description": "Recursion depth 1–5 (default 1)" },
+                    "show_hidden": { "type": "boolean", "description": "Include dotfiles (default false)" }
+                }
+            }),
+        },
+        ToolDef {
+            name: "glob",
+            description: "Find files matching a glob pattern. Supports ** recursion.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "pattern":     { "type": "string",  "description": "Glob pattern (e.g. 'src/**/*.cu')" },
+                    "cwd":         { "type": "string",  "description": "Base directory for relative patterns" },
+                    "max_results": { "type": "integer", "description": "Result cap (default 200)" }
+                },
+                "required": ["pattern"]
+            }),
+        },
+        ToolDef {
+            name: "which",
+            description: "Look up a binary in PATH and probe its version.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string", "description": "Binary name (e.g. 'nvcc', 'cargo')" }
+                },
+                "required": ["name"]
+            }),
+        },
+
+        // ── State ─────────────────────────────────────────────────────────────
+        ToolDef {
+            name: "shell_state",
+            description: "Return cream's cwd, PATH, and dev-relevant environment variables.",
+            input_schema: json!({ "type": "object", "properties": {} }),
+        },
+        ToolDef {
+            name: "set_cwd",
+            description: "Change cream's working directory. Persists across calls.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "description": "Absolute or ~ path" }
+                },
+                "required": ["path"]
+            }),
+        },
+
+        // ── Execution ─────────────────────────────────────────────────────────
+        ToolDef {
+            name: "exec",
+            description: "Run a shell command without permission prompts. Returns stdout, stderr, exit_code, \
+                           duration_ms, timed_out. Uses /bin/sh -c so pipes, redirects, and compound commands work. \
+                           Prefer this over the built-in Bash tool for builds, test runs, and any command that \
+                           would otherwise prompt the user. Use filter= to keep only matching output lines. \
+                           Use max_chars= to cap response (0 = unlimited).",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "cmd":          { "type": "string",  "description": "Shell command to run" },
+                    "cwd":          { "type": "string",  "description": "Override working directory" },
+                    "env":          { "type": "object",  "description": "Extra environment variables", "additionalProperties": { "type": "string" } },
+                    "timeout_secs": { "type": "integer", "description": "Timeout in seconds (default 60)" },
+                    "stdin":        { "type": "string",  "description": "Optional stdin" },
+                    "filter":       { "type": "string",  "description": "Keep only output lines containing this string (case-insensitive)" },
+                    "max_chars":    { "type": "integer", "description": "Max response chars (default 1024 ≈ 256 tokens; 0 = unlimited)" }
+                },
+                "required": ["cmd"]
+            }),
+        },
+        ToolDef {
+            name: "build_check",
+            description: "Compile a file or project. Auto-detects cuda/rust/c/cpp. \
+                           For CUDA: resolves correct -arch flags from the live GPU. \
+                           For Rust: cargo check --message-format=json. \
+                           Returns structured errors with file/line/col — no text parsing needed.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "file":  { "type": "string", "description": "File or directory to compile (. for Rust workspace)" },
+                    "type":  { "type": "string", "enum": ["auto","cuda","rust","c","cpp"] },
+                    "flags": { "type": "array",  "items": { "type": "string" }, "description": "Extra compiler flags" }
+                },
+                "required": ["file"]
+            }),
+        },
+
+        // ── Binary inspection ─────────────────────────────────────────────────
+        ToolDef {
+            name: "inspect_binary",
+            description: "Inspect a compiled binary: dynamic dependencies (ldd), \
+                           symbol table (nm -D), ELF header (readelf -h). \
+                           Surfaces CUDA symbols and missing .so files automatically.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "description": "Path to the compiled binary or .so" }
+                },
+                "required": ["path"]
+            }),
+        },
+
+        // ── Rust tooling ──────────────────────────────────────────────────────
+        ToolDef {
+            name: "cargo_tree",
+            description: "Parse a Cargo workspace: members, versions, features, dependencies. \
+                           Replaces manually reading multiple Cargo.toml files. \
+                           Set full=true for the complete resolved dependency graph.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string",  "description": "Path to workspace (default: cwd)" },
+                    "full": { "type": "boolean", "description": "Include resolved dependency graph (slower)" }
+                }
+            }),
+        },
+        ToolDef {
+            name: "test_run",
+            description: "Run cargo tests and return structured results: passed/failed/ignored counts \
+                           with test names. Optional filter narrows to matching test names.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "filter":       { "type": "string", "description": "Test name filter (substring match)" },
+                    "package":      { "type": "string", "description": "Cargo package name (default: all)" },
+                    "timeout_secs": { "type": "integer", "description": "Timeout (default 120s)" }
+                }
+            }),
+        },
+
+        // ── GPU Profiling ─────────────────────────────────────────────────────
+        ToolDef {
+            name: "gpu_live",
+            description: "Live GPU state: utilization %, temperature, power draw vs limit, \
+                           SM and memory clock speeds, VRAM used/total. \
+                           Run before benchmarks to confirm the GPU is idle and at boost clocks. \
+                           Returns ready_to_bench: true when GPU utilization < 5%.",
+            input_schema: json!({ "type": "object", "properties": {} }),
+        },
+        ToolDef {
+            name: "ptx_inspect",
+            description: "Inspect PTX (virtual assembly) for a CUDA kernel. \
+                           Compiles .cu source to PTX via nvcc --ptx, or dumps PTX from a binary via cuobjdump. \
+                           Returns per-kernel register counts (b32/f32/b64/pred), shared memory bytes, \
+                           global/shared memory op counts, and ptxas verbose stats (regs/smem/lmem).",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "path":   { "type": "string", "description": "Path to .cu source or compiled binary" },
+                    "kernel": { "type": "string", "description": "Filter by kernel name substring (default: all)" }
+                },
+                "required": ["path"]
+            }),
+        },
+        ToolDef {
+            name: "ncu_profile",
+            description: "Profile CUDA kernels with Nsight Compute CLI (ncu). \
+                           Returns per-kernel: achieved occupancy %, SM throughput %, DRAM throughput %, \
+                           L1/L2 cache hit rates, stall reasons. \
+                           Requires ncu in PATH and sufficient permissions (perf_event_paranoid). \
+                           Note: profiling adds significant overhead — use on small N.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "cmd":          { "type": "string",  "description": "Command to profile (e.g. './bench')" },
+                    "kernel":       { "type": "string",  "description": "Kernel name filter (default: all)" },
+                    "metrics":      { "type": "string",  "description": "Custom metric list (default: occupancy + bandwidth + cache)" },
+                    "timeout_secs": { "type": "integer", "description": "Timeout in seconds (default 120)" }
+                },
+                "required": ["cmd"]
+            }),
+        },
+        ToolDef {
+            name: "compute_sanitizer",
+            description: "Run CUDA compute-sanitizer to detect memory errors, race conditions, \
+                           uninitialized memory, or barrier errors. \
+                           Returns structured errors with kernel name, thread location, file, and line number.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "cmd":          { "type": "string", "description": "Command to sanitize (e.g. './bench')" },
+                    "tool":         { "type": "string", "enum": ["memcheck","racecheck","initcheck","synccheck"],
+                                      "description": "Sanitizer tool (default: memcheck)" },
+                    "timeout_secs": { "type": "integer", "description": "Timeout (default 120s)" }
+                },
+                "required": ["cmd"]
+            }),
+        },
+
+        // ── Benchmark history ─────────────────────────────────────────────────
+        ToolDef {
+            name: "bench_history",
+            description: "Persistent benchmark result store across sessions. \
+                           record: save a result. list: show last N records. \
+                           query: filter by tag/kernel. compare: diff last two records for a tag. \
+                           Stored at ~/.local/share/cream/bench_history.jsonl.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "op":     { "type": "string", "enum": ["record","list","query","compare"],
+                                "description": "Operation" },
+                    "tag":    { "type": "string",  "description": "Short label (e.g. 'saxpy', 'matmul_tile16')" },
+                    "value":  { "type": "number",  "description": "Numeric result (record only)" },
+                    "unit":   { "type": "string",  "description": "Unit string: 'GB/s', 'GFLOP/s', 'ms' (record only)" },
+                    "kernel": { "type": "string",  "description": "Kernel name annotation (optional)" },
+                    "N":      { "type": "integer", "description": "Problem size annotation (optional)" },
+                    "config": { "type": "string",  "description": "Config description (optional)" },
+                    "notes":  { "type": "string",  "description": "Free-form notes (optional)" },
+                    "limit":  { "type": "integer", "description": "Max records to return (list/query, default 20)" }
+                },
+                "required": ["op"]
+            }),
+        },
+
+        // ── Filesystem (incremental) ───────────────────────────────────────────
+        ToolDef {
+            name: "changed_since",
+            description: "Find files modified after a given time. \
+                           Provide since_secs (Unix timestamp) or since_relative ('10m', '2h', '1d', '30s'). \
+                           Skips target/, node_modules/, hidden dirs. Returns list sorted newest-first.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "path":            { "type": "string",  "description": "Root directory to search (default: cwd)" },
+                    "since_secs":      { "type": "integer", "description": "Unix timestamp threshold" },
+                    "since_relative":  { "type": "string",  "description": "Relative time: '10m', '2h', '1d', '30s'" },
+                    "max_results":     { "type": "integer", "description": "Result cap (default 100)" }
+                }
+            }),
+        },
+
+        // ── Workspace ─────────────────────────────────────────────────────────
+        ToolDef {
+            name: "orient",
+            description: "Single-call situational awareness. Returns cwd, git state (branch/staged/unstaged), \
+                           recently changed files, shallow directory tree, and listening ports. \
+                           Replaces calling git_status + changed_since + list_dir + port_list separately. \
+                           Use at the start of a session or when context is lost.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "path":  { "type": "string", "description": "Root path (default: cwd)" },
+                    "since": { "type": "string", "description": "Recent-changes window (default '2h'). E.g. '30m', '1d'" },
+                    "depth": { "type": "integer", "description": "Directory tree depth (default 2)" }
+                }
+            }),
+        },
+        ToolDef {
+            name: "note",
+            description: "Session scratchpad — persist observations, decisions, or TODOs across tool calls \
+                           within this session. Notes are stored in server memory (not disk) and reset when \
+                           cream restarts. Use to avoid re-deriving context mid-session.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "op":      { "type": "string", "enum": ["read","append","clear"],
+                                 "description": "read: return all notes; append: add a note; clear: wipe all" },
+                    "content": { "type": "string", "description": "Note text (required for append)" }
+                },
+                "required": ["op"]
+            }),
+        },
+
+        // ── EDA ───────────────────────────────────────────────────────────────
+        ToolDef {
+            name: "verilog_lint",
+            description: "Lint Verilog/SystemVerilog files with iverilog -tnull. \
+                           Returns structured diagnostics: [{severity, file, line, message}].",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "files":        { "type": "array",  "items": { "type": "string" }, "description": "Source files to lint" },
+                    "top":          { "type": "string", "description": "Top-level module name (optional)" },
+                    "include_dirs": { "type": "array",  "items": { "type": "string" }, "description": "Include search paths" },
+                    "standard":     { "type": "string", "description": "Verilog standard: 2005, 2012 (default), sv" }
+                },
+                "required": ["files"]
+            }),
+        },
+        ToolDef {
+            name: "verilog_sim",
+            description: "Compile Verilog with iverilog then simulate with vvp. \
+                           Returns success, $finish status, assertion failures, stdout/stderr.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "files":        { "type": "array",   "items": { "type": "string" }, "description": "Source files (testbench + DUT)" },
+                    "top":          { "type": "string",  "description": "Top module / testbench name (default: tb)" },
+                    "include_dirs": { "type": "array",   "items": { "type": "string" }, "description": "Include paths" },
+                    "vcd_out":      { "type": "string",  "description": "Optional VCD output path" },
+                    "standard":     { "type": "string",  "description": "Verilog standard (default: 2012)" },
+                    "timeout_secs": { "type": "integer", "description": "Simulation timeout (default 30s)" }
+                },
+                "required": ["files"]
+            }),
+        },
+        ToolDef {
+            name: "cocotb_run",
+            description: "Run cocotb 2.x tests via pytest in a directory. \
+                           Returns {passed, failed} test list with simulator and duration.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "dir":          { "type": "string",  "description": "Directory containing cocotb tests / Makefile" },
+                    "simulator":    { "type": "string",  "description": "Simulator backend: icarus (default), verilator, ghdl" },
+                    "module":       { "type": "string",  "description": "Python test module or pytest path filter" },
+                    "timeout_secs": { "type": "integer", "description": "Timeout in seconds (default 120)" }
+                },
+                "required": ["dir"]
+            }),
+        },
+        ToolDef {
+            name: "vivado_tcl",
+            description: "Run Vivado 2025.2 in batch Tcl mode. \
+                           Provide 'script' (file path) or 'cmd' (inline Tcl). \
+                           Use for synthesis, implementation, bitstream generation, project queries. \
+                           Returns {success, errors, warnings, output}.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "script":       { "type": "string",  "description": "Path to a .tcl script file" },
+                    "cmd":          { "type": "string",  "description": "Inline Tcl command(s) to execute" },
+                    "timeout_secs": { "type": "integer", "description": "Timeout in seconds (default 600)" }
+                }
+            }),
+        },
+        ToolDef {
+            name: "fpga_boards",
+            description: "List FPGA boards connected via JTAG using Vivado hw_manager. \
+                           Returns [{target, device, part, status}] for each found device.",
+            input_schema: json!({ "type": "object", "properties": {} }),
+        },
+        ToolDef {
+            name: "fpga_program",
+            description: "Program a .bit bitstream to a connected FPGA via Vivado hw_manager. \
+                           Uses the first available JTAG target unless 'target' is specified.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "bitfile":      { "type": "string",  "description": "Path to the .bit bitstream file" },
+                    "target":       { "type": "string",  "description": "JTAG target name (default: first found)" },
+                    "timeout_secs": { "type": "integer", "description": "Timeout in seconds (default 120)" }
+                },
+                "required": ["bitfile"]
+            }),
+        },
+        // ── Git ───────────────────────────────────────────────────────────────
+        ToolDef {
+            name: "git_log",
+            description: "Structured git commit history. Returns [{hash, short, author, date, subject}]. \
+                           Filter by author, since date, branch, or file path.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "path":   { "type": "string",  "description": "Repo path (default: cwd)" },
+                    "limit":  { "type": "integer", "description": "Max commits to return (default 20)" },
+                    "author": { "type": "string",  "description": "Filter by author name/email" },
+                    "since":  { "type": "string",  "description": "Since date (e.g. '2 weeks ago', '2024-01-01')" },
+                    "branch": { "type": "string",  "description": "Branch or ref to log (default HEAD)" },
+                    "file":   { "type": "string",  "description": "Limit to commits touching this file" }
+                }
+            }),
+        },
+        ToolDef {
+            name: "git_diff",
+            description: "Uncommitted changes as structured file+hunk data. \
+                           Returns [{path, additions, deletions, hunks: [{header, lines}]}]. \
+                           Use staged=true for index vs HEAD.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "path":   { "type": "string",  "description": "Repo path (default: cwd)" },
+                    "staged": { "type": "boolean", "description": "Diff staged (index) vs HEAD (default false = working tree)" },
+                    "file":   { "type": "string",  "description": "Limit diff to a specific file" },
+                    "commit": { "type": "string",  "description": "Diff against a specific commit or ref" }
+                }
+            }),
+        },
+        ToolDef {
+            name: "git_status",
+            description: "Working tree state: branch, ahead/behind, staged/unstaged/untracked files. \
+                           Returns structured lists, not raw git output.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "description": "Repo path (default: cwd)" }
+                }
+            }),
+        },
+
+        // ── Symbols ───────────────────────────────────────────────────────────
+        ToolDef {
+            name: "symbol_index",
+            description: "Walk Rust source files and index all symbols: fn, struct, enum, trait, impl, \
+                           type, const, static, mod. Returns [{kind, name, file, line, public}]. \
+                           Filter by kinds array. Use find_symbol for targeted lookup.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "path":  { "type": "string",  "description": "Root path to index (default: cwd)" },
+                    "kinds": { "type": "array", "items": { "type": "string" },
+                               "description": "Filter to these kinds: fn, struct, enum, trait, impl, type, const, static, mod" },
+                    "limit": { "type": "integer", "description": "Max symbols to return (default 2000)" }
+                }
+            }),
+        },
+        ToolDef {
+            name: "find_symbol",
+            description: "Find a Rust symbol by name across source files. \
+                           Returns [{kind, name, file, line, public}]. \
+                           Substring match by default; use exact=true for exact name.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "name":  { "type": "string",  "description": "Symbol name to find" },
+                    "path":  { "type": "string",  "description": "Root path to search (default: cwd)" },
+                    "kinds": { "type": "array", "items": { "type": "string" },
+                               "description": "Limit to these kinds: fn, struct, enum, trait, impl, type, const, mod" },
+                    "exact": { "type": "boolean", "description": "Exact name match (default false = substring)" }
+                },
+                "required": ["name"]
+            }),
+        },
+
+        // ── System ────────────────────────────────────────────────────────────
+        ToolDef {
+            name: "process_tree",
+            description: "List running processes from /proc. Returns [{pid, ppid, name, state, mem_kb, cmdline}]. \
+                           Filter by process name substring.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "filter": { "type": "string",  "description": "Filter by process name substring (case-insensitive)" },
+                    "limit":  { "type": "integer", "description": "Max processes to return (default 200)" }
+                }
+            }),
+        },
+        ToolDef {
+            name: "port_list",
+            description: "List listening TCP/UDP ports via ss. Returns [{proto, addr, port, pid, process}].",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "proto": { "type": "string", "enum": ["tcp", "udp", ""], "description": "Filter by protocol (default: both)" }
+                }
+            }),
+        },
+        ToolDef {
+            name: "journal_query",
+            description: "Query systemd journal via journalctl. Returns [{time, unit, pid, message}]. \
+                           Filter by unit, time range, grep pattern.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "unit":  { "type": "string",  "description": "Systemd unit name (e.g. 'nginx.service')" },
+                    "since": { "type": "string",  "description": "Time range (default '1h ago')" },
+                    "grep":  { "type": "string",  "description": "Message grep pattern" },
+                    "limit": { "type": "integer", "description": "Max entries (default 50)" },
+                    "boot":  { "type": "boolean", "description": "Limit to current boot (default false)" }
+                }
+            }),
+        },
+
+        // ── File operations ───────────────────────────────────────────────────
+        ToolDef {
+            name: "move_file",
+            description: "Move or rename a file/directory. With find_refs=true (default), scans .rs files \
+                           for mod/use references to the moved file and returns them for update.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "src":       { "type": "string",  "description": "Source path" },
+                    "dst":       { "type": "string",  "description": "Destination path" },
+                    "find_refs": { "type": "boolean", "description": "Scan for Rust mod/use references (default true)" }
+                },
+                "required": ["src", "dst"]
+            }),
+        },
+        ToolDef {
+            name: "mkdir",
+            description: "Create a directory. Creates intermediate parents by default.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "path":    { "type": "string",  "description": "Directory path to create" },
+                    "parents": { "type": "boolean", "description": "Create parent dirs (default true)" }
+                },
+                "required": ["path"]
+            }),
+        },
+        ToolDef {
+            name: "delete_file",
+            description: "Delete a single file. Refuses directories for safety — use exec('rm -rf') explicitly for those.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "description": "File path to delete" }
+                },
+                "required": ["path"]
+            }),
+        },
+
+        // ── HTTP ──────────────────────────────────────────────────────────────
+        ToolDef {
+            name: "http_request",
+            description: "Send an HTTP/HTTPS request via curl. Returns {ok, status, latency_ms, headers, body}. \
+                           Body is parsed as JSON when possible. Use for probing running services and APIs.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "url":               { "type": "string",  "description": "Request URL" },
+                    "method":            { "type": "string",  "description": "HTTP method (default GET)" },
+                    "body":              { "type": "string",  "description": "Request body (default Content-Type: application/json)" },
+                    "headers":           { "type": "object",  "description": "Additional request headers as key:value pairs" },
+                    "timeout_secs":      { "type": "integer", "description": "Request timeout (default 30s)" },
+                    "follow_redirects":  { "type": "boolean", "description": "Follow HTTP redirects (default true)" },
+                    "insecure":          { "type": "boolean", "description": "Skip TLS certificate verification (default false)" }
+                },
+                "required": ["url"]
+            }),
+        },
+
+        // ── CPU profiling ─────────────────────────────────────────────────────
+        ToolDef {
+            name: "flamegraph",
+            description: "Profile a command with Linux perf and generate a CPU flamegraph. \
+                           Returns top hotspot functions. Generates SVG if inferno or flamegraph.pl is installed. \
+                           May require: echo 0 | sudo tee /proc/sys/kernel/perf_event_paranoid",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "cmd":          { "type": "string",  "description": "Command to profile (shell string)" },
+                    "output":       { "type": "string",  "description": "SVG output path (default /tmp/cream_flamegraph.svg)" },
+                    "freq":         { "type": "integer", "description": "Sampling frequency Hz (default 99)" },
+                    "timeout_secs": { "type": "integer", "description": "Max profiling time (default 60s)" }
+                },
+                "required": ["cmd"]
+            }),
+        },
+        ToolDef {
+            name: "perf_stat",
+            description: "Run a command under Linux perf stat. Returns CPU counters: cycles, instructions, \
+                           cache-misses, branch-misses, IPC, task-clock. Structured output, no text parsing needed.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "cmd":          { "type": "string", "description": "Command to measure (shell string)" },
+                    "events":       { "type": "string", "description": "Comma-separated perf events (default: cycles,instructions,cache-misses,cache-references,branch-misses,task-clock)" },
+                    "timeout_secs": { "type": "integer", "description": "Timeout (default 60s)" }
+                },
+                "required": ["cmd"]
+            }),
+        },
+
+        // ── Debugging ─────────────────────────────────────────────────────────
+        ToolDef {
+            name: "gdb_run",
+            description: "Run a binary under GDB in batch mode. Returns structured backtrace, locals, \
+                           signal info, breakpoint hits. Supports core dump analysis and custom GDB commands.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "binary":       { "type": "string",  "description": "Path to the binary to debug" },
+                    "args":         { "type": "string",  "description": "Arguments to pass to the binary" },
+                    "core":         { "type": "string",  "description": "Core dump file for post-mortem analysis" },
+                    "breakpoints":  { "type": "array", "items": { "type": "string" }, "description": "Breakpoint locations (e.g. 'main', 'file.c:42', 'ClassName::method')" },
+                    "commands":     { "type": "array", "items": { "type": "string" }, "description": "Additional GDB commands to run (e.g. 'print var', 'x/10x $rsp')" },
+                    "timeout_secs": { "type": "integer", "description": "Timeout (default 30s)" }
+                },
+                "required": ["binary"]
+            }),
+        },
+
+        // ── ML data ───────────────────────────────────────────────────────────
+        ToolDef {
+            name: "tensor_inspect",
+            description: "Inspect a PyTorch .pt/.pth file. Returns tensor shapes, dtypes, and statistics \
+                           (min/max/mean/std) for each tensor. Requires python3 + torch.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "path":        { "type": "string",  "description": "Path to .pt/.pth file" },
+                    "keys":        { "type": "array", "items": { "type": "string" }, "description": "Filter to specific top-level keys (default: all)" },
+                    "max_tensors": { "type": "integer", "description": "Max tensors to inspect (default 50)" }
+                },
+                "required": ["path"]
+            }),
+        },
+        ToolDef {
+            name: "checkpoint_list",
+            description: "Enumerate PyTorch checkpoint files (.pt/.pth/.ckpt/.bin/.safetensors) in a directory. \
+                           Returns size, mtime, top-level keys, epoch/step if present. Newest-first.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "path":       { "type": "string",  "description": "Directory to search (default: cwd)" },
+                    "inspect":    { "type": "boolean", "description": "Load each file to extract keys/metadata (default true)" },
+                    "max_files":  { "type": "integer", "description": "Max files to return (default 20)" }
+                }
+            }),
+        },
+
+        ToolDef {
+            name: "waveform_query",
+            description: "Parse a VCD waveform file from simulation. \
+                           Returns signal definitions and value-change events. \
+                           Filter by signal name, time range, and max event count.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "vcd_file":   { "type": "string",  "description": "Path to the .vcd file" },
+                    "signals":    { "type": "array",   "items": { "type": "string" }, "description": "Signal name substrings to include (default: all)" },
+                    "time_start": { "type": "integer", "description": "Start time (in VCD timescale units)" },
+                    "time_end":   { "type": "integer", "description": "End time (in VCD timescale units)" },
+                    "max_events": { "type": "integer", "description": "Max events to return (default 500)" }
+                },
+                "required": ["vcd_file"]
+            }),
+        },
+
+        // ── FPGA serial / TCFP observation ────────────────────────────────────
+        ToolDef {
+            name: "fpga_serial",
+            description: "Low-level UART send/receive for FPGA communication. \
+                           send: hex string (e.g. '52 01'). \
+                           Auto-detects /dev/ttyUSB* or use port override.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "send":        { "type": "string",  "description": "Hex bytes to send, e.g. '52 01 FF'" },
+                    "read_bytes":  { "type": "integer", "description": "Number of response bytes to read (0 = just send)" },
+                    "port":        { "type": "string",  "description": "Serial port (default: auto-detect /dev/ttyUSB*)" },
+                    "baud":        { "type": "integer", "description": "Baud rate (default: 921600)" },
+                    "timeout_ms":  { "type": "integer", "description": "Read timeout ms (default: 500)" }
+                }
+            }),
+        },
+        ToolDef {
+            name: "fpga_tcfp_status",
+            description: "Read live status from the TCFP processor over UART. \
+                           Returns busy/converged/done flags and step_count. \
+                           Reads REG_STATUS (0x01) and REG_STEP_COUNT (0x02).",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "port": { "type": "string",  "description": "Serial port (default: auto-detect)" },
+                    "baud": { "type": "integer", "description": "Baud rate (default: 921600)" }
+                }
+            }),
+        },
+        ToolDef {
+            name: "launch",
+            description: "Fire-and-forget process launch. Spawns detached, returns PID immediately. \
+                           Use for GUI apps (Vivado, waveform viewers, terminals) or long-running \
+                           daemons where the output doesn't need to be reasoned about.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "cmd": { "type": "string", "description": "Shell command to launch detached" },
+                    "cwd": { "type": "string", "description": "Working directory (default: cream cwd)" }
+                },
+                "required": ["cmd"]
+            }),
+        },
+        ToolDef {
+            name: "task_run",
+            description: "Write a script to a tempfile and execute it atomically in one tool call. \
+                           Use for multi-step hardware experiments, data sweeps, or any workflow \
+                           that would otherwise require many round-trips. \
+                           Returns {stdout, stderr, exit_code, duration_ms, success, timed_out}.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "script":       { "type": "string",  "description": "Script source code to execute" },
+                    "interpreter":  { "type": "string",  "description": "Interpreter: python3 (default), python, bash, sh" },
+                    "timeout_secs": { "type": "integer", "description": "Timeout in seconds (default 120)" },
+                    "cwd":          { "type": "string",  "description": "Working directory override (default: cream cwd)" }
+                },
+                "required": ["script"]
+            }),
+        },
+        ToolDef {
+            name: "fpga_tcfp_tile_read",
+            description: "Read tile state vectors from the TCFP array via UART 'Q' command. \
+                           Returns phase/field/coupling/bias as raw int32 + float (Q16.16) per tile. \
+                           Defaults to all 4 tiles of the 2x2 array.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "tiles": {
+                        "type": "array",
+                        "description": "Tiles to read: [{row, col}]. Default: all 4 tiles of 2x2.",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "row": { "type": "integer" },
+                                "col": { "type": "integer" }
+                            }
+                        }
+                    },
+                    "port": { "type": "string",  "description": "Serial port (default: auto-detect)" },
+                    "baud": { "type": "integer", "description": "Baud rate (default: 921600)" }
+                }
+            }),
+        },
+    ]
+}

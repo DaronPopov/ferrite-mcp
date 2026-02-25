@@ -1,0 +1,11 @@
+[package]
+name        = "shell-hooks"
+description = "Plugin/hook system — the seam where LLM integration will live"
+version.workspace   = true
+edition.workspace   = true
+authors.workspace   = true
+license.workspace   = true
+
+[dependencies]
+shell-core = { workspace = true }
+thiserror  = { workspace = true }

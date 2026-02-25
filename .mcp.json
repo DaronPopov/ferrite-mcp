@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "cream": {
+      "type": "stdio",
+      "command": "${HOME}/.cargo/bin/cream",
+      "args": ["--mcp"],
+      "env": {}
+    }
+  }
+}

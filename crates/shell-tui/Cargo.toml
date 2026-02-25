@@ -1,0 +1,13 @@
+[package]
+name        = "shell-tui"
+description = "Interactive terminal layer: readline, prompt, completion, history, cream theme"
+version.workspace   = true
+edition.workspace   = true
+authors.workspace   = true
+license.workspace   = true
+
+[dependencies]
+shell-core  = { workspace = true }
+shell-hooks = { workspace = true }
+thiserror   = { workspace = true }
+crossterm   = { workspace = true }

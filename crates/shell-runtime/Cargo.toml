@@ -1,0 +1,14 @@
+[package]
+name        = "shell-runtime"
+description = "AST executor, word expansion, job control, builtins, signal handling"
+version.workspace   = true
+edition.workspace   = true
+authors.workspace   = true
+license.workspace   = true
+
+[dependencies]
+shell-core   = { workspace = true }
+shell-parser = { workspace = true }
+shell-hooks  = { workspace = true }
+thiserror    = { workspace = true }
+nix          = { workspace = true }

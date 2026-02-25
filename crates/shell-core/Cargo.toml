@@ -1,0 +1,12 @@
+[package]
+name        = "shell-core"
+description = "Foundational types, error definitions, and shell state — no OS calls"
+version.workspace    = true
+edition.workspace    = true
+authors.workspace    = true
+license.workspace    = true
+
+# No external dependencies by design.
+# thiserror is a proc-macro with zero runtime cost — acceptable for ergonomics.
+[dependencies]
+thiserror = { workspace = true }

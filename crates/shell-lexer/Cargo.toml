@@ -1,0 +1,11 @@
+[package]
+name        = "shell-lexer"
+description = "Byte-level tokenizer: raw input → token stream"
+version.workspace   = true
+edition.workspace   = true
+authors.workspace   = true
+license.workspace   = true
+
+[dependencies]
+shell-core = { workspace = true }
+thiserror  = { workspace = true }
