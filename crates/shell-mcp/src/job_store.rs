@@ -1,0 +1,631 @@
+//! JobStore — spawns, tracks, and persists background processes.
+//!
+//! Each Job has:
+//!   - stdout / stderr drained by background reader threads into in-memory buffers
+//!   - a combined log written to ~/.local/share/cream/logs/{job_id}.log (persists restarts)
+//!   - a waiter thread that marks the job Done on exit and triggers a session save
+//!   - cursor-based incremental reads for bg_status
+
+use std::collections::HashMap;
+use std::fs;
+use std::io::{Read, Write};
+use std::path::PathBuf;
+use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
+use std::thread;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+use crate::persist::{JobSnapshot, Persistence, SessionData, log_path_for};
+
+// PTY support
+use std::os::unix::io::FromRawFd;
+use std::os::unix::process::CommandExt;
+
+// ── JobStatus ─────────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum JobStatus {
+    Running,
+    Done(i32),
+    Killed,
+    /// Created via bg_attach — monitored via /proc, no live output capture.
+    Attached,
+}
+
+impl JobStatus {
+    pub fn label(&self) -> &'static str {
+        match self {
+            JobStatus::Running | JobStatus::Attached => "running",
+            JobStatus::Done(_)                       => "done",
+            JobStatus::Killed                        => "killed",
+        }
+    }
+    pub fn exit_code(&self) -> Option<i32> {
+        if let JobStatus::Done(c) = self { Some(*c) } else { None }
+    }
+    pub fn is_terminal(&self) -> bool {
+        matches!(self, JobStatus::Done(_) | JobStatus::Killed)
+    }
+    fn as_snapshot_str(&self) -> &'static str {
+        match self {
+            JobStatus::Running  => "running",
+            JobStatus::Done(_)  => "done",
+            JobStatus::Killed   => "killed",
+            JobStatus::Attached => "attached",
+        }
+    }
+}
+
+// ── Job ───────────────────────────────────────────────────────────────────────
+
+pub struct Job {
+    pub job_id:     String,
+    pub pid:        u32,
+    pub label:      String,
+    pub cmd:        String,
+    pub cwd:        PathBuf,
+    pub status:     Arc<Mutex<JobStatus>>,
+    pub stdout_buf: Arc<Mutex<Vec<u8>>>,
+    pub stderr_buf: Arc<Mutex<Vec<u8>>>,
+    /// Persistent combined log file — survives cream restarts.
+    pub log_path:   PathBuf,
+    /// Cursor for incremental bg_status reads.
+    pub stdout_cursor: Mutex<usize>,
+    pub stderr_cursor: Mutex<usize>,
+    /// Unix timestamp of spawn time — used for elapsed_secs and persistence.
+    pub started_secs: u64,
+    /// PTY master file — Some when spawned with spawn_pty(). Write here to send input.
+    pub stdin_tx: Option<Arc<Mutex<std::fs::File>>>,
+    /// True when this job was spawned with a PTY.
+    pub is_pty: bool,
+}
+
+impl Job {
+    pub fn elapsed_secs(&self) -> f64 {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        (now.saturating_sub(self.started_secs)) as f64
+    }
+
+    pub fn drain_new_stdout(&self) -> Vec<u8> {
+        let buf = self.stdout_buf.lock().unwrap();
+        let mut cur = self.stdout_cursor.lock().unwrap();
+        let slice = buf[*cur..].to_vec();
+        *cur = buf.len();
+        slice
+    }
+
+    pub fn drain_new_stderr(&self) -> Vec<u8> {
+        let buf = self.stderr_buf.lock().unwrap();
+        let mut cur = self.stderr_cursor.lock().unwrap();
+        let slice = buf[*cur..].to_vec();
+        *cur = buf.len();
+        slice
+    }
+
+    pub fn full_stdout(&self) -> Vec<u8> {
+        self.stdout_buf.lock().unwrap().clone()
+    }
+    pub fn full_stderr(&self) -> Vec<u8> {
+        self.stderr_buf.lock().unwrap().clone()
+    }
+    pub fn stdout_bytes(&self) -> usize {
+        self.stdout_buf.lock().unwrap().len()
+    }
+    pub fn stderr_bytes(&self) -> usize {
+        self.stderr_buf.lock().unwrap().len()
+    }
+    pub fn current_status(&self) -> JobStatus {
+        self.status.lock().unwrap().clone()
+    }
+
+    /// Block until terminal state or timeout. Returns true if completed.
+    pub fn wait(&self, timeout: Duration) -> bool {
+        let deadline = Instant::now() + timeout;
+        loop {
+            if self.current_status().is_terminal() { return true; }
+            if Instant::now() >= deadline { return false; }
+            thread::sleep(Duration::from_millis(150));
+        }
+    }
+
+    pub fn to_snapshot(&self) -> JobSnapshot {
+        let status = self.current_status();
+        JobSnapshot {
+            job_id:       self.job_id.clone(),
+            pid:          self.pid,
+            label:        self.label.clone(),
+            cmd:          self.cmd.clone(),
+            cwd:          self.cwd.display().to_string(),
+            started_secs: self.started_secs,
+            status:       status.as_snapshot_str().to_string(),
+            exit_code:    status.exit_code(),
+            log_path:     self.log_path.display().to_string(),
+        }
+    }
+}
+
+// ── JobStore ──────────────────────────────────────────────────────────────────
+
+pub struct JobStore {
+    jobs:        Mutex<HashMap<String, Arc<Job>>>,
+    counter:     AtomicUsize,
+    persistence: Arc<Persistence>,
+}
+
+impl JobStore {
+    #[allow(dead_code)]
+    pub fn new(persistence: Arc<Persistence>) -> Self {
+        Self {
+            jobs:        Mutex::new(HashMap::new()),
+            counter:     AtomicUsize::new(1),
+            persistence,
+        }
+    }
+
+    /// Restore jobs from the last saved session.
+    /// Running jobs that are still alive in /proc are re-attached.
+    /// Running jobs whose PIDs are gone are marked Done(-1).
+    pub fn restore(persistence: Arc<Persistence>) -> Self {
+        let data = persistence.load();
+        let counter_start = data.counter.max(1);
+
+        let store = Self {
+            jobs:        Mutex::new(HashMap::new()),
+            counter:     AtomicUsize::new(counter_start),
+            persistence: Arc::clone(&persistence),
+        };
+
+        for snap in data.jobs {
+            let was_running = snap.status == "running" || snap.status == "attached";
+
+            let (initial_status, should_poll) = if was_running {
+                let alive = std::path::Path::new(&format!("/proc/{}", snap.pid)).exists();
+                if alive {
+                    (JobStatus::Attached, true)
+                } else {
+                    (JobStatus::Done(-1), false)
+                }
+            } else if snap.status == "killed" {
+                (JobStatus::Killed, false)
+            } else {
+                (JobStatus::Done(snap.exit_code.unwrap_or(0)), false)
+            };
+
+            let status_arc = Arc::new(Mutex::new(initial_status));
+
+            if should_poll {
+                let status_t = Arc::clone(&status_arc);
+                let pid = snap.pid;
+                thread::spawn(move || {
+                    loop {
+                        thread::sleep(Duration::from_secs(1));
+                        {
+                            let s = status_t.lock().unwrap();
+                            if s.is_terminal() { break; }
+                        }
+                        if !std::path::Path::new(&format!("/proc/{pid}")).exists() {
+                            *status_t.lock().unwrap() = JobStatus::Done(-1);
+                            break;
+                        }
+                    }
+                });
+            }
+
+            let job = Arc::new(Job {
+                job_id:        snap.job_id.clone(),
+                pid:           snap.pid,
+                label:         snap.label,
+                cmd:           snap.cmd,
+                cwd:           PathBuf::from(snap.cwd),
+                status:        status_arc,
+                stdout_buf:    Arc::new(Mutex::new(Vec::new())),
+                stderr_buf:    Arc::new(Mutex::new(Vec::new())),
+                log_path:      PathBuf::from(snap.log_path),
+                stdout_cursor: Mutex::new(0),
+                stderr_cursor: Mutex::new(0),
+                started_secs:  snap.started_secs,
+                stdin_tx:      None,  // PTY master not restored across restarts
+                is_pty:        false,
+            });
+
+            store.jobs.lock().unwrap().insert(snap.job_id, job);
+        }
+
+        store
+    }
+
+    fn next_id(&self) -> String {
+        let n = self.counter.fetch_add(1, Ordering::Relaxed);
+        format!("j{n:04}")
+    }
+
+    /// Snapshot all jobs and save to disk. Called after mutations.
+    pub fn persist_all(&self) {
+        let jobs = self.jobs.lock().unwrap();
+        let counter = self.counter.load(Ordering::Relaxed);
+        let snapshots: Vec<JobSnapshot> = jobs.values().map(|j| j.to_snapshot()).collect();
+        self.persistence.save(&SessionData {
+            version: 1,
+            counter,
+            jobs: snapshots,
+        });
+    }
+
+    // ── spawn ─────────────────────────────────────────────────────────────────
+
+    pub fn spawn(
+        &self,
+        cmd: &str,
+        cwd: PathBuf,
+        label: Option<&str>,
+        extra_env: Vec<(String, String)>,
+    ) -> Result<Arc<Job>, String> {
+        let job_id   = self.next_id();
+        let label    = label.unwrap_or(cmd).to_string();
+        let log_path = log_path_for(&job_id);
+
+        let mut child = Command::new("/bin/sh")
+            .arg("-c")
+            .arg(cmd)
+            .current_dir(&cwd)
+            .envs(extra_env.iter().map(|(k, v)| (k.as_str(), v.as_str())))
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|e| format!("spawn failed: {e}"))?;
+
+        let pid         = child.id();
+        let stdout_pipe = child.stdout.take().unwrap();
+        let stderr_pipe = child.stderr.take().unwrap();
+
+        let started_secs = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+
+        let status     = Arc::new(Mutex::new(JobStatus::Running));
+        let stdout_buf = Arc::new(Mutex::new(Vec::<u8>::new()));
+        let stderr_buf = Arc::new(Mutex::new(Vec::<u8>::new()));
+
+        // Shared log file — both stdout and stderr threads write here.
+        let log_file: Arc<Mutex<Option<fs::File>>> = Arc::new(Mutex::new(
+            fs::OpenOptions::new()
+                .create(true).write(true).truncate(true)
+                .open(&log_path)
+                .ok()
+        ));
+
+        // ── stdout reader thread ──────────────────────────────────────────────
+        {
+            let buf_t = Arc::clone(&stdout_buf);
+            let log_t = Arc::clone(&log_file);
+            thread::spawn(move || {
+                let mut reader = std::io::BufReader::new(stdout_pipe);
+                let mut chunk  = [0u8; 8192];
+                loop {
+                    match reader.read(&mut chunk) {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => {
+                            let data = &chunk[..n];
+                            buf_t.lock().unwrap().extend_from_slice(data);
+                            if let Some(ref mut f) = *log_t.lock().unwrap() {
+                                let _ = f.write_all(data);
+                                let _ = f.flush();
+                            }
+                        }
+                    }
+                }
+            });
+        }
+
+        // ── stderr reader thread ──────────────────────────────────────────────
+        {
+            let buf_t = Arc::clone(&stderr_buf);
+            let log_t = Arc::clone(&log_file);
+            thread::spawn(move || {
+                let mut reader = std::io::BufReader::new(stderr_pipe);
+                let mut chunk  = [0u8; 8192];
+                loop {
+                    match reader.read(&mut chunk) {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => {
+                            let data = &chunk[..n];
+                            buf_t.lock().unwrap().extend_from_slice(data);
+                            if let Some(ref mut f) = *log_t.lock().unwrap() {
+                                let _ = f.write_all(data);
+                                let _ = f.flush();
+                            }
+                        }
+                    }
+                }
+            });
+        }
+
+        // ── waiter thread — marks job done, triggers persist ──────────────────
+        {
+            let status_t      = Arc::clone(&status);
+            let persistence_t = Arc::clone(&self.persistence);
+            let jobs_snapshot = {
+                Arc::clone(&self.persistence)
+            };
+            let _job_id_t = job_id.clone();
+            let _ = jobs_snapshot; // unused, drop
+            let _ = persistence_t; // unused — see below
+            thread::spawn(move || {
+                let code = match child.wait() {
+                    Ok(exit) => exit.code().unwrap_or(-1),
+                    Err(_)   => -1,
+                };
+                *status_t.lock().unwrap() = JobStatus::Done(code);
+                // Note: full persist_all is triggered by the next tool call that
+                // reads this job's status. See query.rs bg_status / bg_list.
+            });
+        }
+
+        let job = Arc::new(Job {
+            job_id:        job_id.clone(),
+            pid,
+            label,
+            cmd:           cmd.to_string(),
+            cwd,
+            status,
+            stdout_buf,
+            stderr_buf,
+            log_path,
+            stdout_cursor: Mutex::new(0),
+            stderr_cursor: Mutex::new(0),
+            started_secs,
+            stdin_tx:      None,
+            is_pty:        false,
+        });
+
+        self.jobs.lock().unwrap().insert(job_id, Arc::clone(&job));
+        self.persist_all();
+        Ok(job)
+    }
+
+    // ── spawn_pty ─────────────────────────────────────────────────────────────
+
+    /// Spawn a command in a pseudo-terminal. Stdout+stderr come through the PTY
+    /// master (merged). Write to the returned job's stdin_tx to send input.
+    pub fn spawn_pty(
+        &self,
+        cmd: &str,
+        cwd: PathBuf,
+        label: Option<&str>,
+        extra_env: Vec<(String, String)>,
+    ) -> Result<Arc<Job>, String> {
+        let job_id   = self.next_id();
+        let label    = label.unwrap_or(cmd).to_string();
+        let log_path = crate::persist::log_path_for(&job_id);
+
+        // Open PTY master + slave via POSIX API (no libutil needed).
+        let (master_raw, slave_raw) = unsafe { open_pty() }?;
+
+        // Dup slave for stdin/stdout/stderr; Stdio::from_raw_fd takes ownership.
+        let slave_in  = unsafe { libc::dup(slave_raw) };
+        let slave_out = unsafe { libc::dup(slave_raw) };
+        let slave_err = unsafe { libc::dup(slave_raw) };
+        if slave_in < 0 || slave_out < 0 || slave_err < 0 {
+            unsafe { libc::close(master_raw); libc::close(slave_raw); }
+            return Err(format!("spawn_pty: dup slave fd: {}", std::io::Error::last_os_error()));
+        }
+        // Close the original slave in the parent after dup.
+        unsafe { libc::close(slave_raw); }
+
+        let mut cmd_builder = Command::new("/bin/sh");
+        cmd_builder
+            .arg("-c")
+            .arg(cmd)
+            .current_dir(&cwd)
+            .envs(extra_env.iter().map(|(k, v)| (k.as_str(), v.as_str())))
+            .stdin(unsafe  { Stdio::from_raw_fd(slave_in) })
+            .stdout(unsafe { Stdio::from_raw_fd(slave_out) })
+            .stderr(unsafe { Stdio::from_raw_fd(slave_err) });
+
+        unsafe {
+            cmd_builder.pre_exec(move || {
+                // New session — fd 0 becomes controlling terminal.
+                libc::setsid();
+                libc::ioctl(0, libc::TIOCSCTTY, 0i32);
+                Ok(())
+            });
+        }
+
+        let child = cmd_builder.spawn().map_err(|e| format!("spawn_pty failed: {e}"))?;
+        let pid = child.id();
+
+        let started_secs = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+
+        let status     = Arc::new(Mutex::new(JobStatus::Running));
+        let stdout_buf = Arc::new(Mutex::new(Vec::<u8>::new()));
+
+        // PTY master: clone for reading output, keep original for writing input.
+        let master_read  = unsafe { std::fs::File::from_raw_fd(master_raw) };
+        let master_write = master_read.try_clone().map_err(|e| format!("clone pty master: {e}"))?;
+        let master_tx    = Arc::new(Mutex::new(master_write));
+
+        let log_file: Arc<Mutex<Option<fs::File>>> = Arc::new(Mutex::new(
+            fs::OpenOptions::new()
+                .create(true).write(true).truncate(true)
+                .open(&log_path)
+                .ok()
+        ));
+
+        // ── PTY reader thread — reads master, feeds stdout_buf + log ─────────
+        {
+            let buf_t = Arc::clone(&stdout_buf);
+            let log_t = Arc::clone(&log_file);
+            thread::spawn(move || {
+                use std::io::Read;
+                let mut reader = std::io::BufReader::new(master_read);
+                let mut chunk  = [0u8; 8192];
+                loop {
+                    match reader.read(&mut chunk) {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => {
+                            let data = &chunk[..n];
+                            buf_t.lock().unwrap().extend_from_slice(data);
+                            if let Some(ref mut f) = *log_t.lock().unwrap() {
+                                let _ = f.write_all(data);
+                                let _ = f.flush();
+                            }
+                        }
+                    }
+                }
+            });
+        }
+
+        // ── waiter thread ────────────────────────────────────────────────────
+        {
+            let status_t = Arc::clone(&status);
+            let mut child = child;
+            thread::spawn(move || {
+                let code = match child.wait() {
+                    Ok(exit) => exit.code().unwrap_or(-1),
+                    Err(_)   => -1,
+                };
+                *status_t.lock().unwrap() = JobStatus::Done(code);
+            });
+        }
+
+        let job = Arc::new(Job {
+            job_id:        job_id.clone(),
+            pid,
+            label,
+            cmd:           cmd.to_string(),
+            cwd,
+            status,
+            stdout_buf,
+            stderr_buf:    Arc::new(Mutex::new(Vec::new())), // PTY merges stderr into stdout
+            log_path,
+            stdout_cursor: Mutex::new(0),
+            stderr_cursor: Mutex::new(0),
+            started_secs,
+            stdin_tx:      Some(master_tx),
+            is_pty:        true,
+        });
+
+        self.jobs.lock().unwrap().insert(job_id, Arc::clone(&job));
+        self.persist_all();
+        Ok(job)
+    }
+
+    // ── attach ────────────────────────────────────────────────────────────────
+
+    pub fn attach(&self, pid: u32, label: Option<&str>) -> Result<Arc<Job>, String> {
+        if !std::path::Path::new(&format!("/proc/{pid}")).exists() {
+            return Err(format!("PID {pid} not found — is it still running?"));
+        }
+
+        let job_id = self.next_id();
+        let label  = label.unwrap_or(&format!("pid {pid}")).to_string();
+        let log_path = log_path_for(&job_id);
+
+        let started_secs = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+
+        let status = Arc::new(Mutex::new(JobStatus::Attached));
+        {
+            let status_t = Arc::clone(&status);
+            thread::spawn(move || {
+                loop {
+                    thread::sleep(Duration::from_secs(1));
+                    {
+                        let s = status_t.lock().unwrap();
+                        if s.is_terminal() { break; }
+                    }
+                    if !std::path::Path::new(&format!("/proc/{pid}")).exists() {
+                        *status_t.lock().unwrap() = JobStatus::Done(-1);
+                        break;
+                    }
+                }
+            });
+        }
+
+        let job = Arc::new(Job {
+            job_id:        job_id.clone(),
+            pid,
+            label,
+            cmd:           format!("<attached pid {pid}>"),
+            cwd:           PathBuf::from("/"),
+            status,
+            stdout_buf:    Arc::new(Mutex::new(Vec::new())),
+            stderr_buf:    Arc::new(Mutex::new(Vec::new())),
+            log_path,
+            stdout_cursor: Mutex::new(0),
+            stderr_cursor: Mutex::new(0),
+            started_secs,
+            stdin_tx:      None,
+            is_pty:        false,
+        });
+
+        self.jobs.lock().unwrap().insert(job_id, Arc::clone(&job));
+        self.persist_all();
+        Ok(job)
+    }
+
+    // ── lookup ────────────────────────────────────────────────────────────────
+
+    pub fn get(&self, job_id: &str) -> Option<Arc<Job>> {
+        self.jobs.lock().unwrap().get(job_id).cloned()
+    }
+
+    pub fn all(&self) -> Vec<Arc<Job>> {
+        let mut jobs: Vec<Arc<Job>> = self.jobs.lock().unwrap().values().cloned().collect();
+        jobs.sort_by_key(|j| j.started_secs);
+        jobs
+    }
+
+    #[allow(dead_code)]
+    pub fn remove_job(&self, job_id: &str) -> bool {
+        let removed = self.jobs.lock().unwrap().remove(job_id).is_some();
+        if removed { self.persist_all(); }
+        removed
+    }
+}
+
+// ── PTY helpers ───────────────────────────────────────────────────────────────
+
+/// Open a pseudo-terminal pair using POSIX APIs (no libutil/openpty needed).
+/// Returns (master_fd, slave_fd).
+unsafe fn open_pty() -> Result<(i32, i32), String> {
+    let master = libc::posix_openpt(libc::O_RDWR | libc::O_NOCTTY);
+    if master < 0 {
+        return Err(format!("posix_openpt: {}", std::io::Error::last_os_error()));
+    }
+    if libc::grantpt(master) < 0 {
+        libc::close(master);
+        return Err(format!("grantpt: {}", std::io::Error::last_os_error()));
+    }
+    if libc::unlockpt(master) < 0 {
+        libc::close(master);
+        return Err(format!("unlockpt: {}", std::io::Error::last_os_error()));
+    }
+
+    // ptsname_r: Linux-specific but safe
+    let mut name_buf = [0i8; 256];
+    if libc::ptsname_r(master, name_buf.as_mut_ptr(), name_buf.len()) < 0 {
+        libc::close(master);
+        return Err(format!("ptsname_r: {}", std::io::Error::last_os_error()));
+    }
+
+    let slave_path = std::ffi::CStr::from_ptr(name_buf.as_ptr());
+    let slave = libc::open(slave_path.as_ptr(), libc::O_RDWR | libc::O_NOCTTY);
+    if slave < 0 {
+        libc::close(master);
+        return Err(format!("open slave pty: {}", std::io::Error::last_os_error()));
+    }
+
+    Ok((master, slave))
+}

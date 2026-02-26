@@ -7,6 +7,10 @@ use std::io::{BufRead, Write};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
+use crate::job_store::JobStore;
+use crate::pipeline::PipelineStore;
+use crate::persist::Persistence;
+
 use serde_json::{json, Value};
 
 use crate::protocol::{ERR_INTERNAL, ERR_PARSE, InboundMessage, Response, ToolResult};
@@ -69,12 +73,21 @@ impl Default for ServerState {
 }
 
 pub struct McpServer {
-    pub state: Arc<Mutex<ServerState>>,
+    pub state:     Arc<Mutex<ServerState>>,
+    pub store:     Arc<JobStore>,
+    pub pipelines: Arc<PipelineStore>,
 }
 
 impl McpServer {
     pub fn new() -> Self {
-        Self { state: Arc::new(Mutex::new(ServerState::default())) }
+        let persistence = Arc::new(Persistence::new());
+        let store       = Arc::new(JobStore::restore(Arc::clone(&persistence)));
+        let pipelines   = Arc::new(PipelineStore::new(Arc::clone(&store)));
+        Self {
+            state:     Arc::new(Mutex::new(ServerState::default())),
+            store,
+            pipelines,
+        }
     }
 
     /// Run the stdio event loop until stdin closes.
@@ -96,6 +109,8 @@ impl McpServer {
             }
         }
 
+        self.store.persist_all();
+        std::thread::sleep(std::time::Duration::from_millis(150));
         Ok(())
     }
 
@@ -238,10 +253,27 @@ impl McpServer {
             "fpga_boards"         => tools::eda::fpga_boards(args),
             "fpga_program"        => tools::eda::fpga_program(args),
             "waveform_query"      => tools::eda::waveform_query(args),
+            "synth_report"        => tools::eda::synth_report(args),
             "fpga_serial"         => tools::eda::fpga_serial(args),
             "fpga_tcfp_status"    => tools::eda::fpga_tcfp_status(args),
             "fpga_tcfp_tile_read" => tools::eda::fpga_tcfp_tile_read(args),
-            _                     => Err(format!("unknown tool: {name}")),
+            // Background process orchestration
+            "bg_spawn"         => tools::bg_spawn::bg_spawn(args, &self.store),
+            "bg_attach"        => tools::bg_spawn::bg_attach(args, &self.store),
+            "bg_send"          => tools::bg_interact::bg_send(args, &self.store),
+            "bg_status"        => tools::bg_query::bg_status(args, &self.store),
+            "bg_wait"          => tools::bg_query::bg_wait(args, &self.store),
+            "bg_tail"          => tools::bg_query::bg_tail(args, &self.store),
+            "bg_list"          => tools::bg_query::bg_list(args, &self.store),
+            "wait_for_pattern" => tools::bg_query::wait_for_pattern(args, &self.store),
+            "wait_for_idle"    => tools::bg_query::wait_for_idle(args, &self.store),
+            "output_summary"   => tools::bg_query::output_summary(args, &self.store),
+            "bg_kill"          => tools::bg_control::bg_kill(args, &self.store),
+            "pipeline_run"     => tools::bg_pipeline::pipeline_run(args, &self.pipelines),
+            "pipeline_status"  => tools::bg_pipeline::pipeline_status(args, &self.pipelines),
+            "pipeline_cancel"  => tools::bg_pipeline::pipeline_cancel(args, &self.pipelines),
+            "live_window"      => tools::bg_window::live_window(args, &self.store),
+            _                  => Err(format!("unknown tool: {name}")),
         }
     }
 }

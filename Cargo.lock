@@ -322,6 +322,8 @@ name = "shell-mcp"
 version = "0.1.0"
 dependencies = [
  "glob",
+ "libc",
+ "nix",
  "regex",
  "serde",
  "serde_json",

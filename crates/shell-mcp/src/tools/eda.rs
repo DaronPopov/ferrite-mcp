@@ -521,6 +521,276 @@ close_hw_manager
     })))
 }
 
+// ── synth_report ──────────────────────────────────────────────────────────────
+
+/// Parse Vivado timing_summary.rpt and utilization.rpt into structured JSON.
+/// Auto-locates report files under a project directory, or accepts explicit paths.
+pub fn synth_report(args: &Value) -> Result<ToolResult, String> {
+    let project_dir    = args["project_dir"].as_str();
+    let timing_rpt     = args["timing_rpt"].as_str();
+    let utilization_rpt = args["utilization_rpt"].as_str();
+
+    // Resolve report paths
+    let timing_path = if let Some(p) = timing_rpt {
+        Some(PathBuf::from(p))
+    } else if let Some(dir) = project_dir {
+        find_report(dir, "timing_summary")
+    } else {
+        None
+    };
+
+    let util_path = if let Some(p) = utilization_rpt {
+        Some(PathBuf::from(p))
+    } else if let Some(dir) = project_dir {
+        find_report(dir, "utilization")
+    } else {
+        None
+    };
+
+    if timing_path.is_none() && util_path.is_none() {
+        return Err("synth_report: provide 'project_dir', 'timing_rpt', or 'utilization_rpt'".into());
+    }
+
+    let timing_result = timing_path.as_ref().map(|p| {
+        std::fs::read_to_string(p)
+            .map(|content| parse_timing_report(&content))
+            .unwrap_or_else(|e| json!({ "error": format!("read timing rpt: {e}") }))
+    });
+
+    let util_result = util_path.as_ref().map(|p| {
+        std::fs::read_to_string(p)
+            .map(|content| parse_utilization_report(&content))
+            .unwrap_or_else(|e| json!({ "error": format!("read utilization rpt: {e}") }))
+    });
+
+    Ok(ToolResult::json(&json!({
+        "timing_report":     timing_result,
+        "utilization_report": util_result,
+        "timing_rpt_path":   timing_path.map(|p| p.display().to_string()),
+        "util_rpt_path":     util_path.map(|p| p.display().to_string()),
+    })))
+}
+
+/// Walk <project_dir>/**/runs/**/ looking for a .rpt file whose name contains `keyword`.
+fn find_report(project_dir: &str, keyword: &str) -> Option<PathBuf> {
+    let root = Path::new(project_dir);
+    find_rpt_recursive(root, keyword)
+}
+
+fn find_rpt_recursive(dir: &Path, keyword: &str) -> Option<PathBuf> {
+    let entries = std::fs::read_dir(dir).ok()?;
+    let mut best: Option<PathBuf> = None;
+    for entry in entries.filter_map(|e| e.ok()) {
+        let path = entry.path();
+        if path.is_dir() {
+            if let Some(p) = find_rpt_recursive(&path, keyword) {
+                // Prefer deeper/newer — take most-recently-modified
+                match &best {
+                    None => best = Some(p),
+                    Some(prev) => {
+                        let p_time = std::fs::metadata(&p).and_then(|m| m.modified()).ok();
+                        let prev_time = std::fs::metadata(prev).and_then(|m| m.modified()).ok();
+                        if p_time > prev_time { best = Some(p); }
+                    }
+                }
+            }
+        } else if path.extension().map(|e| e == "rpt").unwrap_or(false) {
+            let fname = path.file_name().unwrap_or_default().to_string_lossy().to_lowercase();
+            if fname.contains(keyword) {
+                match &best {
+                    None => best = Some(path),
+                    Some(prev) => {
+                        let p_time = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
+                        let prev_time = std::fs::metadata(prev).and_then(|m| m.modified()).ok();
+                        if p_time > prev_time { best = Some(path); }
+                    }
+                }
+            }
+        }
+    }
+    best
+}
+
+/// Parse a Vivado timing_summary.rpt. Extracts:
+///   - WNS (worst negative slack), TNS, failing endpoints per path group
+///   - Setup/hold summary table rows
+fn parse_timing_report(content: &str) -> Value {
+    let mut wns: Option<f64>  = None;
+    let mut tns: Option<f64>  = None;
+    let mut whs: Option<f64>  = None;
+    let mut ths: Option<f64>  = None;
+    let mut failing_endpoints: Option<i64> = None;
+    let mut timing_met = false;
+    let mut path_groups: Vec<Value> = Vec::new();
+
+    // Parse the Design Timing Summary table
+    // Line pattern: "  WNS(ns)  TNS(ns) TNS Failing Endpoints  ..."
+    // Followed by data lines like: "  -2.345  -45.678           12  ..."
+    let mut in_summary_data = false;
+
+    for line in content.lines() {
+        let t = line.trim();
+
+        // "All user specified timing constraints are met." or similar
+        if t.contains("All user specified timing constraints are met") {
+            timing_met = true;
+        }
+        if t.contains("timing constraints are not met") || t.contains("WNS is negative") {
+            timing_met = false;
+        }
+
+        // Header detection for the summary table
+        if t.contains("WNS(ns)") && t.contains("TNS(ns)") {
+            in_summary_data = true;
+            continue;
+        }
+        // Separator rows
+        if in_summary_data && (t.starts_with("---") || t.is_empty()) {
+            if t.is_empty() && wns.is_some() { in_summary_data = false; }
+            continue;
+        }
+
+        if in_summary_data {
+            let cols: Vec<&str> = t.split_whitespace().collect();
+            // WNS TNS TNS_failing_eps WHS THS THS_failing_eps WPWS TPWS ...
+            if cols.len() >= 6 {
+                if wns.is_none() {
+                    wns = cols[0].parse().ok();
+                    tns = cols[1].parse().ok();
+                    failing_endpoints = cols[2].parse().ok();
+                    whs = cols[3].parse().ok();
+                    ths = cols[4].parse().ok();
+                }
+            }
+        }
+
+        // Path group lines: "| clk_BUFG     | -2.345 |   -45.68 |      12 | ..."
+        if t.starts_with('|') && !t.contains("Path Group") && !t.contains("---") {
+            let cols: Vec<&str> = t.split('|').map(|s| s.trim()).filter(|s| !s.is_empty()).collect();
+            if cols.len() >= 4 {
+                let name = cols[0];
+                if !name.is_empty() && !name.contains("WNS") {
+                    let pg_wns: Option<f64> = cols.get(1).and_then(|s| s.parse().ok());
+                    let pg_tns: Option<f64> = cols.get(2).and_then(|s| s.parse().ok());
+                    let pg_fail: Option<i64> = cols.get(3).and_then(|s| s.parse().ok());
+                    if pg_wns.is_some() || pg_tns.is_some() {
+                        path_groups.push(json!({
+                            "path_group":        name,
+                            "wns_ns":            pg_wns,
+                            "tns_ns":            pg_tns,
+                            "failing_endpoints": pg_fail,
+                        }));
+                    }
+                }
+            }
+        }
+    }
+
+    // Infer timing_met if not explicitly stated
+    if wns.is_none() && tns.is_none() {
+        timing_met = false;
+    } else if wns.map(|v| v >= 0.0).unwrap_or(false) {
+        timing_met = true;
+    }
+
+    json!({
+        "timing_met":         timing_met,
+        "wns_ns":             wns,
+        "tns_ns":             tns,
+        "failing_endpoints":  failing_endpoints.unwrap_or(0),
+        "whs_ns":             whs,
+        "ths_ns":             ths,
+        "path_groups":        path_groups,
+    })
+}
+
+/// Parse a Vivado utilization.rpt. Extracts:
+///   - LUT count + total + utilization %
+///   - FF (Flip-Flop) count + utilization %
+///   - BRAM (36K + 18K) count + %
+///   - DSP48 count + %
+///   - URAM, CARRY, IO counts
+fn parse_utilization_report(content: &str) -> Value {
+    let mut sections: HashMap<&str, (i64, i64, f64)> = HashMap::new(); // name → (used, total, pct)
+
+    // The Slice Logic table looks like:
+    // | Site Type               | Used | Fixed | Prohibited | Available | Util% |
+    // |-------------------------|------|-------|------------|-----------|-------|
+    // | Slice LUTs*             | 1234 |     0 |          0 |     20800 |  5.94 |
+    // | Slice Registers         | 2345 |     0 |          0 |     41600 |  5.64 |
+
+    let mut in_table = false;
+    for line in content.lines() {
+        let t = line.trim();
+        if t.starts_with("+-") || t.starts_with("|--") || t.starts_with("|Site") {
+            in_table = true;
+            continue;
+        }
+        if t.is_empty() || (t.starts_with('+') && !t.starts_with("+-")) {
+            if in_table && t.is_empty() { in_table = false; }
+            continue;
+        }
+        if !in_table || !t.starts_with('|') { continue; }
+
+        let cols: Vec<&str> = t.split('|').map(|s| s.trim()).filter(|s| !s.is_empty()).collect();
+        if cols.len() < 5 { continue; }
+
+        let name = cols[0];
+        let used_str = cols[1].replace(',', "");
+        let avail_str = cols.get(4).unwrap_or(&"0").replace(',', "");
+        let pct_str  = cols.get(5).unwrap_or(&"0").replace(',', "");
+
+        let used:  i64 = used_str.parse().unwrap_or(0);
+        let avail: i64 = avail_str.parse().unwrap_or(0);
+        let pct:   f64 = pct_str.parse().unwrap_or(0.0);
+
+        // Map Vivado row names to canonical keys
+        let key: Option<&str> = if name.contains("Slice LUT") || name.contains("LUT as Logic") {
+            Some("lut")
+        } else if name.contains("Slice Register") || name.contains("Register as Flip Flop") {
+            Some("ff")
+        } else if name.contains("Block RAM Tile") || name.contains("Block RAM") && !name.contains("18K") {
+            Some("bram36")
+        } else if name.contains("RAMB18") || name.contains("18K") {
+            Some("bram18")
+        } else if name.contains("DSP48") || name.contains("DSPs") {
+            Some("dsp")
+        } else if name.contains("URAM") {
+            Some("uram")
+        } else if name.contains("CARRY") {
+            Some("carry")
+        } else if name.contains("Bonded IOB") || (name.contains("IO ") && !name.contains("BUF")) {
+            Some("io")
+        } else {
+            None
+        };
+
+        if let Some(k) = key {
+            sections.entry(k).or_insert((used, avail, pct));
+        }
+    }
+
+    let get = |k: &str| -> Value {
+        if let Some((used, avail, pct)) = sections.get(k) {
+            json!({ "used": used, "available": avail, "utilization_pct": pct })
+        } else {
+            json!(null)
+        }
+    };
+
+    // Timing met field from utilization: not present, omit
+    json!({
+        "lut":    get("lut"),
+        "ff":     get("ff"),
+        "bram36": get("bram36"),
+        "bram18": get("bram18"),
+        "dsp":    get("dsp"),
+        "uram":   get("uram"),
+        "carry":  get("carry"),
+        "io":     get("io"),
+    })
+}
+
 // ── waveform_query ────────────────────────────────────────────────────────────
 
 /// Parse a VCD waveform dump. Returns signal definitions and value-change events.

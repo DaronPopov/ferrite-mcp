@@ -1,3 +1,9 @@
+pub mod bg_control;
+pub mod bg_interact;
+pub mod bg_pipeline;
+pub mod bg_query;
+pub mod bg_spawn;
+pub mod bg_window;
 pub mod binary;
 pub mod code;
 pub mod debug;
@@ -765,6 +771,23 @@ pub fn all_tool_definitions() -> Vec<ToolDef> {
             }),
         },
 
+        ToolDef {
+            name: "synth_report",
+            description: "Parse Vivado synthesis/implementation report files and return structured \
+                           timing and utilization data. Extracts WNS, TNS, failing endpoints from \
+                           timing_summary.rpt and LUT%, FF%, BRAM, DSP counts from utilization.rpt. \
+                           Pass a project directory and tether will auto-locate the report files, \
+                           or specify explicit file paths.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "project_dir":    { "type": "string", "description": "Vivado project directory — auto-locates .rpt files under runs/" },
+                    "timing_rpt":     { "type": "string", "description": "Explicit path to timing_summary.rpt (overrides project_dir search)" },
+                    "utilization_rpt":{ "type": "string", "description": "Explicit path to utilization.rpt (overrides project_dir search)" }
+                }
+            }),
+        },
+
         // ── FPGA serial / TCFP observation ────────────────────────────────────
         ToolDef {
             name: "fpga_serial",
@@ -847,6 +870,244 @@ pub fn all_tool_definitions() -> Vec<ToolDef> {
                     },
                     "port": { "type": "string",  "description": "Serial port (default: auto-detect)" },
                     "baud": { "type": "integer", "description": "Baud rate (default: 921600)" }
+                }
+            }),
+        },
+
+        // ── Background process orchestration ──────────────────────────────────
+        ToolDef {
+            name: "bg_spawn",
+            description: "Spawn a shell command in the background. Returns a job_id immediately — \
+                the process runs while you continue other work. Output is buffered and persisted to \
+                ~/.local/share/cream/logs/. Use bg_status to poll, bg_wait to block, \
+                wait_for_pattern to watch for events, or live_window for a live terminal view.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "cmd":   { "type": "string",  "description": "Shell command to run (passed to /bin/sh -c)" },
+                    "cwd":   { "type": "string",  "description": "Working directory" },
+                    "label": { "type": "string",  "description": "Human-readable label for bg_list (default: the command)" },
+                    "env": {
+                        "type": "object",
+                        "description": "Extra environment variables",
+                        "additionalProperties": { "type": "string" }
+                    },
+                    "pty": { "type": "boolean", "description": "Spawn in a pseudo-terminal (PTY). Required for interactive programs (Vivado, Python REPL, GDB). Enables bg_send for stdin. (default: false)" }
+                },
+                "required": ["cmd"]
+            }),
+        },
+        ToolDef {
+            name: "bg_attach",
+            description: "Attach to an existing running process by PID. Tracks it via /proc so \
+                bg_status can tell you when it finishes. Output is not captured (use bg_spawn for that).",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "pid":   { "type": "integer", "description": "PID of the running process" },
+                    "label": { "type": "string",  "description": "Human-readable label" }
+                },
+                "required": ["pid"]
+            }),
+        },
+        ToolDef {
+            name: "bg_send",
+            description: "Send text to the stdin of a PTY job (spawned with pty:true). \
+                Use this to interact with Vivado, Python REPLs, GDB, or any interactive process. \
+                Each call writes the text (and an optional trailing newline) to the process's terminal. \
+                Use bg_status to read the response.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "job_id":  { "type": "string",  "description": "Job ID of a PTY-spawned job" },
+                    "text":    { "type": "string",  "description": "Text to send (e.g. a command string)" },
+                    "newline": { "type": "boolean", "description": "Append a newline if text doesn't end with one (default: true)" }
+                },
+                "required": ["job_id", "text"]
+            }),
+        },
+        ToolDef {
+            name: "bg_status",
+            description: "Poll a background job for new output since the last bg_status call \
+                (cursor-based — each call advances the read cursor). Pass from_start: true to \
+                read all output from the beginning.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "job_id":     { "type": "string",  "description": "Job ID from bg_spawn or bg_attach" },
+                    "from_start": { "type": "boolean", "description": "Return all output from byte 0 (default: false)" }
+                },
+                "required": ["job_id"]
+            }),
+        },
+        ToolDef {
+            name: "bg_wait",
+            description: "Block until a background job completes or times out. Returns the full \
+                stdout and stderr. Ideal for handing off a long task and picking up the result.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "job_id":       { "type": "string",  "description": "Job ID to wait on" },
+                    "timeout_secs": { "type": "integer", "description": "Max seconds to wait (default: 3600)" }
+                },
+                "required": ["job_id"]
+            }),
+        },
+        ToolDef {
+            name: "bg_tail",
+            description: "Get the last N lines of a job's combined output log (stdout+stderr \
+                interleaved). Safe to call at any time — does not advance the bg_status cursor.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "job_id": { "type": "string",  "description": "Job ID to read from" },
+                    "lines":  { "type": "integer", "description": "Number of lines from the end (default: 50)" }
+                },
+                "required": ["job_id"]
+            }),
+        },
+        ToolDef {
+            name: "bg_list",
+            description: "List all background jobs — running, done, and killed. \
+                Shows job_id, pid, label, status, elapsed time, output byte counts. \
+                Jobs persist across cream restarts.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {}
+            }),
+        },
+        ToolDef {
+            name: "wait_for_pattern",
+            description: "Block until a regex pattern appears in a job's output, or timeout. \
+                Much more efficient than polling bg_status in a loop. Great for 'wait until \
+                server is listening', 'wait until build hits an error', etc. \
+                Checks stdout and stderr by default.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "job_id":         { "type": "string",  "description": "Job ID to watch" },
+                    "pattern":        { "type": "string",  "description": "Regex pattern to match against output lines" },
+                    "timeout_secs":   { "type": "integer", "description": "Max seconds to wait (default: 60)" },
+                    "from_cursor":    { "type": "boolean", "description": "Search only output newer than the bg_status cursor (default: false — searches from start)" },
+                    "include_stderr": { "type": "boolean", "description": "Also search stderr (default: true)" }
+                },
+                "required": ["job_id", "pattern"]
+            }),
+        },
+        ToolDef {
+            name: "wait_for_idle",
+            description: "Block until a job's output has been quiet for idle_secs seconds, \
+                or the job ends, or timeout. Useful when a build/process 'pauses' to indicate \
+                it's done with a phase — more reliable than a fixed sleep.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "job_id":       { "type": "string",  "description": "Job ID to watch" },
+                    "idle_secs":    { "type": "integer", "description": "Seconds of silence before returning (default: 2)" },
+                    "timeout_secs": { "type": "integer", "description": "Max total seconds to wait (default: 300)" }
+                },
+                "required": ["job_id"]
+            }),
+        },
+        ToolDef {
+            name: "output_summary",
+            description: "Summarise a job's output without returning the full log. \
+                Returns: all error lines, all warning lines (capped), the first N lines (head), \
+                and the last N lines (tail). Use this instead of bg_wait when the log could be \
+                large — prevents context window blowout from verbose build tools or training logs.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "job_id":        { "type": "string",  "description": "Job ID to summarise" },
+                    "head_lines":    { "type": "integer", "description": "Lines to include from the start (default: 20)" },
+                    "tail_lines":    { "type": "integer", "description": "Lines to include from the end (default: 30)" },
+                    "error_pattern": { "type": "string",  "description": "Regex for error lines (default: error|fatal|panic|failed|traceback|exception)" },
+                    "warn_pattern":  { "type": "string",  "description": "Regex for warning lines (default: warning|warn|deprecated)" }
+                },
+                "required": ["job_id"]
+            }),
+        },
+        ToolDef {
+            name: "bg_kill",
+            description: "Kill a background job. Sends SIGTERM by default; SIGKILL for force-kill.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "job_id": { "type": "string", "description": "Job ID to kill" },
+                    "signal": { "type": "string", "description": "\"TERM\" (default) or \"KILL\"", "enum": ["TERM", "KILL"] }
+                },
+                "required": ["job_id"]
+            }),
+        },
+        ToolDef {
+            name: "pipeline_run",
+            description: "Run a DAG of shell commands as a pipeline. Steps with no unmet \
+                dependencies start immediately (in parallel where possible). Dependent steps \
+                wait for their predecessors. Returns a pipeline_id immediately — use \
+                pipeline_status to track progress.\n\nExample: build → [test, bench] → deploy",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "steps": {
+                        "type": "array",
+                        "description": "Ordered list of pipeline steps",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "id":         { "type": "string", "description": "Unique step identifier (e.g. 'build', 'test')" },
+                                "cmd":        { "type": "string", "description": "Shell command for this step" },
+                                "label":      { "type": "string", "description": "Human-readable label" },
+                                "cwd":        { "type": "string", "description": "Working directory override for this step" },
+                                "depends_on": {
+                                    "type": "array",
+                                    "items": { "type": "string" },
+                                    "description": "Step IDs that must succeed before this step runs"
+                                }
+                            },
+                            "required": ["id", "cmd"]
+                        }
+                    },
+                    "cwd":             { "type": "string",  "description": "Default working directory for all steps" },
+                    "label":           { "type": "string",  "description": "Human-readable pipeline label" },
+                    "stop_on_failure": { "type": "boolean", "description": "Cancel remaining steps if any step fails (default: true)" }
+                },
+                "required": ["steps"]
+            }),
+        },
+        ToolDef {
+            name: "pipeline_status",
+            description: "Check the status of a running or completed pipeline. Returns per-step \
+                status, exit codes, associated job IDs, and an overall summary.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "pipeline_id": { "type": "string", "description": "Pipeline ID from pipeline_run" }
+                },
+                "required": ["pipeline_id"]
+            }),
+        },
+        ToolDef {
+            name: "pipeline_cancel",
+            description: "Cancel a running pipeline. Kills all currently running step jobs \
+                and marks pending steps as skipped.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "pipeline_id": { "type": "string", "description": "Pipeline ID to cancel" }
+                },
+                "required": ["pipeline_id"]
+            }),
+        },
+        ToolDef {
+            name: "live_window",
+            description: "Open a kitty terminal showing live output from a background job \
+                (tail -f on the persistent log file). If no job_id is given, opens a cream \
+                interactive shell so you can watch cream commands in real time.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "job_id": { "type": "string", "description": "Job ID to stream (omit for cream shell)" },
+                    "title":  { "type": "string", "description": "Window title override" }
                 }
             }),
         },
