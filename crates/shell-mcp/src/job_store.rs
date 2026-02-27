@@ -166,9 +166,24 @@ impl JobStore {
         }
     }
 
+    /// Return the Unix timestamp of the most recent system boot by reading
+    /// /proc/uptime. Returns 0 on failure (safe: all jobs will appear pre-boot).
+    fn boot_time_secs() -> u64 {
+        let uptime_secs = std::fs::read_to_string("/proc/uptime")
+            .ok()
+            .and_then(|s| s.split_whitespace().next()?.parse::<f64>().ok())
+            .unwrap_or(0.0) as u64;
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        now.saturating_sub(uptime_secs)
+    }
+
     /// Restore jobs from the last saved session.
-    /// Running jobs that are still alive in /proc are re-attached.
-    /// Running jobs whose PIDs are gone are marked Done(-1).
+    /// Running jobs that are still alive in /proc AND started after the last
+    /// boot are re-attached.  Jobs that pre-date the current boot are always
+    /// marked Done(-1) — their PIDs may have been recycled by the OS.
     pub fn restore(persistence: Arc<Persistence>) -> Self {
         let data = persistence.load();
         let counter_start = data.counter.max(1);
@@ -179,11 +194,17 @@ impl JobStore {
             persistence: Arc::clone(&persistence),
         };
 
+        let boot_time = Self::boot_time_secs();
+
         for snap in data.jobs {
             let was_running = snap.status == "running" || snap.status == "attached";
 
             let (initial_status, should_poll) = if was_running {
-                let alive = std::path::Path::new(&format!("/proc/{}", snap.pid)).exists();
+                // If the job started before this boot, the PID is stale —
+                // the OS may have recycled it for a completely unrelated process.
+                let started_this_boot = snap.started_secs >= boot_time;
+                let alive = started_this_boot
+                    && std::path::Path::new(&format!("/proc/{}", snap.pid)).exists();
                 if alive {
                     (JobStatus::Attached, true)
                 } else {
