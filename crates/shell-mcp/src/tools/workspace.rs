@@ -27,28 +27,40 @@ pub fn orient(args: &Value, state: &Arc<Mutex<ServerState>>) -> Result<ToolResul
     let recent_window = args["since"].as_str().unwrap_or("2h");
     let tree_depth   = args["depth"].as_u64().unwrap_or(2) as u64;
 
-    // ── git status ────────────────────────────────────────────────────────────
+    // ── git status (cap untracked to avoid blowup on dirty repos) ─────────────
     let git_val = match git::git_status(&json!({ "path": path })) {
-        Ok(tr) => parse_tool_result_json(&tr),
+        Ok(tr) => {
+            let mut v = parse_tool_result_json(&tr);
+            cap_array_field(&mut v, "untracked", 20);
+            v
+        }
         Err(_) => json!(null),
     };
 
-    // ── recently changed files ────────────────────────────────────────────────
+    // ── recently changed files (paths only, strip size metadata) ─────────────
     let recent_val = match filesystem::changed_since(&json!({
         "path": path,
         "since_relative": recent_window,
-        "max_results": 30
+        "max_results": 15
     })) {
-        Ok(tr) => parse_tool_result_json(&tr),
+        Ok(tr) => slim_changed(parse_tool_result_json(&tr)),
         Err(_) => json!([]),
     };
 
-    // ── shallow directory tree ────────────────────────────────────────────────
+    // ── shallow directory tree (name+type only, hard entry cap) ──────────────
     let tree_val = match filesystem::list_dir(&json!({
         "path": path,
-        "depth": tree_depth
+        "depth": tree_depth,
+        "max_entries": 60
     })) {
-        Ok(tr) => parse_tool_result_json(&tr),
+        Ok(tr) => {
+            let v = parse_tool_result_json(&tr);
+            json!({
+                "path":      v["path"],
+                "truncated": v["truncated"],
+                "entries":   slim_tree(&v["entries"]),
+            })
+        }
         Err(_) => json!(null),
     };
 
@@ -121,4 +133,51 @@ fn parse_tool_result_json(tr: &ToolResult) -> Value {
                 .map(|c| Value::String(c.text.clone()))
                 .unwrap_or(Value::Null)
         })
+}
+
+/// Truncate an array field inside a JSON object to `max` entries.
+fn cap_array_field(v: &mut Value, key: &str, max: usize) {
+    if let Some(arr) = v.get_mut(key).and_then(|a| a.as_array_mut()) {
+        arr.truncate(max);
+    }
+}
+
+/// Strip size_bytes from changed_since output — only paths and timestamps needed for orientation.
+fn slim_changed(v: Value) -> Value {
+    let changed = v["changed"].as_array().map(|arr| {
+        arr.iter().map(|f| json!({
+            "path":          f["path"],
+            "modified_secs": f["modified_secs"],
+        })).collect::<Vec<_>>()
+    }).unwrap_or_default();
+
+    json!({
+        "since_secs": v["since_secs"],
+        "count":      changed.len(),
+        "truncated":  v["truncated"],
+        "changed":    changed,
+    })
+}
+
+/// Recursively strip path/size_bytes/modified_secs from tree entries.
+/// Keeps only name, type, and children — sufficient for orientation.
+fn slim_tree(entries: &Value) -> Value {
+    match entries.as_array() {
+        Some(arr) => Value::Array(arr.iter().map(|e| {
+            let mut obj = serde_json::Map::new();
+            if let Some(n) = e["name"].as_str() {
+                obj.insert("name".into(), Value::String(n.to_owned()));
+            }
+            if let Some(t) = e["type"].as_str() {
+                obj.insert("type".into(), Value::String(t.to_owned()));
+            }
+            if let Some(children) = e.get("children") {
+                if !children.is_null() {
+                    obj.insert("children".into(), slim_tree(children));
+                }
+            }
+            Value::Object(obj)
+        }).collect()),
+        None => Value::Null,
+    }
 }

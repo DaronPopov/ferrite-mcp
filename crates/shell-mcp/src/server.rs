@@ -273,7 +273,34 @@ impl McpServer {
             "pipeline_status"  => tools::bg_pipeline::pipeline_status(args, &self.pipelines),
             "pipeline_cancel"  => tools::bg_pipeline::pipeline_cancel(args, &self.pipelines),
             "live_window"      => tools::bg_window::live_window(args, &self.store),
-            _                  => Err(format!("unknown tool: {name}")),
+            // Project / chip awareness (Tier 1)
+            "project_context"     => tools::project::project_context(args),
+            "chip_status"         => tools::project::chip_status(args),
+            "chip_build_pipeline" => tools::project::chip_build_pipeline(args, &self.store),
+            "board_status"        => tools::project::board_status(args),
+            "fpga_monitor"        => tools::project::fpga_monitor(args, &self.store),
+            // Remote SSH (Tier 2)
+            "remote_exec"   => tools::remote::remote_exec(args),
+            "remote_build"  => tools::remote::remote_build(args, &self.store),
+            "sync_project"  => tools::remote::sync_project(args),
+            // Project creation
+            "project_new"  => tools::git_new::project_new(args),
+            // Git write
+            "git_commit"   => tools::git_write::git_commit(args),
+            // Notifications
+            "notify"            => tools::notify::notify(args),
+            // tmux
+            "tmux_ctl"          => tools::tmux::tmux_ctl(args),
+            // Network / reachability
+            "tailscale_status"  => tools::network::tailscale_status(args),
+            // Session health
+            "session_status"    => tools::session::session_status(args),
+            "session_restart"   => tools::session::session_restart(args),
+            // GitHub SSH
+            "gh_clone"  => tools::github::gh_clone(args),
+            "gh_sync"   => tools::github::gh_sync(args),
+            "gh_status" => tools::github::gh_status(args),
+            _           => Err(format!("unknown tool: {name}")),
         }
     }
 }

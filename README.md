@@ -18,18 +18,22 @@ The machine becomes the source of truth. Not documentation, not priors, not user
 
 ## What it is
 
-cream runs as a background MCP stdio server. Projects that register it give Claude access to **53 tools** across:
+cream runs as a background MCP stdio server. Projects that register it give Claude access to **89 tools** across:
 
 - **Situational awareness** — single-call session orientation
 - **Hardware topology** — GPU/CPU architecture, SIMD capabilities, live utilization
 - **Library discovery** — pkg-config, ldconfig, environment, filesystem scan
 - **Execution** — shell commands, compilation, binary inspection, all without permission prompts
+- **Background processes** — spawn, attach, stream, pipeline with DAG execution
 - **Code navigation** — contextual reads, regex search, symbol indexing, git state
+- **Git & GitHub** — structured diffs, commits, clone, push, cross-repo status
 - **GPU profiling** — PTX inspection, Nsight Compute, compute-sanitizer
 - **CPU profiling** — Linux perf flamegraphs, hardware counter stats
 - **Debugging** — GDB batch mode with structured backtrace/locals output
 - **ML data** — PyTorch checkpoint and tensor inspection without a REPL
 - **EDA** — Verilog lint/sim, cocotb, Vivado Tcl, FPGA programming, waveform parsing
+- **Remote development** — SSH exec, remote build, rsync project sync
+- **Session management** — boot-time Claude launcher with Gmail/ntfy notifications, watchdog restart
 - **System introspection** — process tree, open ports, systemd journal
 - **Persistence** — benchmark history across sessions, in-session notes
 
@@ -72,6 +76,63 @@ The `.mcp.json` at the project root:
 cream --mcp       # MCP stdio server (used by Claude Code)
 cream             # Interactive REPL shell
 cream -c <cmd>    # Run a single command
+```
+
+---
+
+## Remote session autostart
+
+cream ships a boot-time launcher that starts Claude Code in a tmux session on login, enables remote control, captures the session URL, and emails it to you — so you can connect from your phone or any device without touching the PC.
+
+### Setup
+
+```bash
+# Gmail config (app password required — not your account password)
+cream-sendmail --setup
+
+# Optional: ntfy.sh phone push
+echo "NTFY_TOPIC=your-uuid-topic" >> ~/.config/cream/env
+
+# Install the systemd user service
+systemctl --user enable cream-session.service
+systemctl --user start cream-session.service
+```
+
+### Flow on every boot
+
+1. systemd starts `cream-autostart` after the graphical session
+2. Kills any stale tmux session with the same name
+3. Starts `claude --dangerously-skip-permissions --session-id <fresh-uuid>` in a detached tmux pane
+4. Waits for Claude's interactive prompt
+5. Sends `/remote-control` → captures the `claude.ai` session URL
+6. Saves URL to `~/.local/share/cream/remote-session-url.txt`
+7. Sends desktop notification + Gmail email + ntfy.sh push (whichever are configured)
+8. Stays running as a watchdog — restarts the session if it dies
+
+The `--session-id <fresh-uuid>` flag forces a brand-new session on every boot rather than resuming the previous conversation.
+
+### Session restart from within Claude
+
+The `session_restart` MCP tool lets Claude kill its own session so the watchdog spins up a clean one and sends a new email:
+
+```
+cream:session_restart()
+→ { status: "killing", note: "new session + email in ~30s" }
+```
+
+### Check session health
+
+```
+cream:session_status()
+→ {
+    status: "ready",
+    tmux_alive: true,
+    remote_url: "https://claude.ai/code/session_...",
+    url_age_secs: 142,
+    systemd_state: "active",
+    ntfy_configured: true,
+    autostart_log: "... boot sequence complete ✓ ..."
+  }
 ```
 
 ---
@@ -137,6 +198,75 @@ No terminal switching. No permission prompts. Build errors are structured data, 
 
 ---
 
+### Background processes and pipelines
+
+```
+# Spawn a long build in the background
+cream:bg_spawn(cmd="cargo build --release", label="release build")
+→ { job_id: "j_abc123", pid: 9842 }
+
+# Stream output as it arrives
+cream:bg_status(job_id="j_abc123")
+→ { running: true, new_output: "Compiling shell-mcp v0.3.0..." }
+
+# Wait for a specific event
+cream:wait_for_pattern(job_id="j_abc123", pattern="Finished|error")
+→ { matched: "Finished release target", line: 142 }
+
+# Run a DAG pipeline — build → test and bench in parallel → deploy
+cream:pipeline_run(steps=[
+  { id: "build", cmd: "cargo build --release" },
+  { id: "test",  cmd: "cargo test",  depends_on: ["build"] },
+  { id: "bench", cmd: "./bench",     depends_on: ["build"] },
+  { id: "deploy",cmd: "./deploy.sh", depends_on: ["test", "bench"] }
+])
+→ { pipeline_id: "p_xyz", status: "running" }
+
+# Interact with a PTY process (Vivado, GDB, Python REPL)
+cream:bg_spawn(cmd="python3", pty=true)
+→ { job_id: "j_py1" }
+cream:bg_send(job_id="j_py1", text="import torch; print(torch.__version__)")
+cream:bg_status(job_id="j_py1")
+→ { new_output: "2.3.0+cu121" }
+```
+
+---
+
+### Remote development
+
+```
+# Run a command on a remote build machine
+cream:remote_exec(host="build-server", cmd="nvidia-smi")
+→ { stdout: "Driver: 535.104 | CUDA 12.2 | RTX 4090", exit_code: 0 }
+
+# Push project to remote and trigger build
+cream:sync_project(project="myproject", host="build-server")
+→ { files_transferred: 12, bytes_sent: 84210, duration_ms: 340 }
+
+cream:remote_build(host="build-server", project="myproject")
+→ { job_id: "j_rbld1" }   # background — track with bg_status
+```
+
+---
+
+### Git write and GitHub
+
+```
+cream:git_commit(message="fix: session duplicate launch on boot", add="all", push=true)
+→ { committed: true, hash: "a3f1b2c", push: { success: true } }
+
+cream:gh_clone(repo="processor_lab")
+→ { success: true, local_path: "/home/daron/processor_lab" }
+
+cream:gh_status()
+→ [
+    { project: "creamMCP",      branch: "main", ahead: 0, dirty: false },
+    { project: "processor_lab", branch: "main", ahead: 2, dirty: true  }
+  ]
+```
+
+---
+
 ### Verify GPU state before benchmarking
 
 ```
@@ -183,74 +313,6 @@ cream:flamegraph("./server --bench")
   svg_path: /tmp/cream_flamegraph.svg
 ```
 
-Nsight Compute gives GPU diagnosis. perf_stat gives CPU counters. flamegraph gives the call-tree view. Three different tools for three different questions.
-
----
-
-### Navigate code without re-reading whole files
-
-```
-cream:grep_code("__global__", path=".", glob="**/*.cu")
-→ all CUDA kernel definitions with context
-
-cream:find_symbol("ServerState", kind="struct")
-→ { file: "src/server.rs", line: 57 }
-
-cream:symbol_index(path=".", kinds=["fn", "trait"])
-→ all public functions and traits, with file/line
-
-cream:changed_since(since_relative="30m")
-→ src/lib.rs, target/debug/bench (modified 4m ago)
-```
-
----
-
-### Debug with GDB without a terminal
-
-```
-cream:gdb_run("./bench", breakpoints=["main"])
-→ backtrace: [{ frame: 0, function: "main", file: "bench.cu", line: 12 }]
-  locals: [{ name: "N", value: "1048576" }]
-
-cream:gdb_run("./bench", core="/tmp/core.1234")
-→ signal: SIGSEGV, signal_addr: 0x7fff00000000
-  backtrace: [...]
-```
-
-Batch GDB with structured output. Works on live runs and core dumps.
-
----
-
-### Inspect ML checkpoints without a REPL
-
-```
-cream:checkpoint_list("./checkpoints")
-→ epoch_42.ckpt — 1.2GB, epoch=42, step=84000
-  epoch_41.ckpt — 1.2GB, epoch=41, step=82000
-
-cream:tensor_inspect("./checkpoints/epoch_42.ckpt", keys=["model"])
-→ model.weight: shape=[768, 768], dtype=float32, min=-0.21, max=0.19, mean=0.0001
-```
-
-Generates a Python script, runs it, parses the JSON output, cleans up. torch not installed → useful error message.
-
----
-
-### Git state without raw output
-
-```
-cream:git_status()
-→ branch: "feature/orient", ahead: 2, behind: 0
-  unstaged: [{ path: "src/server.rs", status: "M" }]
-
-cream:git_diff(file="src/server.rs")
-→ [{ path: "src/server.rs", additions: 12, deletions: 3,
-     hunks: [{ header: "@@ -55,7 +55,12 @@", lines: [...] }] }]
-
-cream:git_log(limit=5)
-→ [{ short: "a3f1b2", author: "daron", subject: "add orient tool" }]
-```
-
 ---
 
 ### EDA: Verilog, cocotb, Vivado, FPGA
@@ -262,17 +324,20 @@ cream:verilog_lint(files=["alu.v", "tb_alu.v"])
 cream:verilog_sim(files=["alu.v", "tb_alu.v"], top="tb_alu", vcd_out="/tmp/alu.vcd")
 → { success: true, finished: true, assertion_failures: 0 }
 
-cream:waveform_query("/tmp/alu.vcd", signals=["alu_out"], time_end=1000)
-→ signal timeline as value-change events
-
 cream:cocotb_run("./tests/alu", simulator="icarus")
 → { passed: 5, failed: 0 }
 
 cream:vivado_tcl(cmd="open_project proj.xpr; synth_design -top alu")
 → { success: true, errors: [], warnings: ["timing not met on path ..."] }
 
+cream:synth_report(project_dir="./chips/rope_attn")
+→ { wns: 0.412, tns: 0.0, failing_endpoints: 0, lut_pct: 38.2, ff_pct: 14.1, bram: 2, dsp: 0 }
+
+cream:chip_build_pipeline(chip="rope_attn", steps=["lint","sim","synth","program"])
+→ { lint: "pass", sim: "5/5 pass", synth: { job_id: "j_syn1" }, program: "pending" }
+
 cream:fpga_boards()
-→ [{ target: "xc7a35t_0", device: "digilent_arty", part: "xc7a35tcsg324-1", status: "open" }]
+→ [{ target: "xc7a35t_0", device: "basys3", part: "xc7a35tcpg236-1", status: "open" }]
 
 cream:fpga_program(bitfile="./build/alu.bit")
 → { success: true, duration_ms: 3200 }
@@ -306,6 +371,8 @@ bench_history is stored at `~/.local/share/cream/bench_history.jsonl` and surviv
 |------|-------------|
 | `orient` | Single-call session start: git state + recent changes + dir tree + ports |
 | `note` | Session scratchpad — read / append / clear notes in server memory |
+| `shell_state` | cream's cwd, PATH, dev-relevant environment variables |
+| `set_cwd` | Change cream's working directory (persists across calls) |
 
 ### Hardware
 | Tool | What it does |
@@ -320,12 +387,38 @@ bench_history is stored at `~/.local/share/cream/bench_history.jsonl` and surviv
 |------|-------------|
 | `find_lib` | Path, version, include dirs, link flags for any system library |
 | `discover` | Full scan of cuda / rocm / ml / build-tools toolchains |
+| `which` | Binary path + version probe |
 
 ### Execution
 | Tool | What it does |
 |------|-------------|
 | `exec` | Run any shell command. stdout, stderr, exit_code, duration_ms. No prompts. |
 | `build_check` | Structured errors `{file, line, col, message}` for CUDA / Rust / C / C++ |
+| `task_run` | Write + execute a Python/bash script atomically. Multi-step experiments in one call. |
+| `launch` | Fire-and-forget detached process (GUI apps, daemons). Returns PID immediately. |
+
+### Background processes
+| Tool | What it does |
+|------|-------------|
+| `bg_spawn` | Spawn a command in the background. Returns `job_id` immediately. PTY support for interactive programs. |
+| `bg_attach` | Attach to an existing process by PID for lifecycle tracking |
+| `bg_send` | Send stdin to a PTY job (Vivado, GDB, Python REPL, etc.) |
+| `bg_status` | Poll new output since last call (cursor-based) |
+| `bg_tail` | Last N lines of a job's output without advancing the cursor |
+| `bg_wait` | Block until a job completes. Returns full output. |
+| `bg_list` | All background jobs — running, done, killed |
+| `bg_kill` | Kill a background job (SIGTERM or SIGKILL) |
+| `wait_for_pattern` | Block until a regex matches in job output — more efficient than polling |
+| `wait_for_idle` | Block until job output goes quiet for N seconds |
+| `output_summary` | Errors + warnings + head + tail of a job's log without blowing the context window |
+| `live_window` | Open a kitty terminal window streaming a job's output live |
+
+### Pipelines
+| Tool | What it does |
+|------|-------------|
+| `pipeline_run` | Run a DAG of shell commands. Steps with no unmet deps start immediately (parallel). |
+| `pipeline_status` | Per-step status, exit codes, job IDs for a running/completed pipeline |
+| `pipeline_cancel` | Cancel a running pipeline. Kills running steps, skips pending. |
 
 ### Code navigation
 | Tool | What it does |
@@ -336,16 +429,31 @@ bench_history is stored at `~/.local/share/cream/bench_history.jsonl` and surviv
 | `glob` | Files matching a glob pattern |
 | `grep_code` | Regex search with context lines, ripgrep-accelerated |
 | `changed_since` | Files modified after a timestamp or relative duration |
-| `which` | Binary path + version probe |
 
-### Symbols & Git
+### Symbols & Git (read)
 | Tool | What it does |
 |------|-------------|
 | `symbol_index` | Index all Rust symbols (fn/struct/enum/trait/impl/…) across source files |
 | `find_symbol` | Find a Rust symbol by name with file + line |
 | `git_status` | Branch, ahead/behind, staged/unstaged/untracked — structured |
-| `git_log` | Commit history with author, date, subject |
+| `git_log` | Commit history with author, date, subject. Filter by author/file/since. |
 | `git_diff` | Unified diff as structured `{path, additions, deletions, hunks}` |
+
+### Git write & GitHub
+| Tool | What it does |
+|------|-------------|
+| `git_commit` | Stage files and commit. Optionally push. Returns hash + push result. |
+| `gh_clone` | Clone a repo from DaronPopov GitHub via SSH |
+| `gh_sync` | Pull, push, or fetch for a local repo |
+| `gh_status` | Git state across all known project roots in one call |
+| `project_new` | Create a local git project with optional GitHub remote. Scaffolds bare/rust/python/rtl. |
+
+### Filesystem operations
+| Tool | What it does |
+|------|-------------|
+| `move_file` | Move/rename with optional reference scan for Rust mod/use |
+| `mkdir` | Create directory with intermediate parents |
+| `delete_file` | Delete a single file (refuses directories) |
 
 ### GPU profiling
 | Tool | What it does |
@@ -378,9 +486,18 @@ bench_history is stored at `~/.local/share/cream/bench_history.jsonl` and surviv
 | `verilog_sim` | iverilog + vvp simulation → success, assertions, optional VCD |
 | `cocotb_run` | cocotb 2.x pytest runner → `{passed, failed}` |
 | `vivado_tcl` | Vivado 2025.2 batch Tcl — inline cmd or script file |
+| `synth_report` | Parse timing_summary.rpt + utilization.rpt → WNS/TNS/LUT%/FF%/BRAM/DSP |
 | `fpga_boards` | List JTAG-connected FPGA targets via hw_manager |
 | `fpga_program` | Program a .bit bitstream via Vivado hw_manager |
+| `board_status` | Detect connected FPGA boards + serial ports in one call |
+| `fpga_monitor` | Stream UART output from FPGA as a background job |
+| `fpga_serial` | Low-level UART send/receive (hex bytes) |
+| `fpga_tcfp_status` | Read TCFP processor status (busy/converged/done/step_count) via UART |
+| `fpga_tcfp_tile_read` | Read tile state vectors from TCFP array via UART |
 | `waveform_query` | Parse VCD waveform — signal definitions and value-change timeline |
+| `project_context` | Auto-detect workspace type, active chips, build targets |
+| `chip_status` | Scan all chips: sim results, .bit built, timing WNS, LUT% |
+| `chip_build_pipeline` | Full RTL flow for one chip: lint → sim → synth → program → validate |
 
 ### System
 | Tool | What it does |
@@ -389,6 +506,31 @@ bench_history is stored at `~/.local/share/cream/bench_history.jsonl` and surviv
 | `port_list` | Listening TCP/UDP ports via ss: proto, port, pid, process |
 | `journal_query` | systemd journal entries with unit, time, grep filter |
 
+### Network & notifications
+| Tool | What it does |
+|------|-------------|
+| `tailscale_status` | This machine's Tailscale IP + online/offline peer list |
+| `http_request` | Send HTTP/HTTPS requests via curl. Returns `{status, latency_ms, headers, body}`. |
+| `notify` | Desktop notification (notify-send) + phone push (ntfy.sh) |
+
+### Remote development
+| Tool | What it does |
+|------|-------------|
+| `remote_exec` | Run a command on a remote host via SSH (key auth). Returns stdout/stderr/exit_code. |
+| `remote_build` | Trigger a build on a remote machine as a background job |
+| `sync_project` | Rsync a project between local and remote. Smart excludes. Push or pull. |
+
+### tmux
+| Tool | What it does |
+|------|-------------|
+| `tmux_ctl` | Create, query, send, capture, kill tmux sessions. Keeps long commands alive across SSH drops. |
+
+### Session
+| Tool | What it does |
+|------|-------------|
+| `session_status` | Health check: tmux alive, remote URL + age, systemd state, autostart log tail |
+| `session_restart` | Kill the current Claude session — watchdog spawns a fresh one + sends new email within ~30s |
+
 ### Rust tooling
 | Tool | What it does |
 |------|-------------|
@@ -396,28 +538,10 @@ bench_history is stored at `~/.local/share/cream/bench_history.jsonl` and surviv
 | `test_run` | cargo test → structured `{passed, failed, ignored}` with names |
 | `inspect_binary` | ldd dependencies, nm -D symbols, readelf ELF header |
 
-### Filesystem operations
-| Tool | What it does |
-|------|-------------|
-| `move_file` | Move/rename with optional reference scan for Rust mod/use |
-| `mkdir` | Create directory with intermediate parents |
-| `delete_file` | Delete a single file (refuses directories) |
-
-### State
-| Tool | What it does |
-|------|-------------|
-| `shell_state` | cream's cwd, PATH, dev-relevant environment variables |
-| `set_cwd` | Change cream's working directory (persists across calls) |
-
 ### History
 | Tool | What it does |
 |------|-------------|
 | `bench_history` | record / list / query / compare benchmark results. Persisted to disk. |
-
-### HTTP
-| Tool | What it does |
-|------|-------------|
-| `http_request` | Send HTTP/HTTPS requests via curl. Returns `{status, latency_ms, headers, body}`. |
 
 ---
 
@@ -454,13 +578,15 @@ crates/
 ├── shell-runtime   — executor, builtins, job control, signals
 ├── shell-hooks     — LLM integration seam (Hook trait + HookRegistry)
 ├── shell-tui       — readline, prompt, history, completion, cream theme
-├── shell-mcp       — MCP stdio server (53 tools)
+├── shell-mcp       — MCP stdio server (89 tools)
 └── shell-bin       — entry point: cream / cream -c / cream --mcp
 ```
 
 The MCP server (`shell-mcp`) is independent of the shell runtime. It speaks JSON-RPC 2.0 over stdin/stdout and can be embedded in any project without any shell functionality.
 
 The `shell-hooks` crate is the LLM integration seam. Every command passes through `HookRegistry::dispatch(HookEvent)` before and after execution. Future integration — command suggestion, error explanation, completion — plugs in here without touching the shell core.
+
+Background job state persists to `~/.local/share/cream/logs/` and `~/.local/share/cream/session.json` across cream restarts, so jobs survive MCP server restarts.
 
 ---
 

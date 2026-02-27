@@ -12,16 +12,25 @@ pub mod eda;
 pub mod execution;
 pub mod filesystem;
 pub mod git;
+pub mod git_new;
+pub mod git_write;
+pub mod github;
 pub mod hardware;
 pub mod history;
 pub mod http;
 pub mod ml;
+pub mod network;
+pub mod notify;
 pub mod perf_tools;
 pub mod profiling;
+pub mod project;
+pub mod remote;
 pub mod rust_tools;
+pub mod session;
 pub mod state;
 pub mod symbols;
 pub mod system;
+pub mod tmux;
 pub mod workspace;
 
 use crate::protocol::ToolDef;
@@ -1109,6 +1118,310 @@ pub fn all_tool_definitions() -> Vec<ToolDef> {
                     "job_id": { "type": "string", "description": "Job ID to stream (omit for cream shell)" },
                     "title":  { "type": "string", "description": "Window title override" }
                 }
+            }),
+        },
+        // ── Project / chip awareness (Tier 1) ────────────────────────────────
+        ToolDef {
+            name: "project_context",
+            description: "Auto-detect workspace type from path. Walks up from path to find \
+                known project roots (processor_lab, verilogchill, ferrite*, creamMCP). \
+                Returns project_name, project_type, root, context_hints, and active_targets \
+                (chips with .bit or workspace crates).",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "description": "Starting path (default: cwd)" }
+                }
+            }),
+        },
+        ToolDef {
+            name: "chip_status",
+            description: "Scan all chips in processor_lab. For each chip dir under chips/: \
+                finds .bit files in build/, checks sim results (results.xml or .log), \
+                and parses timing/utilization reports if present. Returns array of \
+                [{chip, sim_ok, bit_built, bit_path, wns, lut_pct, last_built}].",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "lab_path": { "type": "string", "description": "Path to processor_lab (default: ~/processor_lab)" }
+                }
+            }),
+        },
+        ToolDef {
+            name: "chip_build_pipeline",
+            description: "Run a full RTL flow for one chip: lint → sim → synth → program → validate. \
+                Synth runs as a background job (returns job_id). Other steps run inline. \
+                Returns per-step results and overall success.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "chip":     { "type": "string", "description": "Chip name (required, e.g. 'rope_attn')" },
+                    "lab_path": { "type": "string", "description": "Path to processor_lab (default: ~/processor_lab)" },
+                    "board":    { "type": "string", "description": "Target board (default: basys3)" },
+                    "steps": {
+                        "type": "array",
+                        "items": { "type": "string", "enum": ["lint", "sim", "synth", "program", "validate"] },
+                        "description": "Steps to run (default: [lint, sim, synth, program])"
+                    },
+                    "dry_run":  { "type": "boolean", "description": "Show commands without running (default: false)" }
+                },
+                "required": ["chip"]
+            }),
+        },
+        ToolDef {
+            name: "board_status",
+            description: "Detect connected FPGA boards and serial ports. Queries Vivado \
+                hw_manager for JTAG targets, scans /dev/ttyUSB* and /dev/ttyACM*. \
+                Returns {jtag_boards[], serial_ports[], timestamp}.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {}
+            }),
+        },
+        ToolDef {
+            name: "fpga_monitor",
+            description: "Stream UART output from an FPGA as a background job. Auto-detects \
+                /dev/ttyUSBx if port not specified. Returns {job_id, port, baud} — \
+                use bg_tail/bg_status to read output, bg_kill to stop.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "port":  { "type": "string", "description": "Serial port (default: auto-detect /dev/ttyUSBx)" },
+                    "baud":  { "type": "integer", "description": "Baud rate (default: 921600)" },
+                    "label": { "type": "string", "description": "Label for the background job" }
+                }
+            }),
+        },
+        // ── Remote SSH tools (Tier 2) ─────────────────────────────────────────
+        ToolDef {
+            name: "remote_exec",
+            description: "Run a command on a remote host via SSH. Uses BatchMode=yes \
+                (key-based auth required). Returns {stdout, stderr, exit_code, duration_ms, \
+                timed_out, host}.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "host":         { "type": "string", "description": "Remote hostname or IP (required)" },
+                    "cmd":          { "type": "string", "description": "Command to run remotely (required)" },
+                    "cwd":          { "type": "string", "description": "Remote working directory" },
+                    "timeout_secs": { "type": "integer", "description": "Timeout in seconds (default: 60)" },
+                    "env":          { "type": "object", "description": "Extra environment variables (key-value)" }
+                },
+                "required": ["host", "cmd"]
+            }),
+        },
+        ToolDef {
+            name: "remote_build",
+            description: "Trigger a build on a remote machine as a background job. \
+                Connects via SSH and runs the build command in ~/project. \
+                Auto-detects build command from project type (Rust → cargo build --release, etc.). \
+                Returns {job_id, host, project, cmd} — track with bg_status/bg_wait.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "host":      { "type": "string", "description": "Remote hostname or IP (required)" },
+                    "project":   { "type": "string", "description": "Project directory name under ~/ (required)" },
+                    "build_cmd": { "type": "string", "description": "Override build command (auto-detected if omitted)" },
+                    "label":     { "type": "string", "description": "Background job label" }
+                },
+                "required": ["host", "project"]
+            }),
+        },
+        ToolDef {
+            name: "sync_project",
+            description: "Rsync a project between local and a remote host. Smart excludes \
+                (target/, *.bit, .cache/, *.runs/, node_modules/, etc.). \
+                Returns {success, files_transferred, bytes_sent, duration_ms, dry_run}.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "project":        { "type": "string", "description": "Project directory name under ~/ (required)" },
+                    "host":           { "type": "string", "description": "Remote hostname or IP (required)" },
+                    "direction":      { "type": "string", "enum": ["push", "pull"], "description": "push (local→remote) or pull (remote→local, default: push)" },
+                    "dry_run":        { "type": "boolean", "description": "Show what would be transferred without doing it (default: false)" },
+                    "extra_excludes": { "type": "array", "items": { "type": "string" }, "description": "Additional rsync --exclude patterns" }
+                },
+                "required": ["project", "host"]
+            }),
+        },
+        // ── Project creation ──────────────────────────────────────────────────
+        ToolDef {
+            name: "project_new",
+            description: "Create a new local git project with optional GitHub remote. \
+                Initialises a directory, runs git init, scaffolds files by project_type \
+                (bare, rust, rust-lib, rust-workspace, python, rtl), makes an initial commit, \
+                and optionally creates a GitHub repo via REST API (needs GITHUB_TOKEN env var) \
+                and pushes. Returns {root, files_created, ssh_url, next_steps}.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "name":         { "type": "string",  "description": "Project / repo name (required)" },
+                    "path":         { "type": "string",  "description": "Parent directory (default: ~)" },
+                    "project_type": {
+                        "type": "string",
+                        "enum": ["bare", "rust", "rust-lib", "rust-workspace", "python", "rtl"],
+                        "description": "Scaffold template (default: bare)"
+                    },
+                    "description":  { "type": "string",  "description": "Short description for README / GitHub" },
+                    "github":       { "type": "boolean", "description": "Create GitHub repo and push (needs GITHUB_TOKEN, default: false)" },
+                    "private":      { "type": "boolean", "description": "Make GitHub repo private (default: false)" }
+                },
+                "required": ["name"]
+            }),
+        },
+        // ── GitHub SSH tools ──────────────────────────────────────────────────
+        ToolDef {
+            name: "gh_clone",
+            description: "Clone a repo from DaronPopov GitHub via SSH (git@github.com:DaronPopov/<repo>.git). \
+                Returns {success, local_path, repo, branch, stdout, stderr}.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "repo":    { "type": "string", "description": "Repository name (required, e.g. 'processor_lab')" },
+                    "dest":    { "type": "string", "description": "Local destination path (default: ~/<repo>)" },
+                    "branch":  { "type": "string", "description": "Branch to clone" },
+                    "shallow": { "type": "boolean", "description": "Shallow clone --depth 1 (default: false)" }
+                },
+                "required": ["repo"]
+            }),
+        },
+        ToolDef {
+            name: "gh_sync",
+            description: "Pull, push, or fetch for a local git repo. Defaults to pull from origin. \
+                Returns {success, op, branch, stdout, stderr, fast_forward}.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "path":   { "type": "string", "description": "Local repo path (default: cwd)" },
+                    "op":     { "type": "string", "enum": ["pull", "push", "fetch"], "description": "Operation (default: pull)" },
+                    "branch": { "type": "string", "description": "Branch name (default: current branch)" },
+                    "remote": { "type": "string", "description": "Remote name (default: origin)" }
+                }
+            }),
+        },
+        ToolDef {
+            name: "gh_status",
+            description: "Git status across all known project roots. Scans ~/processor_lab, \
+                ~/verilogchill, ~/ferrite-os-clean, ~/cpp_importable_test, ~/rust_shell, \
+                ~/aws_tool (or custom paths). Returns [{path, project, branch, ahead, behind, \
+                dirty, last_commit}] for each git repo found.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "paths": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Override scan list (default: well-known project roots)"
+                    }
+                }
+            }),
+        },
+        // ── git write ─────────────────────────────────────────────────────────
+        ToolDef {
+            name: "git_commit",
+            description: "Stage files and commit in a git repo. Optionally push after commit. \
+                'add' can be \"all\" (git add -A), \"tracked\" (git add -u, default), or an array \
+                of specific file paths. Returns {committed, hash, staged_stat, push}.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "message": { "type": "string",  "description": "Commit message (required)" },
+                    "path":    { "type": "string",  "description": "Repo root path (default: cwd)" },
+                    "add": {
+                        "description": "Files to stage: \"all\", \"tracked\" (default), a path string, or array of paths",
+                        "oneOf": [
+                            { "type": "string" },
+                            { "type": "array", "items": { "type": "string" } }
+                        ]
+                    },
+                    "push":   { "type": "boolean", "description": "Push after commit (default: false)" },
+                    "remote": { "type": "string",  "description": "Remote name (default: origin)" },
+                    "branch": { "type": "string",  "description": "Branch to push (default: current)" },
+                    "author": { "type": "string",  "description": "Author override \"Name <email>\"" }
+                },
+                "required": ["message"]
+            }),
+        },
+        // ── notifications ─────────────────────────────────────────────────────
+        ToolDef {
+            name: "notify",
+            description: "Send a notification to the desktop (notify-send) and/or phone \
+                (ntfy.sh push). For phone alerts: set NTFY_TOPIC env var to your ntfy topic \
+                (free at ntfy.sh — subscribe via the ntfy app on your phone). \
+                Returns {sent, desktop, phone}.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "message":  { "type": "string", "description": "Notification body (required)" },
+                    "title":    { "type": "string", "description": "Title (default: cream)" },
+                    "topic":    { "type": "string", "description": "ntfy.sh topic override (default: $NTFY_TOPIC)" },
+                    "urgency":  { "type": "string", "enum": ["low","normal","critical"], "description": "Desktop urgency (default: normal)" },
+                    "priority": { "type": "string", "enum": ["min","low","default","high","urgent"], "description": "ntfy.sh priority (default: default)" },
+                    "tags":     { "type": "array", "items": { "type": "string" }, "description": "ntfy.sh emoji tags e.g. [\"white_check_mark\"]" },
+                    "icon":     { "type": "string", "description": "Desktop icon name (default: dialog-information)" },
+                    "desktop":  { "type": "boolean", "description": "Send desktop notification (default: true)" },
+                    "phone":    { "type": "boolean", "description": "Send phone notification (default: true if topic is set)" }
+                },
+                "required": ["message"]
+            }),
+        },
+        // ── tmux ──────────────────────────────────────────────────────────────
+        ToolDef {
+            name: "tmux_ctl",
+            description: "Create, query, and control tmux sessions. Use this to run long \
+                commands that must survive connection drops (especially useful during remote \
+                phone sessions). ops: new, list, send, capture, kill, has.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "op": {
+                        "type": "string",
+                        "enum": ["new","list","send","capture","kill","has"],
+                        "description": "Operation (required)"
+                    },
+                    "session": { "type": "string", "description": "Session name (default: main)" },
+                    "window":  { "type": "string", "description": "Window name or index (optional)" },
+                    "cmd":     { "type": "string", "description": "Command string — for op:new (start cmd) or op:send (keys to send)" },
+                    "cwd":     { "type": "string", "description": "Working directory for new session (default: ~)" },
+                    "enter":   { "type": "boolean", "description": "Append Enter after cmd in op:send (default: true)" },
+                    "lines":   { "type": "integer", "description": "Lines of scrollback to capture in op:capture (default: 50)" }
+                },
+                "required": ["op"]
+            }),
+        },
+        // ── network ───────────────────────────────────────────────────────────
+        ToolDef {
+            name: "tailscale_status",
+            description: "Check Tailscale VPN status. Returns this machine's Tailscale IP, \
+                name, whether it's reachable, and the list of online/offline peers. \
+                Useful to confirm the PC is reachable from the phone before a remote session.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {}
+            }),
+        },
+        // ── session ───────────────────────────────────────────────────────────
+        ToolDef {
+            name: "session_status",
+            description: "Report the state of the auto-started Claude remote session. \
+                Shows: tmux session alive, saved remote-control URL and its age, \
+                systemd unit state, ntfy config, and last 10 lines of the autostart log. \
+                Call this first thing in any phone session to confirm everything is healthy.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {}
+            }),
+        },
+        ToolDef {
+            name: "session_restart",
+            description: "Kill the current Claude tmux session so the cream watchdog spawns a \
+                fresh one — new session ID, new remote-control URL, new email sent to the user. \
+                Use this when you want to hand off to a clean Claude session. \
+                The current session will die ~1 s after the tool is called; \
+                a new session will appear within ~30 s.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {}
             }),
         },
     ]

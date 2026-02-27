@@ -50,9 +50,11 @@ pub fn read_file(args: &Value) -> Result<ToolResult, String> {
 // ── list_dir ──────────────────────────────────────────────────────────────────
 
 pub fn list_dir(args: &Value) -> Result<ToolResult, String> {
-    let path       = args["path"].as_str().unwrap_or(".");
-    let depth      = (args["depth"].as_u64().unwrap_or(1) as usize).min(5);
+    let path        = args["path"].as_str().unwrap_or(".");
+    let depth       = (args["depth"].as_u64().unwrap_or(1) as usize).min(5);
     let show_hidden = args["show_hidden"].as_bool().unwrap_or(false);
+    let max_cap: Option<usize> = args["max_entries"].as_u64().map(|n| n as usize);
+    let limit = max_cap.unwrap_or(usize::MAX);
 
     let root = PathBuf::from(path);
     if !root.exists() {
@@ -62,14 +64,17 @@ pub fn list_dir(args: &Value) -> Result<ToolResult, String> {
         .map(|p| p.display().to_string())
         .unwrap_or_else(|_| path.to_owned());
 
-    let entries = list_recursive(&root, depth, show_hidden, 0);
+    let mut count = 0usize;
+    let mut truncated = false;
+    let entries = list_recursive(&root, depth, show_hidden, 0, limit, &mut count, &mut truncated);
     let total = count_entries(&entries);
 
     Ok(ToolResult::json(&json!({
-        "path":    canonical,
-        "depth":   depth,
-        "entries": entries,
-        "total":   total,
+        "path":      canonical,
+        "depth":     depth,
+        "entries":   entries,
+        "total":     total,
+        "truncated": truncated,
     })))
 }
 
@@ -78,6 +83,9 @@ fn list_recursive(
     max_depth: usize,
     show_hidden: bool,
     current_depth: usize,
+    max_entries: usize,
+    count: &mut usize,
+    truncated: &mut bool,
 ) -> Vec<Value> {
     let Ok(read) = std::fs::read_dir(dir) else { return vec![] };
 
@@ -89,12 +97,19 @@ fn list_recursive(
         b_dir.cmp(&a_dir).then(a.file_name().cmp(&b.file_name()))
     });
 
-    entries.iter().filter_map(|entry| {
-        let name = entry.file_name().to_string_lossy().into_owned();
-        if !show_hidden && name.starts_with('.') {
-            return None;
+    let mut result = Vec::new();
+    for entry in &entries {
+        if *count >= max_entries {
+            *truncated = true;
+            break;
         }
 
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if !show_hidden && name.starts_with('.') {
+            continue;
+        }
+
+        *count += 1;
         let path = entry.path();
         let meta = path.metadata().ok();
 
@@ -116,7 +131,7 @@ fn list_recursive(
         let children = if kind == "dir" && current_depth < max_depth.saturating_sub(1) {
             // Skip noisy dirs
             if name != "target" && name != "node_modules" && name != ".git" {
-                Some(list_recursive(&path, max_depth, show_hidden, current_depth + 1))
+                Some(list_recursive(&path, max_depth, show_hidden, current_depth + 1, max_entries, count, truncated))
             } else {
                 Some(vec![json!({ "note": format!("{name}/ skipped (noisy)") })])
             }
@@ -124,15 +139,16 @@ fn list_recursive(
             None
         };
 
-        Some(json!({
+        result.push(json!({
             "name":          name,
             "path":          path.display().to_string(),
             "type":          kind,
             "size_bytes":    size_bytes,
             "modified_secs": modified_secs,
             "children":      children,
-        }))
-    }).collect()
+        }));
+    }
+    result
 }
 
 fn count_entries(entries: &[Value]) -> usize {
