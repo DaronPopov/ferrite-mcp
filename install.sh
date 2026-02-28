@@ -1,9 +1,9 @@
 #!/usr/bin/env sh
-# ferrite-mcp — one-line installer
+# ferrite-mcp installer — idempotent, safe to re-run any time
 #
-# Installs the ferrite binary and registers it as an MCP server for:
-#   • Claude Code  (~/.claude.json)
-#   • OpenAI Codex (~/.codex/config.toml)
+#   First install   → builds + registers everywhere
+#   Re-run          → skips what's already done, updates binary if changed
+#   New tool added  → picks up Claude Code or Codex registration automatically
 #
 # Usage:
 #   curl -fsSL https://raw.githubusercontent.com/DaronPopov/ferrite-mcp/main/install.sh | sh
@@ -14,38 +14,63 @@ REPO="https://github.com/DaronPopov/ferrite-mcp"
 BIN="ferrite"
 CARGO_BIN="$HOME/.cargo/bin/$BIN"
 
-# ── colour helpers ─────────────────────────────────────────────────────────────
-grn() { printf '\033[32m%s\033[0m\n' "$*"; }
-yel() { printf '\033[33m%s\033[0m\n' "$*"; }
-bold(){ printf '\033[1m%s\033[0m\n'  "$*"; }
+grn() { printf '\033[32m  ✓ %s\033[0m\n' "$*"; }
+yel() { printf '\033[33m  ~ %s\033[0m\n' "$*"; }
+inf() { printf '  · %s\n' "$*"; }
+bold(){ printf '\033[1m%s\033[0m\n' "$*"; }
 
-bold "ferrite-mcp installer"
+bold "ferrite-mcp setup"
 echo ""
 
-# ── 1. Ensure Rust / cargo ─────────────────────────────────────────────────────
-if ! command -v cargo >/dev/null 2>&1; then
+# ── 1. Rust / cargo ────────────────────────────────────────────────────────────
+if command -v cargo >/dev/null 2>&1; then
+    grn "Rust already installed ($(cargo --version 2>/dev/null | cut -d' ' -f2))"
+else
     yel "Rust not found — installing via rustup..."
     curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --no-modify-path
     . "$HOME/.cargo/env"
+    grn "Rust installed"
 fi
 
-# ── 2. Build and install binary ────────────────────────────────────────────────
-echo "Building ferrite (this takes ~30 s on first run)..."
-cargo install --git "$REPO" --bin "$BIN" --locked --quiet
-grn "  ✓ ferrite installed at $CARGO_BIN"
+# ── 2. ferrite binary ──────────────────────────────────────────────────────────
+INSTALLED_VER=""
+if command -v "$BIN" >/dev/null 2>&1; then
+    INSTALLED_VER="$($BIN --version 2>/dev/null || echo '')"
+fi
 
-# Resolve actual path (respects PATH overrides)
+inf "Building from $REPO ..."
+BUILD_OUT="$(cargo install --git "$REPO" --bin "$BIN" --locked 2>&1 || true)"
+
+if echo "$BUILD_OUT" | grep -q "already installed"; then
+    grn "ferrite already up to date ($INSTALLED_VER)"
+elif echo "$BUILD_OUT" | grep -q "Installed\|Installing"; then
+    NEW_VER="$($BIN --version 2>/dev/null || echo '')"
+    if [ -n "$INSTALLED_VER" ] && [ "$INSTALLED_VER" != "$NEW_VER" ]; then
+        grn "ferrite updated  $INSTALLED_VER → $NEW_VER"
+    else
+        grn "ferrite installed ($NEW_VER)"
+    fi
+else
+    # cargo install --locked exits 0 even when "already installed" in newer versions
+    grn "ferrite ready"
+fi
+
 FERRITE_BIN="$(command -v $BIN 2>/dev/null || echo "$CARGO_BIN")"
 
 echo ""
-echo "Registering MCP server..."
+bold "Registering MCP server..."
 
 # ── 3. Claude Code — ~/.claude.json ───────────────────────────────────────────
 register_claude() {
     CLAUDE_JSON="$HOME/.claude.json"
 
-    if command -v python3 >/dev/null 2>&1; then
-        python3 - "$CLAUDE_JSON" "$FERRITE_BIN" <<'PYEOF'
+    if ! command -v python3 >/dev/null 2>&1; then
+        yel "python3 not found — add to ~/.claude.json manually"
+        inf '"ferrite":{"type":"stdio","command":"'"$FERRITE_BIN"'","args":["--mcp"],"env":{}}'
+        return
+    fi
+
+    python3 - "$CLAUDE_JSON" "$FERRITE_BIN" <<'PYEOF'
 import json, sys, os
 
 path     = sys.argv[1]
@@ -58,53 +83,85 @@ if os.path.exists(path):
 else:
     d = {}
 
-d.setdefault("mcpServers", {})["ferrite"] = {
-    "type":    "stdio",
-    "command": bin_path,
-    "args":    ["--mcp"],
-    "env":     {}
-}
+existing = d.get("mcpServers", {}).get("ferrite", {})
+if existing.get("command") == bin_path and existing.get("args") == ["--mcp"]:
+    print("already")
+    sys.exit(0)
 
+d.setdefault("mcpServers", {})["ferrite"] = {
+    "type": "stdio", "command": bin_path, "args": ["--mcp"], "env": {}
+}
 tmp = path + ".tmp"
 with open(tmp, "w") as f:
     json.dump(d, f, indent=2)
 os.replace(tmp, path)
+print("registered")
 PYEOF
-        grn "  ✓ Registered in ~/.claude.json"
-    else
-        yel "  python3 not found — add ferrite to ~/.claude.json manually:"
-        yel '    "ferrite":{"type":"stdio","command":"'"$FERRITE_BIN"'","args":["--mcp"],"env":{}}'
-    fi
 }
+
+CLAUDE_STATUS="$(register_claude 2>/dev/null || echo "error")"
+case "$CLAUDE_STATUS" in
+    already)     grn "Claude Code — already registered" ;;
+    registered)  grn "Claude Code — registered" ;;
+    *)           yel "Claude Code — skipped (see above)" ;;
+esac
 
 # ── 4. OpenAI Codex — ~/.codex/config.toml ────────────────────────────────────
 register_codex() {
     CODEX_DIR="$HOME/.codex"
     CODEX_CFG="$CODEX_DIR/config.toml"
 
-    # Only register if codex is installed or its config dir exists
     if ! command -v codex >/dev/null 2>&1 && [ ! -d "$CODEX_DIR" ]; then
-        return 0
+        echo "skip"
+        return
     fi
 
     mkdir -p "$CODEX_DIR"
 
     if grep -q '\[mcp_servers\.ferrite\]' "$CODEX_CFG" 2>/dev/null; then
-        echo "  ferrite already in ~/.codex/config.toml"
-        return 0
+        # Check if the command path is current
+        if grep -A2 '\[mcp_servers\.ferrite\]' "$CODEX_CFG" | grep -q "$(printf '%s' "$FERRITE_BIN" | sed 's/[[\.*^$()+?{}|]/\\&/g')"; then
+            echo "already"
+        else
+            # Path changed (e.g. after rustup change) — update in place
+            if command -v python3 >/dev/null 2>&1; then
+                python3 - "$CODEX_CFG" "$FERRITE_BIN" <<'PYEOF'
+import sys, re
+path, bin_path = sys.argv[1], sys.argv[2]
+with open(path) as f:
+    text = f.read()
+text = re.sub(
+    r'(\[mcp_servers\.ferrite\][^\[]*command\s*=\s*")[^"]*(")',
+    r'\g<1>' + bin_path + r'\g<2>',
+    text, flags=re.DOTALL
+)
+with open(path, "w") as f:
+    f.write(text)
+PYEOF
+                echo "updated"
+            else
+                echo "already"
+            fi
+        fi
+        return
     fi
 
     printf '\n[mcp_servers.ferrite]\ncommand = "%s"\nargs    = ["--mcp"]\n' \
         "$FERRITE_BIN" >> "$CODEX_CFG"
-    grn "  ✓ Registered in ~/.codex/config.toml"
+    echo "registered"
 }
 
-register_claude
-register_codex
+CODEX_STATUS="$(register_codex)"
+case "$CODEX_STATUS" in
+    already)     grn "OpenAI Codex  — already registered" ;;
+    registered)  grn "OpenAI Codex  — registered" ;;
+    updated)     grn "OpenAI Codex  — updated command path" ;;
+    skip)        inf "OpenAI Codex  — not detected (skipped)" ;;
+esac
 
 # ── Done ───────────────────────────────────────────────────────────────────────
 echo ""
-grn "Done!"
-echo "  Binary : $FERRITE_BIN"
-echo "  Verify : ferrite status"
-echo "  Restart Claude Code / Codex to activate."
+bold "All done."
+inf "Binary  : $FERRITE_BIN"
+inf "Verify  : ferrite status"
+inf "Restart Claude Code / Codex to activate any new registrations."
