@@ -51,24 +51,22 @@ fi
 
 if [ -n "$LOCAL_PATH" ]; then
     inf "Building from local clone ($LOCAL_PATH) ..."
-    BUILD_OUT="$(cargo install --path "$LOCAL_PATH/crates/shell-bin" 2>&1 || true)"
+    cargo install --path "$LOCAL_PATH/crates/shell-bin" || true
 else
     inf "Building from $REPO ..."
-    BUILD_OUT="$(cargo install --git "$REPO" --bin "$BIN" --locked 2>&1 || true)"
+    cargo install --git "$REPO" --bin "$BIN" --locked || true
 fi
 
-if echo "$BUILD_OUT" | grep -q "already installed"; then
-    grn "ferrite already up to date ($INSTALLED_VER)"
-elif echo "$BUILD_OUT" | grep -q "Installed\|Installing"; then
-    NEW_VER="$($BIN --version 2>/dev/null || echo '')"
-    if [ -n "$INSTALLED_VER" ] && [ "$INSTALLED_VER" != "$NEW_VER" ]; then
-        grn "ferrite updated  $INSTALLED_VER → $NEW_VER"
-    else
-        grn "ferrite installed ($NEW_VER)"
-    fi
+NEW_VER="$(command -v $BIN >/dev/null 2>&1 && $BIN --version 2>/dev/null || echo '')"
+if [ -z "$NEW_VER" ]; then
+    printf '\033[31m  ✗ build failed — ferrite binary not found after install\033[0m\n'
+    exit 1
+elif [ -n "$INSTALLED_VER" ] && [ "$INSTALLED_VER" = "$NEW_VER" ]; then
+    grn "ferrite already up to date ($NEW_VER)"
+elif [ -n "$INSTALLED_VER" ] && [ "$INSTALLED_VER" != "$NEW_VER" ]; then
+    grn "ferrite updated  $INSTALLED_VER → $NEW_VER"
 else
-    # cargo install --locked exits 0 even when "already installed" in newer versions
-    grn "ferrite ready"
+    grn "ferrite installed ($NEW_VER)"
 fi
 
 FERRITE_BIN="$(command -v $BIN 2>/dev/null || echo "$CARGO_BIN")"
