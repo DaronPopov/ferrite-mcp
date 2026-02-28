@@ -5,14 +5,25 @@
 #   Re-run          → skips what's already done, updates binary if changed
 #   New tool added  → picks up Claude Code or Codex registration automatically
 #
-# Usage:
+# Public repo (HTTPS):
 #   curl -fsSL https://raw.githubusercontent.com/DaronPopov/ferrite-mcp/main/install.sh | sh
+#
+# Private repo / SSH:
+#   git clone git@github.com:DaronPopov/ferrite-mcp.git /tmp/ferrite-mcp && sh /tmp/ferrite-mcp/install.sh
 
 set -e
 
 REPO="https://github.com/DaronPopov/ferrite-mcp"
 BIN="ferrite"
 CARGO_BIN="$HOME/.cargo/bin/$BIN"
+
+# Detect if we're running from a local clone — use --path instead of --git
+SCRIPT_DIR="$(cd "$(dirname "$0")" 2>/dev/null && pwd || echo "")"
+if [ -f "$SCRIPT_DIR/crates/shell-bin/Cargo.toml" ]; then
+    LOCAL_PATH="$SCRIPT_DIR"
+else
+    LOCAL_PATH=""
+fi
 
 grn() { printf '\033[32m  ✓ %s\033[0m\n' "$*"; }
 yel() { printf '\033[33m  ~ %s\033[0m\n' "$*"; }
@@ -38,8 +49,13 @@ if command -v "$BIN" >/dev/null 2>&1; then
     INSTALLED_VER="$($BIN --version 2>/dev/null || echo '')"
 fi
 
-inf "Building from $REPO ..."
-BUILD_OUT="$(cargo install --git "$REPO" --bin "$BIN" --locked 2>&1 || true)"
+if [ -n "$LOCAL_PATH" ]; then
+    inf "Building from local clone ($LOCAL_PATH) ..."
+    BUILD_OUT="$(cargo install --path "$LOCAL_PATH/crates/shell-bin" 2>&1 || true)"
+else
+    inf "Building from $REPO ..."
+    BUILD_OUT="$(cargo install --git "$REPO" --bin "$BIN" --locked 2>&1 || true)"
+fi
 
 if echo "$BUILD_OUT" | grep -q "already installed"; then
     grn "ferrite already up to date ($INSTALLED_VER)"
