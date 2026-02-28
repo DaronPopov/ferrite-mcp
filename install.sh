@@ -44,10 +44,8 @@ else
 fi
 
 # ── 2. ferrite binary ──────────────────────────────────────────────────────────
-INSTALLED_VER=""
-if command -v "$BIN" >/dev/null 2>&1; then
-    INSTALLED_VER="$($BIN --version 2>/dev/null || echo '')"
-fi
+ALREADY_INSTALLED=0
+command -v "$BIN" >/dev/null 2>&1 && ALREADY_INSTALLED=1
 
 if [ -n "$LOCAL_PATH" ]; then
     inf "Building from local clone ($LOCAL_PATH) ..."
@@ -57,16 +55,13 @@ else
     cargo install --git "$REPO" --bin "$BIN" --locked || true
 fi
 
-NEW_VER="$(command -v $BIN >/dev/null 2>&1 && $BIN --version 2>/dev/null || echo '')"
-if [ -z "$NEW_VER" ]; then
+if ! command -v "$BIN" >/dev/null 2>&1; then
     printf '\033[31m  ✗ build failed — ferrite binary not found after install\033[0m\n'
     exit 1
-elif [ -n "$INSTALLED_VER" ] && [ "$INSTALLED_VER" = "$NEW_VER" ]; then
-    grn "ferrite already up to date ($NEW_VER)"
-elif [ -n "$INSTALLED_VER" ] && [ "$INSTALLED_VER" != "$NEW_VER" ]; then
-    grn "ferrite updated  $INSTALLED_VER → $NEW_VER"
+elif [ "$ALREADY_INSTALLED" = "1" ]; then
+    grn "ferrite updated"
 else
-    grn "ferrite installed ($NEW_VER)"
+    grn "ferrite installed"
 fi
 
 FERRITE_BIN="$(command -v $BIN 2>/dev/null || echo "$CARGO_BIN")"
