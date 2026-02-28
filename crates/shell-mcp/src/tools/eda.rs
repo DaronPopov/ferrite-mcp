@@ -104,7 +104,7 @@ pub fn verilog_sim(args: &Value) -> Result<ToolResult, String> {
     let standard     = args["standard"].as_str().unwrap_or("2012");
     let timeout_secs = args["timeout_secs"].as_u64().unwrap_or(30);
 
-    let bin = format!("/tmp/cream_sim_{}", std::process::id());
+    let bin = format!("/tmp/ferrite_sim_{}", std::process::id());
 
     // ── Compile ──────────────────────────────────────────────────────────────
     let mut compile = std::process::Command::new("iverilog");
@@ -113,7 +113,7 @@ pub fn verilog_sim(args: &Value) -> Result<ToolResult, String> {
     if let Some(vcd) = vcd_out {
         // Emit VCD — user must have $dumpfile/$dumpvars in testbench,
         // but we pass the preferred path via plusarg
-        compile.arg(format!("+CREAM_VCD={vcd}"));
+        compile.arg(format!("+FERRITE_VCD={vcd}"));
     }
     for f in &files { compile.arg(f); }
 
@@ -319,7 +319,7 @@ pub fn vivado_tcl(args: &Value) -> Result<ToolResult, String> {
     }
 
     // Write inline cmd to a temp file
-    let tmp_path = format!("/tmp/cream_vivado_{}.tcl", std::process::id());
+    let tmp_path = format!("/tmp/ferrite_vivado_{}.tcl", std::process::id());
     let script_path: String = if let Some(path) = script_file {
         path.to_owned()
     } else {
@@ -401,7 +401,7 @@ disconnect_hw_server
 close_hw_manager
 "#;
 
-    let tmp = format!("/tmp/cream_boards_{}.tcl", std::process::id());
+    let tmp = format!("/tmp/ferrite_boards_{}.tcl", std::process::id());
     std::fs::write(&tmp, tcl).map_err(|e| format!("fpga_boards: write tmp: {e}"))?;
 
     let out = std::process::Command::new(VIVADO)
@@ -479,7 +479,7 @@ disconnect_hw_server
 close_hw_manager
 "#);
 
-    let tmp = format!("/tmp/cream_prog_{}.tcl", std::process::id());
+    let tmp = format!("/tmp/ferrite_prog_{}.tcl", std::process::id());
     std::fs::write(&tmp, &tcl).map_err(|e| format!("fpga_program: write tmp: {e}"))?;
 
     let start = std::time::Instant::now();

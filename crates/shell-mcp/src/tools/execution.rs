@@ -4,7 +4,7 @@
 //! build_check: Smart compilation — auto-resolves CUDA flags, returns parsed error list.
 //! task_run:    Write a script to a tempfile and execute it atomically in one call.
 
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -13,6 +13,7 @@ use serde_json::{json, Value};
 
 use crate::protocol::ToolResult;
 use crate::server::ServerState;
+use crate::terminal;
 
 // ── exec ──────────────────────────────────────────────────────────────────────
 
@@ -20,8 +21,9 @@ pub fn exec_cmd(args: &Value, state: &Arc<Mutex<ServerState>>) -> Result<ToolRes
     let cmd = args["cmd"].as_str().ok_or("exec: 'cmd' is required")?;
 
     let state_cwd = state.lock()
-        .map_err(|e| format!("state lock poisoned: {e}"))?
-        .cwd.clone();
+        .map_err(|e| format!("state lock poisoned: {e}"))?.cwd.clone();
+    // Re-read config from disk each call so changes take effect without restart
+    let config = crate::config::FerriteConfig::load();
 
     let cwd = args["cwd"].as_str()
         .map(PathBuf::from)
@@ -36,17 +38,36 @@ pub fn exec_cmd(args: &Value, state: &Arc<Mutex<ServerState>>) -> Result<ToolRes
         .map(|m| m.iter().filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_owned()))).collect())
         .unwrap_or_default();
 
-    let result = run(cmd, &cwd, &extra_env, &stdin_data, Duration::from_secs(timeout_secs));
+    let title = format!("ferrite | exec: {}", &cmd[..cmd.len().min(40)]);
+    let result = run_observed(cmd, &cwd, &extra_env, &stdin_data,
+        Duration::from_secs(timeout_secs), &title, &config);
     Ok(ToolResult::json(&result))
 }
 
-/// Core command runner — called by both exec and build_check.
+/// Core command runner — called by build helpers (no observer).
 pub fn run(
     cmd: &str,
     cwd: &Path,
     extra_env: &[(String, String)],
     stdin_data: &str,
     timeout: Duration,
+) -> Value {
+    run_observed(cmd, cwd, extra_env, stdin_data, timeout, "", &Default::default())
+}
+
+/// Run a command, optionally opening a terminal observer window.
+///
+/// When `config.terminal_always()` is true, output is teed to a temp log
+/// file and a terminal window is opened showing `tail -f` of that log
+/// before we block waiting for the child to finish.
+fn run_observed(
+    cmd: &str,
+    cwd: &Path,
+    extra_env: &[(String, String)],
+    stdin_data: &str,
+    timeout: Duration,
+    window_title: &str,
+    config: &crate::config::FerriteConfig,
 ) -> Value {
     use std::process::{Command, Stdio};
 
@@ -72,27 +93,81 @@ pub fn run(
 
     // Write stdin if provided
     if !stdin_data.is_empty() {
-        if let Some(mut stdin) = child.stdin.take() {
-            use std::io::Write;
-            let _ = stdin.write_all(stdin_data.as_bytes());
+        if let Some(mut stdin_pipe) = child.stdin.take() {
+            let _ = stdin_pipe.write_all(stdin_data.as_bytes());
         }
     }
 
-    // Capture stdout/stderr via threads (avoids deadlock on large output)
-    let mut stdout_reader = child.stdout.take().map(|s| {
+    // Optionally tee output to a temp log file for the terminal observer.
+    let log_path: Option<PathBuf> = if config.terminal_always() && !window_title.is_empty() {
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis();
+        let p = std::env::temp_dir().join(format!("ferrite_exec_{ts}.log"));
+        // Pre-create so tail -f --retry can find it immediately
+        let _ = std::fs::File::create(&p);
+        Some(p)
+    } else {
+        None
+    };
+
+    // Capture stdout/stderr via threads, optionally tee-ing to the log file.
+    let stdout_handle = child.stdout.take().map(|stream| {
+        let log = log_path.clone();
         std::thread::spawn(move || {
             let mut buf = Vec::new();
-            let _ = std::io::BufReader::new(s).read_to_end(&mut buf);
+            let mut reader = std::io::BufReader::new(stream);
+            let mut tmp = [0u8; 4096];
+            let mut log_file = log.as_ref().and_then(|p| {
+                std::fs::OpenOptions::new().append(true).open(p).ok()
+            });
+            loop {
+                match reader.read(&mut tmp) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => {
+                        buf.extend_from_slice(&tmp[..n]);
+                        if let Some(ref mut f) = log_file {
+                            let _ = f.write_all(&tmp[..n]);
+                        }
+                    }
+                }
+            }
             buf
         })
     });
-    let mut stderr_reader = child.stderr.take().map(|s| {
+
+    let stderr_handle = child.stderr.take().map(|stream| {
+        let log = log_path.clone();
         std::thread::spawn(move || {
             let mut buf = Vec::new();
-            let _ = std::io::BufReader::new(s).read_to_end(&mut buf);
+            let mut reader = std::io::BufReader::new(stream);
+            let mut tmp = [0u8; 4096];
+            // stderr also appends to same log
+            let mut log_file = log.as_ref().and_then(|p| {
+                std::fs::OpenOptions::new().append(true).open(p).ok()
+            });
+            loop {
+                match reader.read(&mut tmp) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => {
+                        buf.extend_from_slice(&tmp[..n]);
+                        if let Some(ref mut f) = log_file {
+                            let _ = f.write_all(&tmp[..n]);
+                        }
+                    }
+                }
+            }
             buf
         })
     });
+
+    // Open terminal observer window now that the log file exists and the
+    // reader threads are running.
+    if let Some(ref log) = log_path {
+        let tail_cmd = terminal::colorized_watch_cmd(log, config.terminal.keep_open);
+        let _ = terminal::launch_terminal(window_title, &tail_cmd, &config.terminal.emulator);
+    }
 
     // Poll with timeout
     let deadline = Instant::now() + timeout;
@@ -102,7 +177,7 @@ pub fn run(
             Ok(None) => {
                 if Instant::now() >= deadline {
                     let _ = child.kill();
-                    break None; // timed out
+                    break None;
                 }
                 std::thread::sleep(Duration::from_millis(50));
             }
@@ -113,23 +188,43 @@ pub fn run(
     let duration_ms = start.elapsed().as_millis() as u64;
     let timed_out = exit_status.is_none();
 
-    let stdout = stdout_reader
-        .take()
+    let stdout = stdout_handle
         .and_then(|h| h.join().ok())
-        .map(|b| String::from_utf8_lossy(&b).into_owned())
+        .map(|b| strip_ansi(String::from_utf8_lossy(&b).into_owned()))
         .unwrap_or_default();
 
-    let stderr = stderr_reader
-        .take()
+    let stderr = stderr_handle
         .and_then(|h| h.join().ok())
-        .map(|b| String::from_utf8_lossy(&b).into_owned())
+        .map(|b| strip_ansi(String::from_utf8_lossy(&b).into_owned()))
         .unwrap_or_default();
 
     let exit_code = exit_status
         .and_then(|s| s.code())
         .unwrap_or(-1);
 
-    json!({
+    // Signal the terminal observer: awk watches for this line and shows
+    // a coloured final status then exits, closing the pipeline cleanly.
+    if let Some(ref log) = log_path {
+        let marker = format!("FERRITE_DONE:{exit_code}\n");
+        let _ = std::fs::OpenOptions::new()
+            .append(true).open(log)
+            .and_then(|mut f| f.write_all(marker.as_bytes()));
+    }
+
+    // Sidecar PID file path — only present when an observer window was launched.
+    let obs = log_path.as_ref()
+        .map(|l| format!("{}.pid", l.display()));
+
+    // Compact format for clean success (no stderr, exit 0, no timeout).
+    if exit_code == 0 && stderr.is_empty() && !timed_out {
+        return match obs {
+            Some(pid_file) => json!({ "ok": true, "ms": duration_ms, "out": stdout,
+                                      "observer_pid_file": pid_file }),
+            None           => json!({ "ok": true, "ms": duration_ms, "out": stdout }),
+        };
+    }
+
+    let mut result = json!({
         "cmd": cmd,
         "cwd": cwd.display().to_string(),
         "success": exit_code == 0,
@@ -138,7 +233,11 @@ pub fn run(
         "duration_ms": duration_ms,
         "stdout": stdout,
         "stderr": stderr,
-    })
+    });
+    if let Some(pid_file) = obs {
+        result["observer_pid_file"] = json!(pid_file);
+    }
+    result
 }
 
 // ── build_check ───────────────────────────────────────────────────────────────
@@ -151,8 +250,8 @@ pub fn build_check(args: &Value, state: &Arc<Mutex<ServerState>>) -> Result<Tool
         .unwrap_or_default();
 
     let state_cwd = state.lock()
-        .map_err(|e| format!("state lock poisoned: {e}"))?
-        .cwd.clone();
+        .map_err(|e| format!("state lock poisoned: {e}"))?.cwd.clone();
+    let config = crate::config::FerriteConfig::load();
 
     // Resolve file path relative to cwd
     let file_path = if Path::new(file).is_absolute() {
@@ -161,6 +260,11 @@ pub fn build_check(args: &Value, state: &Arc<Mutex<ServerState>>) -> Result<Tool
         state_cwd.join(file)
     };
 
+    let filename = file_path.file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or(file);
+    let title = format!("ferrite | build: {filename}");
+
     // Detect build type from file/directory
     let build_type = match args["type"].as_str().unwrap_or("auto") {
         "auto" => detect_build_type(&file_path),
@@ -168,10 +272,10 @@ pub fn build_check(args: &Value, state: &Arc<Mutex<ServerState>>) -> Result<Tool
     };
 
     let result = match build_type.as_str() {
-        "cuda"  => build_cuda(&file_path, &extra_flags, &state_cwd),
-        "rust"  => build_rust(&file_path, &extra_flags, &state_cwd),
-        "c"     => build_c(&file_path, &extra_flags, "gcc", &state_cwd),
-        "cpp"   => build_c(&file_path, &extra_flags, "g++", &state_cwd),
+        "cuda"  => build_cuda(&file_path, &extra_flags, &state_cwd, &title, &config),
+        "rust"  => build_rust(&file_path, &extra_flags, &state_cwd, &title, &config),
+        "c"     => build_c(&file_path, &extra_flags, "gcc", &state_cwd, &title, &config),
+        "cpp"   => build_c(&file_path, &extra_flags, "g++", &state_cwd, &title, &config),
         other   => return Ok(ToolResult::error(format!("unknown build type: {other}"))),
     };
 
@@ -194,7 +298,7 @@ fn detect_build_type(path: &Path) -> String {
 
 // ── CUDA build ────────────────────────────────────────────────────────────────
 
-fn build_cuda(file: &Path, extra_flags: &[String], cwd: &Path) -> Value {
+fn build_cuda(file: &Path, extra_flags: &[String], cwd: &Path, title: &str, config: &crate::config::FerriteConfig) -> Value {
     let nvcc = match which_bin("nvcc") {
         Some(p) => p,
         None => return json!({
@@ -206,7 +310,7 @@ fn build_cuda(file: &Path, extra_flags: &[String], cwd: &Path) -> Value {
     // Detect compute capability from cached gpu_info
     let arch_flags = detect_cuda_arch_flags();
 
-    let out_path = std::env::temp_dir().join("cream_build_check.o");
+    let out_path = std::env::temp_dir().join("ferrite_build_check.o");
 
     let mut cmd_parts = vec![
         nvcc.clone(),
@@ -225,7 +329,7 @@ fn build_cuda(file: &Path, extra_flags: &[String], cwd: &Path) -> Value {
     cmd_parts.push(file.display().to_string());
 
     let cmd = cmd_parts.join(" ");
-    let raw = run(&cmd, cwd, &[], "", Duration::from_secs(120));
+    let raw = run_observed(&cmd, cwd, &[], "", Duration::from_secs(120), title, config);
 
     let stderr = raw["stderr"].as_str().unwrap_or("").to_owned();
     let stdout = raw["stdout"].as_str().unwrap_or("").to_owned();
@@ -336,7 +440,7 @@ fn try_parse_nvcc_line(line: &str) -> Option<Value> {
 
 // ── Rust / Cargo build ────────────────────────────────────────────────────────
 
-fn build_rust(file: &Path, extra_flags: &[String], cwd: &Path) -> Value {
+fn build_rust(file: &Path, extra_flags: &[String], cwd: &Path, title: &str, config: &crate::config::FerriteConfig) -> Value {
     // If file is a directory or Cargo.toml, run cargo check from there.
     // If it's a .rs file, cargo check the parent package.
     let cargo_dir = if file.is_dir() {
@@ -352,7 +456,7 @@ fn build_rust(file: &Path, extra_flags: &[String], cwd: &Path) -> Value {
     flags.extend(extra_flags.iter().cloned());
 
     let cmd = format!("cargo check {}", flags.join(" "));
-    let raw = run(&cmd, &cargo_dir, &[], "", Duration::from_secs(180));
+    let raw = run_observed(&cmd, &cargo_dir, &[], "", Duration::from_secs(180), title, config);
 
     let stderr = raw["stderr"].as_str().unwrap_or("").to_owned();
     let stdout = raw["stdout"].as_str().unwrap_or("").to_owned();
@@ -422,8 +526,8 @@ fn find_cargo_root(from: &Path) -> Option<PathBuf> {
 
 // ── C / C++ build ─────────────────────────────────────────────────────────────
 
-fn build_c(file: &Path, extra_flags: &[String], compiler: &str, cwd: &Path) -> Value {
-    let out = std::env::temp_dir().join("cream_build_check.o");
+fn build_c(file: &Path, extra_flags: &[String], compiler: &str, cwd: &Path, title: &str, config: &crate::config::FerriteConfig) -> Value {
+    let out = std::env::temp_dir().join("ferrite_build_check.o");
     let mut parts = vec![
         compiler.to_owned(),
         "-c".to_owned(),
@@ -436,7 +540,7 @@ fn build_c(file: &Path, extra_flags: &[String], compiler: &str, cwd: &Path) -> V
     parts.push(file.display().to_string());
 
     let cmd = parts.join(" ");
-    let raw = run(&cmd, cwd, &[], "", Duration::from_secs(60));
+    let raw = run_observed(&cmd, cwd, &[], "", Duration::from_secs(60), title, config);
 
     let stderr = raw["stderr"].as_str().unwrap_or("").to_owned();
     let success = raw["success"].as_bool().unwrap_or(false);
@@ -505,8 +609,8 @@ pub fn task_run(args: &Value, state: &Arc<Mutex<ServerState>>) -> Result<ToolRes
     let timeout     = args["timeout_secs"].as_u64().unwrap_or(120);
 
     let state_cwd = state.lock()
-        .map_err(|e| format!("state lock poisoned: {e}"))?
-        .cwd.clone();
+        .map_err(|e| format!("state lock poisoned: {e}"))?.cwd.clone();
+    let config = crate::config::FerriteConfig::load();
     let cwd = args["cwd"].as_str().map(PathBuf::from).unwrap_or(state_cwd);
 
     // Whitelist interpreters — no arbitrary binary execution via this field.
@@ -524,13 +628,14 @@ pub fn task_run(args: &Value, state: &Arc<Mutex<ServerState>>) -> Result<ToolRes
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis();
-    let script_path = std::env::temp_dir().join(format!("cream_task_{ts}.{ext}"));
+    let script_path = std::env::temp_dir().join(format!("ferrite_task_{ts}.{ext}"));
 
     std::fs::write(&script_path, script)
         .map_err(|e| format!("task_run: write tempfile: {e}"))?;
 
     let cmd = format!("{interpreter} {}", script_path.display());
-    let result = run(&cmd, &cwd, &[], "", Duration::from_secs(timeout));
+    let title = format!("ferrite | task: {interpreter}");
+    let result = run_observed(&cmd, &cwd, &[], "", Duration::from_secs(timeout), &title, &config);
 
     let _ = std::fs::remove_file(&script_path);
 
@@ -573,7 +678,57 @@ pub fn launch(args: &Value, state: &Arc<Mutex<ServerState>>) -> Result<ToolResul
     })))
 }
 
+// ── Terminal observer helpers ─────────────────────────────────────────────────
+
+/// Build the shell command that runs inside the observer terminal window.
+///
+/// Pipes `tail -f` through an awk colorizer. Awk watches for the
+/// `FERRITE_DONE:{code}` sentinel line written by run_observed after the
+/// process exits, prints a coloured status banner, then exits — which
+/// also terminates the tail pipeline via SIGPIPE.
 // ── Shared helpers ─────────────────────────────────────────────────────────────
+
+/// Strip ANSI escape sequences from a string.
+/// Removes CSI sequences (ESC [ ... m), OSC sequences, and bare ESC chars.
+fn strip_ansi(s: String) -> String {
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == 0x1b {
+            i += 1;
+            if i < bytes.len() {
+                match bytes[i] {
+                    b'[' => {
+                        // CSI: ESC [ ... (final byte in 0x40–0x7E)
+                        i += 1;
+                        while i < bytes.len() && !(0x40..=0x7e).contains(&bytes[i]) {
+                            i += 1;
+                        }
+                        i += 1; // skip final byte
+                    }
+                    b']' => {
+                        // OSC: ESC ] ... ST (BEL or ESC \)
+                        i += 1;
+                        while i < bytes.len() && bytes[i] != 0x07 {
+                            if bytes[i] == 0x1b && i + 1 < bytes.len() && bytes[i+1] == b'\\' {
+                                i += 2;
+                                break;
+                            }
+                            i += 1;
+                        }
+                        if i < bytes.len() { i += 1; }
+                    }
+                    _ => { i += 1; } // skip whatever follows ESC
+                }
+            }
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
 
 fn which_bin(name: &str) -> Option<String> {
     let path_var = std::env::var("PATH").unwrap_or_default();
@@ -583,6 +738,66 @@ fn which_bin(name: &str) -> Option<String> {
         use std::os::unix::fs::PermissionsExt;
         p.metadata().map(|m| m.is_file() && m.permissions().mode() & 0o111 != 0).unwrap_or(false)
     }).map(|p| p.display().to_string())
+}
+
+// ── close_observer ────────────────────────────────────────────────────────────
+
+/// Kill the shell process running inside an observer terminal window.
+///
+/// Sends SIGTERM to the PID stored in the sidecar `.pid` file that
+/// `colorized_watch_cmd` writes at startup. Killing that shell kills the
+/// entire `tail | awk` pipeline and causes the terminal window to close.
+///
+/// `pid_file`: explicit path (e.g. from exec result's `observer_pid_file`).
+/// If omitted, the most-recently-created `/tmp/ferrite_exec_*.pid` is used.
+pub fn close_observer(args: &Value) -> Result<ToolResult, String> {
+    let pid_file = match args["pid_file"].as_str() {
+        Some(f) => f.to_owned(),
+        None    => find_newest_pid_file()?,
+    };
+
+    let text = std::fs::read_to_string(&pid_file)
+        .map_err(|e| format!("close_observer: read '{pid_file}': {e}"))?;
+
+    let pid: i32 = text.trim().parse()
+        .map_err(|_| format!("close_observer: invalid PID '{}'", text.trim()))?;
+
+    let rc = unsafe { libc::kill(pid, libc::SIGTERM) };
+    let _ = std::fs::remove_file(&pid_file);
+
+    if rc == 0 {
+        Ok(ToolResult::json(&json!({
+            "ok": true,
+            "closed_pid": pid,
+            "pid_file": pid_file,
+        })))
+    } else {
+        Ok(ToolResult::json(&json!({
+            "ok": false,
+            "error": format!("kill({pid}, SIGTERM) returned {rc} — process may have already exited"),
+            "pid_file": pid_file,
+        })))
+    }
+}
+
+fn find_newest_pid_file() -> Result<String, String> {
+    let tmp = std::env::temp_dir();
+    let mut entries: Vec<_> = std::fs::read_dir(&tmp)
+        .map_err(|e| format!("close_observer: read {}: {e}", tmp.display()))?
+        .filter_map(|e| e.ok())
+        .filter(|e| {
+            let name = e.file_name();
+            let s = name.to_string_lossy();
+            s.starts_with("ferrite_exec_") && s.ends_with(".pid")
+        })
+        .collect();
+
+    if entries.is_empty() {
+        return Err("close_observer: no active observer found — no /tmp/ferrite_exec_*.pid files".to_string());
+    }
+
+    entries.sort_by_key(|e| e.metadata().and_then(|m| m.modified()).unwrap_or(std::time::SystemTime::UNIX_EPOCH));
+    Ok(entries.last().unwrap().path().display().to_string())
 }
 
 fn cuda_include_dir() -> Option<String> {

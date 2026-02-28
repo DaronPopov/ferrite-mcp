@@ -195,7 +195,7 @@ print(json.dumps({{"path": "{root}", "count": len(results), "files": results}}))
 // ── helpers ───────────────────────────────────────────────────────────────────
 
 fn run_python_script(script: &str, tool: &str) -> Result<ToolResult, String> {
-    let tmp = format!("/tmp/cream_{tool}_{}.py", std::process::id());
+    let tmp = format!("/tmp/ferrite_{tool}_{}.py", std::process::id());
     std::fs::write(&tmp, script).map_err(|e| format!("{tool}: write tmp: {e}"))?;
 
     let out = std::process::Command::new("python3")

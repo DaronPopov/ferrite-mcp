@@ -86,7 +86,7 @@ impl Executor {
             match expand_word(&raw, &self.state.env) {
                 Ok(words) => expanded_words.extend(words),
                 Err(e) => {
-                    eprintln!("cream: expand error: {e}");
+                    eprintln!("ferrite: expand error: {e}");
                     return ExitStatus(1);
                 }
             }
@@ -120,11 +120,11 @@ impl Executor {
             Ok(status) => ExitStatus(status.code().unwrap_or(1)),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 self.hooks.fire(HookEvent::CommandNotFound { name: name.to_owned() });
-                eprintln!("cream: {name}: command not found");
+                eprintln!("ferrite: {name}: command not found");
                 ExitStatus(127)
             }
             Err(e) => {
-                eprintln!("cream: {name}: {e}");
+                eprintln!("ferrite: {name}: {e}");
                 ExitStatus(1)
             }
         }

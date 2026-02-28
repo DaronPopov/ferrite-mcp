@@ -1,6 +1,6 @@
 [package]
 name        = "shell-mcp"
-description = "MCP stdio server — exposes cream's machine-intelligence tools to Claude Code"
+description = "MCP stdio server — exposes ferrite's machine-intelligence tools to Claude Code"
 version.workspace   = true
 edition.workspace   = true
 authors.workspace   = true
@@ -10,6 +10,7 @@ license.workspace   = true
 shell-core = { workspace = true }
 serde      = { workspace = true }
 serde_json = { workspace = true }
+toml       = { workspace = true }
 glob       = { workspace = true }
 regex      = { workspace = true }
 nix        = { workspace = true }

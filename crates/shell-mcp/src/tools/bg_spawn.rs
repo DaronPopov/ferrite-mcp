@@ -13,7 +13,7 @@ use crate::protocol::ToolResult;
 pub fn bg_spawn(args: &Value, store: &Arc<JobStore>) -> Result<ToolResult, String> {
     let cmd = args["cmd"].as_str().ok_or("bg_spawn: 'cmd' is required")?;
 
-    // Resolve cwd: caller-supplied → cream's state → process cwd.
+    // Resolve cwd: caller-supplied → ferrite's state → process cwd.
     let cwd = args["cwd"]
         .as_str()
         .map(PathBuf::from)

@@ -60,7 +60,7 @@ fn detect_project_at(dir: &Path) -> Option<(String, String)> {
     if name == "processor_lab" {
         return Some((name, "rtl_lab".to_owned()));
     }
-    if name == "creamMCP" {
+    if name == "ferrite-mcp" {
         return Some((name, "mcp_server".to_owned()));
     }
 
@@ -69,7 +69,7 @@ fn detect_project_at(dir: &Path) -> Option<(String, String)> {
         return Some((name, "cuda_runtime".to_owned()));
     }
 
-    // Parent-name matches (e.g. we're inside verilogchill/creamMCP)
+    // Parent-name matches (e.g. we're inside verilogchill/ferrite-mcp)
     if dir.join("Cargo.toml").exists() {
         // Check if this is a known Rust project type
         if dir.parent().and_then(|p| p.file_name())
@@ -477,7 +477,7 @@ close_hw_manager
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis();
-    let tcl_file = std::env::temp_dir().join(format!("cream_board_status_{ts}.tcl"));
+    let tcl_file = std::env::temp_dir().join(format!("ferrite_board_status_{ts}.tcl"));
     let _ = std::fs::write(&tcl_file, tcl);
 
     let out = std::process::Command::new("/opt/2025.2/Vivado/bin/vivado")

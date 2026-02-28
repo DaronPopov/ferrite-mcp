@@ -18,8 +18,14 @@ const FLAMEGRAPH_LOCATIONS: &[&str] = &[
 // ── flamegraph ────────────────────────────────────────────────────────────────
 
 pub fn flamegraph(args: &Value) -> Result<ToolResult, String> {
+    #[cfg(not(target_os = "linux"))]
+    return Ok(ToolResult::error(
+        "flamegraph: requires Linux perf. On macOS use Instruments: \
+         xctrace record --template 'Time Profiler' --launch -- <cmd>"
+    ));
+
     let cmd_str  = args["cmd"].as_str().ok_or("flamegraph: 'cmd' required")?;
-    let svg_out  = args["output"].as_str().unwrap_or("/tmp/cream_flamegraph.svg");
+    let svg_out  = args["output"].as_str().unwrap_or("/tmp/ferrite_flamegraph.svg");
     let freq     = args["freq"].as_u64().unwrap_or(99);
     let timeout  = args["timeout_secs"].as_u64().unwrap_or(60);
 
@@ -30,8 +36,8 @@ pub fn flamegraph(args: &Value) -> Result<ToolResult, String> {
         ));
     }
 
-    let perf_data = format!("/tmp/cream_perf_{}.data", std::process::id());
-    let script_out = format!("/tmp/cream_perf_{}.txt", std::process::id());
+    let perf_data = format!("/tmp/ferrite_perf_{}.data", std::process::id());
+    let script_out = format!("/tmp/ferrite_perf_{}.txt", std::process::id());
 
     // ── perf record ──────────────────────────────────────────────────────────
     let record_cmd = format!(
@@ -166,6 +172,12 @@ fn parse_perf_report(report: &str) -> Vec<Value> {
 // ── perf_stat ─────────────────────────────────────────────────────────────────
 
 pub fn perf_stat(args: &Value) -> Result<ToolResult, String> {
+    #[cfg(not(target_os = "linux"))]
+    return Ok(ToolResult::error(
+        "perf_stat: requires Linux perf. On macOS use: \
+         xctrace record --template 'Time Profiler' --launch -- <cmd>"
+    ));
+
     let cmd_str  = args["cmd"].as_str().ok_or("perf_stat: 'cmd' required")?;
     let timeout  = args["timeout_secs"].as_u64().unwrap_or(60);
     let events   = args["events"].as_str()

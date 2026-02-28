@@ -16,7 +16,7 @@ pub fn http_request(args: &Value) -> Result<ToolResult, String> {
     let follow  = args["follow_redirects"].as_bool().unwrap_or(true);
     let insecure = args["insecure"].as_bool().unwrap_or(false);
 
-    let header_tmp = format!("/tmp/cream_http_hdrs_{}.txt", std::process::id());
+    let header_tmp = format!("/tmp/ferrite_http_hdrs_{}.txt", std::process::id());
 
     // -s silent, -X method, -D header dump, -w stats appended to body output
     // We use a sentinel to split body from stats
@@ -26,7 +26,7 @@ pub fn http_request(args: &Value) -> Result<ToolResult, String> {
     cmd.arg("-s")
        .arg("-X").arg(&method)
        .arg("-D").arg(&header_tmp)
-       .arg("-w").arg(format!("\x02CREAM_STATS\x03{stats_fmt}"))
+       .arg("-w").arg(format!("\x02FERRITE_STATS\x03{stats_fmt}"))
        .arg("--max-time").arg(timeout.to_string())
        .arg("--connect-timeout").arg("10");
 
@@ -62,7 +62,7 @@ pub fn http_request(args: &Value) -> Result<ToolResult, String> {
 
     // Split body from appended stats
     let (body_raw, stats_raw) = stdout
-        .split_once("\x02CREAM_STATS\x03")
+        .split_once("\x02FERRITE_STATS\x03")
         .unwrap_or((&stdout, ""));
 
     let stats: Vec<&str> = stats_raw.splitn(4, '\x1F').collect();

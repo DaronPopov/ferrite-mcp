@@ -58,7 +58,7 @@ pub fn project_new(args: &Value) -> Result<ToolResult, String> {
         return Err(format!("git add failed: {}", add["stderr"].as_str().unwrap_or("")));
     }
 
-    let commit_cmd = r#"git -c user.email="cream@local" -c user.name="cream" commit -m "Initial commit""#;
+    let commit_cmd = r#"git -c user.email="ferrite@local" -c user.name="ferrite" commit -m "Initial commit""#;
     let commit = run(commit_cmd, &root, &[], "", Duration::from_secs(10));
     if !commit["success"].as_bool().unwrap_or(false) {
         return Err(format!("git commit failed: {}", commit["stderr"].as_str().unwrap_or("")));

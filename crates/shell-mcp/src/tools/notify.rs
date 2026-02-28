@@ -7,7 +7,7 @@
 //!
 //! Parameters:
 //!   message   (required) — notification body
-//!   title     — title (default: "cream")
+//!   title     — title (default: "ferrite")
 //!   topic     — ntfy.sh topic override (default: $NTFY_TOPIC env var)
 //!   urgency   — low | normal | critical  (desktop only, default: normal)
 //!   icon      — icon name for notify-send (default: "dialog-information")
@@ -25,7 +25,7 @@ use crate::tools::project::expand_tilde;
 
 pub fn notify(args: &Value) -> Result<ToolResult, String> {
     let message  = args["message"].as_str().ok_or("notify: 'message' is required")?;
-    let title    = args["title"].as_str().unwrap_or("cream");
+    let title    = args["title"].as_str().unwrap_or("ferrite");
     let urgency  = args["urgency"].as_str().unwrap_or("normal");
     let icon     = args["icon"].as_str().unwrap_or("dialog-information");
     let priority = args["priority"].as_str().unwrap_or("default");
@@ -105,9 +105,9 @@ pub fn notify(args: &Value) -> Result<ToolResult, String> {
         }
     }
 
-    // Gmail via cream-sendmail helper
+    // Gmail via ferrite-sendmail helper
     let gmail_result = {
-        let sendmail = expand_tilde("~/.local/bin/cream-sendmail");
+        let sendmail = expand_tilde("~/.local/bin/ferrite-sendmail");
         if sendmail.exists() {
             let cmd = format!(
                 "'{}' '{}' '{}'",
@@ -119,7 +119,7 @@ pub fn notify(args: &Value) -> Result<ToolResult, String> {
             let ok  = raw["success"].as_bool().unwrap_or(false);
             json!({ "sent": ok, "reason": if ok { json!(null) } else { json!(raw["stderr"].as_str().unwrap_or("")) } })
         } else {
-            json!({ "sent": false, "reason": "cream-sendmail not found" })
+            json!({ "sent": false, "reason": "ferrite-sendmail not found" })
         }
     };
 

@@ -31,6 +31,7 @@ impl<'src> Lexer<'src> {
         self.src[self.pos..].chars().next()
     }
 
+    #[allow(dead_code)]
     fn peek2(&self) -> Option<char> {
         let mut chars = self.src[self.pos..].chars();
         chars.next();

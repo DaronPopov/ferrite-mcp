@@ -1,23 +1,29 @@
 //! gpu_info and cpu_info tool implementations.
 //!
-//! gpu_info strategy (in order):
+//! gpu_info strategy — Linux:
 //!   1. Compile and run a minimal CUDA deviceQuery program via nvcc   ← most accurate
 //!   2. Parse nvidia-smi --query-gpu output                           ← no CUDA SDK needed
 //!   3. Return "no GPU detected"
+//! gpu_info strategy — macOS (Apple Silicon):
+//!   Returns GPU name from system_profiler; utilization unavailable without sudo.
 //!
-//! cpu_info strategy:
+//! cpu_info strategy — Linux:
 //!   1. Parse /proc/cpuinfo
 //!   2. Parse /sys for cache topology
-
-use std::sync::OnceLock;
+//! cpu_info strategy — macOS:
+//!   Uses sysctl to query hw.* and machdep.cpu.*
 
 use serde_json::{json, Value};
 
 use crate::protocol::ToolResult;
 
-// ── GPU info ──────────────────────────────────────────────────────────────────
+// ── GPU info — Linux ──────────────────────────────────────────────────────────
+
+#[cfg(target_os = "linux")]
+use std::sync::OnceLock;
 
 /// CUDA C source for a minimal device query — compiled once per session.
+#[cfg(target_os = "linux")]
 const GPU_QUERY_SRC: &str = r#"
 #include <stdio.h>
 #include <cuda_runtime.h>
@@ -57,13 +63,16 @@ int main(void) {
 "#;
 
 /// Cached result — GPU topology doesn't change during a session.
+#[cfg(target_os = "linux")]
 static GPU_CACHE: OnceLock<Value> = OnceLock::new();
 
+#[cfg(target_os = "linux")]
 pub fn gpu_info(_args: &Value) -> Result<ToolResult, String> {
     let data = GPU_CACHE.get_or_init(collect_gpu_info);
     Ok(ToolResult::json(data))
 }
 
+#[cfg(target_os = "linux")]
 fn collect_gpu_info() -> Value {
     // Strategy 1: compile + run CUDA query
     if let Some(devices) = try_cuda_device_query() {
@@ -87,13 +96,14 @@ fn collect_gpu_info() -> Value {
     json!({ "source": "none", "devices": [], "note": "No NVIDIA GPU or driver detected" })
 }
 
+#[cfg(target_os = "linux")]
 fn try_cuda_device_query() -> Option<Value> {
     // Need nvcc
     let nvcc = which_bin("nvcc")?;
 
     let dir = std::env::temp_dir();
-    let src  = dir.join("cream_gpuq.cu");
-    let bin  = dir.join("cream_gpuq");
+    let src  = dir.join("ferrite_gpuq.cu");
+    let bin  = dir.join("ferrite_gpuq");
 
     std::fs::write(&src, GPU_QUERY_SRC).ok()?;
 
@@ -125,6 +135,7 @@ fn try_cuda_device_query() -> Option<Value> {
     serde_json::from_str(stdout.trim()).ok()
 }
 
+#[cfg(target_os = "linux")]
 fn nvidia_smi_full() -> Option<Value> {
     let fields = "index,name,driver_version,memory.total,memory.free,\
                   utilization.gpu,temperature.gpu,compute_cap,pci.bus_id";
@@ -155,6 +166,7 @@ fn nvidia_smi_full() -> Option<Value> {
     if devices.is_empty() { None } else { Some(Value::Array(devices)) }
 }
 
+#[cfg(target_os = "linux")]
 fn nvidia_smi_extra() -> Value {
     // Real-time stats to augment the compile-time data
     let fields = "index,driver_version,memory.used,memory.free,\
@@ -182,6 +194,7 @@ fn nvidia_smi_extra() -> Value {
     Value::Array(stats)
 }
 
+#[cfg(target_os = "linux")]
 fn cuda_include_dir() -> Option<String> {
     for var in ["CUDA_HOME", "CUDA_PATH", "CUDA_ROOT"] {
         if let Ok(v) = std::env::var(var) {
@@ -199,6 +212,7 @@ fn cuda_include_dir() -> Option<String> {
     None
 }
 
+#[cfg(target_os = "linux")]
 fn which_bin(name: &str) -> Option<String> {
     let path_var = std::env::var("PATH").unwrap_or_default();
     path_var.split(':').filter(|d| !d.is_empty()).map(|d| {
@@ -209,6 +223,31 @@ fn which_bin(name: &str) -> Option<String> {
     }).map(|p| p.display().to_string())
 }
 
+// ── GPU info — macOS ──────────────────────────────────────────────────────────
+
+/// Return Apple GPU name from system_profiler.
+#[cfg(not(target_os = "linux"))]
+fn apple_gpu_name() -> Option<String> {
+    let out = std::process::Command::new("system_profiler")
+        .args(["SPDisplaysDataType"])
+        .output()
+        .ok()?;
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .find(|l| l.contains("Chipset Model"))
+        .and_then(|l| l.split(':').nth(1))
+        .map(|s| s.trim().to_owned())
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn gpu_info(_args: &Value) -> Result<ToolResult, String> {
+    let name = apple_gpu_name().unwrap_or_else(|| "Apple GPU".to_owned());
+    Ok(ToolResult::json(&json!({
+        "source":  "system_profiler",
+        "devices": [{ "name": name }],
+    })))
+}
+
 // ── CPU info ──────────────────────────────────────────────────────────────────
 
 pub fn cpu_info(_args: &Value) -> Result<ToolResult, String> {
@@ -216,6 +255,7 @@ pub fn cpu_info(_args: &Value) -> Result<ToolResult, String> {
     Ok(ToolResult::json(&info))
 }
 
+#[cfg(target_os = "linux")]
 fn collect_cpu_info() -> Value {
     let cpuinfo = std::fs::read_to_string("/proc/cpuinfo").unwrap_or_default();
 
@@ -271,6 +311,7 @@ fn collect_cpu_info() -> Value {
     })
 }
 
+#[cfg(target_os = "linux")]
 fn extract_simd_flags(flags: &str) -> Value {
     let flag_set: std::collections::HashSet<&str> = flags.split_whitespace().collect();
     json!({
@@ -288,6 +329,7 @@ fn extract_simd_flags(flags: &str) -> Value {
     })
 }
 
+#[cfg(target_os = "linux")]
 fn read_cache_topology() -> Value {
     let mut caches = Vec::new();
     let base = std::path::Path::new("/sys/devices/system/cpu/cpu0/cache");
@@ -311,8 +353,63 @@ fn read_cache_topology() -> Value {
     Value::Array(caches)
 }
 
+#[cfg(target_os = "linux")]
 fn read_sysfs(base: &std::path::Path, file: &str) -> Option<String> {
     std::fs::read_to_string(base.join(file)).ok().map(|s| s.trim().to_owned())
+}
+
+// ── CPU info — macOS ──────────────────────────────────────────────────────────
+
+#[cfg(not(target_os = "linux"))]
+fn collect_cpu_info() -> Value {
+    let model = sysctl_str("machdep.cpu.brand_string")
+        .or_else(|| sysctl_str("hw.model"))
+        .unwrap_or_else(|| "Apple Silicon".to_owned());
+    let logical  = sysctl_u64("hw.logicalcpu").unwrap_or(0) as usize;
+    let physical = sysctl_u64("hw.physicalcpu").unwrap_or(0) as usize;
+
+    let mut caches = vec![];
+    if let Some(s) = sysctl_u64("hw.l1dcachesize") {
+        caches.push(json!({"level": 1, "type": "Data",    "size": s}));
+    }
+    if let Some(s) = sysctl_u64("hw.l2cachesize") {
+        caches.push(json!({"level": 2, "type": "Unified", "size": s}));
+    }
+    if let Some(s) = sysctl_u64("hw.l3cachesize") {
+        caches.push(json!({"level": 3, "type": "Unified", "size": s}));
+    }
+
+    // Apple Silicon always has NEON; no x86 SIMD
+    let simd = json!({
+        "neon": true, "sve": false,
+        "avx": false, "avx2": false, "avx512f": false,
+        "fma": false, "sse4_2": false,
+    });
+
+    json!({
+        "model":          model,
+        "sockets":        1,
+        "physical_cores": physical,
+        "logical_cores":  logical,
+        "freq_mhz":       null,
+        "simd":           simd,
+        "caches":         caches,
+    })
+}
+
+#[cfg(not(target_os = "linux"))]
+fn sysctl_str(name: &str) -> Option<String> {
+    std::process::Command::new("sysctl")
+        .args(["-n", name])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_owned())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn sysctl_u64(name: &str) -> Option<u64> {
+    sysctl_str(name)?.parse().ok()
 }
 
 // ── occupancy_calc ────────────────────────────────────────────────────────────
@@ -468,10 +565,11 @@ pub fn occupancy_calc(args: &Value) -> Result<ToolResult, String> {
     })))
 }
 
-// ── gpu_live ──────────────────────────────────────────────────────────────────
+// ── gpu_live — Linux ──────────────────────────────────────────────────────────
 
 /// Live GPU state — utilization, temperature, clocks, power, VRAM.
 /// Not cached: run before benchmarks to verify the GPU is idle and at boost clocks.
+#[cfg(target_os = "linux")]
 pub fn gpu_live(_args: &Value) -> Result<ToolResult, String> {
     let fields = "index,name,\
                   utilization.gpu,utilization.memory,\
@@ -518,14 +616,15 @@ pub fn gpu_live(_args: &Value) -> Result<ToolResult, String> {
         }));
     }
 
+    let n = gpus.len();
     let ready = gpus.iter().all(|g| {
         g["gpu_util_pct"].as_u64().unwrap_or(100) < 5
     });
 
     Ok(ToolResult::json(&json!({
-        "gpus":             gpus,
-        "count":            gpus.len(),
-        "ready_to_bench":   ready,
+        "gpus":           gpus,
+        "count":          n,
+        "ready_to_bench": ready,
         "note": if ready {
             "GPU idle — benchmark results will be reliable"
         } else {
@@ -534,6 +633,7 @@ pub fn gpu_live(_args: &Value) -> Result<ToolResult, String> {
     })))
 }
 
+#[cfg(target_os = "linux")]
 fn live_compute_cap() -> Option<(u32, u32)> {
     let out = std::process::Command::new("nvidia-smi")
         .args(["--query-gpu=compute_cap", "--format=csv,noheader"])
@@ -542,4 +642,25 @@ fn live_compute_cap() -> Option<(u32, u32)> {
     let cap = s.lines().next()?.trim();
     let (maj, min) = cap.split_once('.')?;
     Some((maj.parse().ok()?, min.parse().ok()?))
+}
+
+// ── gpu_live — macOS ──────────────────────────────────────────────────────────
+
+/// Apple Silicon GPU stub — utilization data requires sudo/Instruments.
+#[cfg(not(target_os = "linux"))]
+pub fn gpu_live(_args: &Value) -> Result<ToolResult, String> {
+    let name = apple_gpu_name().unwrap_or_else(|| "Apple GPU".to_owned());
+    Ok(ToolResult::json(&json!({
+        "gpus":   [{ "index": 0, "name": name }],
+        "count":  1,
+        "ready_to_bench": true,
+        "note": "Apple Silicon GPU — utilization data unavailable without sudo. \
+                 Use Instruments or Activity Monitor for GPU metrics.",
+    })))
+}
+
+/// Fallback live_compute_cap on macOS — always returns None (no CUDA).
+#[cfg(not(target_os = "linux"))]
+fn live_compute_cap() -> Option<(u32, u32)> {
+    None
 }

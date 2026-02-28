@@ -108,5 +108,5 @@ impl Default for History {
 
 fn default_history_path() -> Option<PathBuf> {
     let home = std::env::var("HOME").ok()?;
-    Some(PathBuf::from(home).join(".local/share/cream/history"))
+    Some(PathBuf::from(home).join(".local/share/ferrite/history"))
 }

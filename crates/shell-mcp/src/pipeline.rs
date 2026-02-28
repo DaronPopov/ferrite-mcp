@@ -334,7 +334,7 @@ fn coordinator(pipeline: Arc<Pipeline>, job_store: Arc<JobStore>, default_cwd: P
                     *step.status.lock().unwrap() = StepStatus::Running;
                 }
                 Err(e) => {
-                    eprintln!("cream pipeline: failed to spawn step '{}': {e}", step.id);
+                    eprintln!("ferrite pipeline: failed to spawn step '{}': {e}", step.id);
                     *step.status.lock().unwrap() = StepStatus::Failed(-1);
                 }
             }

@@ -197,7 +197,7 @@ fn compile_to_ptx(src: &str) -> Result<(String, Option<String>), String> {
     let nvcc = which_bin("nvcc").ok_or("nvcc not found in PATH")?;
     let arch = live_arch_flags().unwrap_or_else(|| vec!["-arch=compute_86".into()]);
 
-    let out_ptx = std::env::temp_dir().join("cream_inspect.ptx");
+    let out_ptx = std::env::temp_dir().join("ferrite_inspect.ptx");
 
     let mut cmd = std::process::Command::new(&nvcc);
     cmd.arg("--ptx")

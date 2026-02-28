@@ -193,12 +193,12 @@ pub fn all_tool_definitions() -> Vec<ToolDef> {
         // ── State ─────────────────────────────────────────────────────────────
         ToolDef {
             name: "shell_state",
-            description: "Return cream's cwd, PATH, and dev-relevant environment variables.",
+            description: "Return ferrite's cwd, PATH, and dev-relevant environment variables.",
             input_schema: json!({ "type": "object", "properties": {} }),
         },
         ToolDef {
             name: "set_cwd",
-            description: "Change cream's working directory. Persists across calls.",
+            description: "Change ferrite's working directory. Persists across calls.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -355,7 +355,7 @@ pub fn all_tool_definitions() -> Vec<ToolDef> {
             description: "Persistent benchmark result store across sessions. \
                            record: save a result. list: show last N records. \
                            query: filter by tag/kernel. compare: diff last two records for a tag. \
-                           Stored at ~/.local/share/cream/bench_history.jsonl.",
+                           Stored at ~/.local/share/ferrite/bench_history.jsonl.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -394,16 +394,24 @@ pub fn all_tool_definitions() -> Vec<ToolDef> {
         // ── Workspace ─────────────────────────────────────────────────────────
         ToolDef {
             name: "orient",
-            description: "Single-call situational awareness. Returns cwd, git state (branch/staged/unstaged), \
-                           recently changed files, shallow directory tree, and listening ports. \
-                           Replaces calling git_status + changed_since + list_dir + port_list separately. \
-                           Use at the start of a session or when context is lost.",
+            description: "Single-call situational awareness. Returns a compact `summary` string plus cwd, \
+                           git state, recently changed SOURCE files (build artifacts suppressed), and shallow \
+                           directory tree. Ports are opt-in via ports:true and filtered to named processes only — \
+                           this keeps token cost low (~100-200 tokens vs 600+ before). Use at the start of a \
+                           session or when context is lost.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "path":  { "type": "string", "description": "Root path (default: cwd)" },
-                    "since": { "type": "string", "description": "Recent-changes window (default '2h'). E.g. '30m', '1d'" },
-                    "depth": { "type": "integer", "description": "Directory tree depth (default 2)" }
+                    "path":    { "type": "string",  "description": "Root path (default: cwd)" },
+                    "root":    { "type": "string",  "description": "Root for project discovery scan (default: $HOME)" },
+                    "since":   { "type": "string",  "description": "Recent-changes window (default '2h'). E.g. '30m', '1d'" },
+                    "depth":   { "type": "integer", "description": "Directory tree depth (default 2)" },
+                    "ports":   { "type": "boolean", "description": "Include listening ports filtered to named processes (default false)" },
+                    "bg_jobs": { "type": "boolean", "description": "Include running + recent background jobs (default false)" },
+                    "chips":   { "type": "boolean", "description": "Scan processor_lab chips — sim/bit/WNS status. Auto-detects lab path from cwd (default false)" },
+                    "synth":   { "type": "boolean", "description": "Parse Vivado timing/utilization reports near cwd — WNS, LUT%, DSP% (default false)" },
+                    "diff":    { "type": "boolean", "description": "Show compact git diff --stat for dirty repos (default false)" },
+                    "hw":      { "type": "boolean", "description": "Include live GPU utilization + VRAM (default false)" }
                 }
             }),
         },
@@ -411,7 +419,7 @@ pub fn all_tool_definitions() -> Vec<ToolDef> {
             name: "note",
             description: "Session scratchpad — persist observations, decisions, or TODOs across tool calls \
                            within this session. Notes are stored in server memory (not disk) and reset when \
-                           cream restarts. Use to avoid re-deriving context mid-session.",
+                           ferrite restarts. Use to avoid re-deriving context mid-session.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -692,7 +700,7 @@ pub fn all_tool_definitions() -> Vec<ToolDef> {
                 "type": "object",
                 "properties": {
                     "cmd":          { "type": "string",  "description": "Command to profile (shell string)" },
-                    "output":       { "type": "string",  "description": "SVG output path (default /tmp/cream_flamegraph.svg)" },
+                    "output":       { "type": "string",  "description": "SVG output path (default /tmp/ferrite_flamegraph.svg)" },
                     "freq":         { "type": "integer", "description": "Sampling frequency Hz (default 99)" },
                     "timeout_secs": { "type": "integer", "description": "Max profiling time (default 60s)" }
                 },
@@ -836,9 +844,23 @@ pub fn all_tool_definitions() -> Vec<ToolDef> {
                 "type": "object",
                 "properties": {
                     "cmd": { "type": "string", "description": "Shell command to launch detached" },
-                    "cwd": { "type": "string", "description": "Working directory (default: cream cwd)" }
+                    "cwd": { "type": "string", "description": "Working directory (default: ferrite cwd)" }
                 },
                 "required": ["cmd"]
+            }),
+        },
+        ToolDef {
+            name: "close_observer",
+            description: "Close a terminal observer window opened by exec/build_check/task_run. \
+                           Sends SIGTERM to the shell running inside the terminal, which kills \
+                           the tail|awk pipeline and closes the window. \
+                           Pass observer_pid_file from the exec result, or omit to close the most \
+                           recently opened observer.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "pid_file": { "type": "string", "description": "Path from exec result's observer_pid_file (omit to auto-find newest)" }
+                }
             }),
         },
         ToolDef {
@@ -853,7 +875,7 @@ pub fn all_tool_definitions() -> Vec<ToolDef> {
                     "script":       { "type": "string",  "description": "Script source code to execute" },
                     "interpreter":  { "type": "string",  "description": "Interpreter: python3 (default), python, bash, sh" },
                     "timeout_secs": { "type": "integer", "description": "Timeout in seconds (default 120)" },
-                    "cwd":          { "type": "string",  "description": "Working directory override (default: cream cwd)" }
+                    "cwd":          { "type": "string",  "description": "Working directory override (default: ferrite cwd)" }
                 },
                 "required": ["script"]
             }),
@@ -888,7 +910,7 @@ pub fn all_tool_definitions() -> Vec<ToolDef> {
             name: "bg_spawn",
             description: "Spawn a shell command in the background. Returns a job_id immediately — \
                 the process runs while you continue other work. Output is buffered and persisted to \
-                ~/.local/share/cream/logs/. Use bg_status to poll, bg_wait to block, \
+                ~/.local/share/ferrite/logs/. Use bg_status to poll, bg_wait to block, \
                 wait_for_pattern to watch for events, or live_window for a live terminal view.",
             input_schema: json!({
                 "type": "object",
@@ -979,7 +1001,7 @@ pub fn all_tool_definitions() -> Vec<ToolDef> {
             name: "bg_list",
             description: "List all background jobs — running, done, and killed. \
                 Shows job_id, pid, label, status, elapsed time, output byte counts. \
-                Jobs persist across cream restarts.",
+                Jobs persist across ferrite restarts.",
             input_schema: json!({
                 "type": "object",
                 "properties": {}
@@ -1110,12 +1132,12 @@ pub fn all_tool_definitions() -> Vec<ToolDef> {
         ToolDef {
             name: "live_window",
             description: "Open a kitty terminal showing live output from a background job \
-                (tail -f on the persistent log file). If no job_id is given, opens a cream \
-                interactive shell so you can watch cream commands in real time.",
+                (tail -f on the persistent log file). If no job_id is given, opens a ferrite \
+                interactive shell so you can watch ferrite commands in real time.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "job_id": { "type": "string", "description": "Job ID to stream (omit for cream shell)" },
+                    "job_id": { "type": "string", "description": "Job ID to stream (omit for ferrite shell)" },
                     "title":  { "type": "string", "description": "Window title override" }
                 }
             }),
@@ -1124,7 +1146,7 @@ pub fn all_tool_definitions() -> Vec<ToolDef> {
         ToolDef {
             name: "project_context",
             description: "Auto-detect workspace type from path. Walks up from path to find \
-                known project roots (processor_lab, verilogchill, ferrite*, creamMCP). \
+                known project roots (processor_lab, verilogchill, ferrite*, ferrite-mcp). \
                 Returns project_name, project_type, root, context_hints, and active_targets \
                 (chips with .bit or workspace crates).",
             input_schema: json!({
@@ -1353,7 +1375,7 @@ pub fn all_tool_definitions() -> Vec<ToolDef> {
                 "type": "object",
                 "properties": {
                     "message":  { "type": "string", "description": "Notification body (required)" },
-                    "title":    { "type": "string", "description": "Title (default: cream)" },
+                    "title":    { "type": "string", "description": "Title (default: ferrite)" },
                     "topic":    { "type": "string", "description": "ntfy.sh topic override (default: $NTFY_TOPIC)" },
                     "urgency":  { "type": "string", "enum": ["low","normal","critical"], "description": "Desktop urgency (default: normal)" },
                     "priority": { "type": "string", "enum": ["min","low","default","high","urgent"], "description": "ntfy.sh priority (default: default)" },
@@ -1414,7 +1436,7 @@ pub fn all_tool_definitions() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "session_restart",
-            description: "Kill the current Claude tmux session so the cream watchdog spawns a \
+            description: "Kill the current Claude tmux session so the ferrite watchdog spawns a \
                 fresh one — new session ID, new remote-control URL, new email sent to the user. \
                 Use this when you want to hand off to a clean Claude session. \
                 The current session will die ~1 s after the tool is called; \

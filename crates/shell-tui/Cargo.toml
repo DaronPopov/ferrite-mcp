@@ -1,6 +1,6 @@
 [package]
 name        = "shell-tui"
-description = "Interactive terminal layer: readline, prompt, completion, history, cream theme"
+description = "Interactive terminal layer: readline, prompt, completion, history, ferrite theme"
 version.workspace   = true
 edition.workspace   = true
 authors.workspace   = true

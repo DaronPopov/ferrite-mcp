@@ -1,6 +1,6 @@
 //! bench_history — persistent benchmark result store.
 //!
-//! Stores results as newline-delimited JSON at ~/.local/share/cream/bench_history.jsonl
+//! Stores results as newline-delimited JSON at ~/.local/share/ferrite/bench_history.jsonl
 //! Operations: record | list | query | compare
 //!
 //! Schema per record:
@@ -149,7 +149,7 @@ fn history_path() -> Result<PathBuf, String> {
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from("/tmp"));
 
-    let dir = base.join(".local/share/cream");
+    let dir = base.join(".local/share/ferrite");
     std::fs::create_dir_all(&dir)
         .map_err(|e| format!("bench_history: create dir {}: {e}", dir.display()))?;
 

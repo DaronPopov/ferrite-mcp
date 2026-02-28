@@ -2,7 +2,7 @@
 //!
 //! Each Job has:
 //!   - stdout / stderr drained by background reader threads into in-memory buffers
-//!   - a combined log written to ~/.local/share/cream/logs/{job_id}.log (persists restarts)
+//!   - a combined log written to ~/.local/share/ferrite/logs/{job_id}.log (persists restarts)
 //!   - a waiter thread that marks the job Done on exit and triggers a session save
 //!   - cursor-based incremental reads for bg_status
 
@@ -68,7 +68,7 @@ pub struct Job {
     pub status:     Arc<Mutex<JobStatus>>,
     pub stdout_buf: Arc<Mutex<Vec<u8>>>,
     pub stderr_buf: Arc<Mutex<Vec<u8>>>,
-    /// Persistent combined log file — survives cream restarts.
+    /// Persistent combined log file — survives ferrite restarts.
     pub log_path:   PathBuf,
     /// Cursor for incremental bg_status reads.
     pub stdout_cursor: Mutex<usize>,
@@ -166,8 +166,9 @@ impl JobStore {
         }
     }
 
-    /// Return the Unix timestamp of the most recent system boot by reading
-    /// /proc/uptime. Returns 0 on failure (safe: all jobs will appear pre-boot).
+    /// Return the Unix timestamp of the most recent system boot.
+    /// Returns 0 on failure (safe: all jobs will appear pre-boot).
+    #[cfg(target_os = "linux")]
     fn boot_time_secs() -> u64 {
         let uptime_secs = std::fs::read_to_string("/proc/uptime")
             .ok()
@@ -178,6 +179,24 @@ impl JobStore {
             .unwrap_or_default()
             .as_secs();
         now.saturating_sub(uptime_secs)
+    }
+
+    /// Return the Unix timestamp of the most recent system boot via sysctl.
+    /// Returns 0 on failure (safe: all jobs will appear pre-boot).
+    #[cfg(not(target_os = "linux"))]
+    fn boot_time_secs() -> u64 {
+        // sysctl kern.boottime → "{ sec = 1234567890, usec = 0 } ..."
+        std::process::Command::new("sysctl")
+            .args(["-n", "kern.boottime"])
+            .output()
+            .ok()
+            .and_then(|o| {
+                let s = String::from_utf8_lossy(&o.stdout).into_owned();
+                s.find("sec = ").and_then(|i| {
+                    s[i + 6..].split([',', '}']).next()?.trim().parse().ok()
+                })
+            })
+            .unwrap_or(0)
     }
 
     /// Restore jobs from the last saved session.
@@ -203,8 +222,7 @@ impl JobStore {
                 // If the job started before this boot, the PID is stale —
                 // the OS may have recycled it for a completely unrelated process.
                 let started_this_boot = snap.started_secs >= boot_time;
-                let alive = started_this_boot
-                    && std::path::Path::new(&format!("/proc/{}", snap.pid)).exists();
+                let alive = started_this_boot && pid_alive(snap.pid);
                 if alive {
                     (JobStatus::Attached, true)
                 } else {
@@ -228,7 +246,7 @@ impl JobStore {
                             let s = status_t.lock().unwrap();
                             if s.is_terminal() { break; }
                         }
-                        if !std::path::Path::new(&format!("/proc/{pid}")).exists() {
+                        if !pid_alive(pid) {
                             *status_t.lock().unwrap() = JobStatus::Done(-1);
                             break;
                         }
@@ -367,24 +385,23 @@ impl JobStore {
             });
         }
 
-        // ── waiter thread — marks job done, triggers persist ──────────────────
+        // ── waiter thread — marks job done, writes sentinel, triggers persist ──
         {
-            let status_t      = Arc::clone(&status);
-            let persistence_t = Arc::clone(&self.persistence);
-            let jobs_snapshot = {
-                Arc::clone(&self.persistence)
-            };
-            let _job_id_t = job_id.clone();
-            let _ = jobs_snapshot; // unused, drop
-            let _ = persistence_t; // unused — see below
+            let status_t   = Arc::clone(&status);
+            let log_path_t = log_path.clone();
             thread::spawn(move || {
                 let code = match child.wait() {
                     Ok(exit) => exit.code().unwrap_or(-1),
                     Err(_)   => -1,
                 };
                 *status_t.lock().unwrap() = JobStatus::Done(code);
+                // Write FERRITE_DONE sentinel so colorized_watch_cmd banner triggers.
                 // Note: full persist_all is triggered by the next tool call that
                 // reads this job's status. See query.rs bg_status / bg_list.
+                let sentinel = format!("FERRITE_DONE:{code}\n");
+                if let Ok(mut f) = fs::OpenOptions::new().append(true).open(&log_path_t) {
+                    let _ = f.write_all(sentinel.as_bytes());
+                }
             });
         }
 
@@ -507,14 +524,20 @@ impl JobStore {
 
         // ── waiter thread ────────────────────────────────────────────────────
         {
-            let status_t = Arc::clone(&status);
-            let mut child = child;
+            let status_t   = Arc::clone(&status);
+            let log_path_t = log_path.clone();
+            let mut child  = child;
             thread::spawn(move || {
                 let code = match child.wait() {
                     Ok(exit) => exit.code().unwrap_or(-1),
                     Err(_)   => -1,
                 };
                 *status_t.lock().unwrap() = JobStatus::Done(code);
+                // Write FERRITE_DONE sentinel so colorized_watch_cmd banner triggers.
+                let sentinel = format!("FERRITE_DONE:{code}\n");
+                if let Ok(mut f) = fs::OpenOptions::new().append(true).open(&log_path_t) {
+                    let _ = f.write_all(sentinel.as_bytes());
+                }
             });
         }
 
@@ -543,7 +566,7 @@ impl JobStore {
     // ── attach ────────────────────────────────────────────────────────────────
 
     pub fn attach(&self, pid: u32, label: Option<&str>) -> Result<Arc<Job>, String> {
-        if !std::path::Path::new(&format!("/proc/{pid}")).exists() {
+        if !pid_alive(pid) {
             return Err(format!("PID {pid} not found — is it still running?"));
         }
 
@@ -566,7 +589,7 @@ impl JobStore {
                         let s = status_t.lock().unwrap();
                         if s.is_terminal() { break; }
                     }
-                    if !std::path::Path::new(&format!("/proc/{pid}")).exists() {
+                    if !pid_alive(pid) {
                         *status_t.lock().unwrap() = JobStatus::Done(-1);
                         break;
                     }
@@ -616,6 +639,16 @@ impl JobStore {
     }
 }
 
+// ── Process alive check ───────────────────────────────────────────────────────
+
+/// Returns true if the process with the given PID is still running.
+fn pid_alive(pid: u32) -> bool {
+    #[cfg(target_os = "linux")]
+    { std::path::Path::new(&format!("/proc/{pid}")).exists() }
+    #[cfg(not(target_os = "linux"))]
+    { unsafe { libc::kill(pid as i32, 0) == 0 } }
+}
+
 // ── PTY helpers ───────────────────────────────────────────────────────────────
 
 /// Open a pseudo-terminal pair using POSIX APIs (no libutil/openpty needed).
@@ -634,14 +667,26 @@ unsafe fn open_pty() -> Result<(i32, i32), String> {
         return Err(format!("unlockpt: {}", std::io::Error::last_os_error()));
     }
 
-    // ptsname_r: Linux-specific but safe
-    let mut name_buf = [0i8; 256];
-    if libc::ptsname_r(master, name_buf.as_mut_ptr(), name_buf.len()) < 0 {
-        libc::close(master);
-        return Err(format!("ptsname_r: {}", std::io::Error::last_os_error()));
-    }
-
-    let slave_path = std::ffi::CStr::from_ptr(name_buf.as_ptr());
+    // Get the PTY slave path (ptsname_r on Linux; ptsname on macOS).
+    #[cfg(target_os = "linux")]
+    let slave_cstr = {
+        let mut buf = [0i8; 256];
+        if libc::ptsname_r(master, buf.as_mut_ptr(), buf.len()) < 0 {
+            libc::close(master);
+            return Err(format!("ptsname_r: {}", std::io::Error::last_os_error()));
+        }
+        std::ffi::CStr::from_ptr(buf.as_ptr()).to_owned()
+    };
+    #[cfg(not(target_os = "linux"))]
+    let slave_cstr = {
+        let ptr = libc::ptsname(master);
+        if ptr.is_null() {
+            libc::close(master);
+            return Err(format!("ptsname: {}", std::io::Error::last_os_error()));
+        }
+        std::ffi::CStr::from_ptr(ptr).to_owned()
+    };
+    let slave_path = slave_cstr.as_c_str();
     let slave = libc::open(slave_path.as_ptr(), libc::O_RDWR | libc::O_NOCTTY);
     if slave < 0 {
         libc::close(master);

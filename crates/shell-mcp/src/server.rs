@@ -7,6 +7,7 @@ use std::io::{BufRead, Write};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
+use crate::config::FerriteConfig;
 use crate::job_store::JobStore;
 use crate::pipeline::PipelineStore;
 use crate::persist::Persistence;
@@ -16,9 +17,8 @@ use serde_json::{json, Value};
 use crate::protocol::{ERR_INTERNAL, ERR_PARSE, InboundMessage, Response, ToolResult};
 use crate::tools;
 
-/// Default response cap: 0 = unlimited.
-/// Override per-call with `max_chars` arg.
-const DEFAULT_MAX_CHARS: usize = 0;
+/// Default response cap. Override per-call with `max_chars=0` for unlimited.
+const DEFAULT_MAX_CHARS: usize = 8192;
 
 /// Apply keyword filter then size cap to every tool response.
 ///
@@ -53,21 +53,23 @@ fn cap_and_filter(mut result: ToolResult, filter: &str, max_chars: usize) -> Too
 }
 
 const PROTOCOL_VERSION: &str = "2024-11-05";
-const SERVER_NAME:      &str = "cream";
+const SERVER_NAME:      &str = "ferrite";
 const SERVER_VERSION:   &str = env!("CARGO_PKG_VERSION");
 
-/// Shared mutable server state (working directory, session notes, etc.)
+/// Shared mutable server state (working directory, session notes, config, etc.)
 #[derive(Debug, Clone)]
 pub struct ServerState {
-    pub cwd: PathBuf,
-    pub notes: Vec<String>,
+    pub cwd:    PathBuf,
+    pub notes:  Vec<String>,
+    pub config: FerriteConfig,
 }
 
 impl Default for ServerState {
     fn default() -> Self {
         Self {
-            cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/")),
-            notes: Vec::new(),
+            cwd:    std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/")),
+            notes:  Vec::new(),
+            config: FerriteConfig::load(),
         }
     }
 }
@@ -202,6 +204,7 @@ impl McpServer {
             "build_check"    => tools::execution::build_check(args, &self.state),
             "task_run"       => tools::execution::task_run(args, &self.state),
             "launch"         => tools::execution::launch(args, &self.state),
+            "close_observer" => tools::execution::close_observer(args),
             // Binary inspection
             "inspect_binary" => tools::binary::inspect_binary(args),
             // Rust tooling
@@ -243,7 +246,7 @@ impl McpServer {
             "mkdir"          => tools::filesystem::make_dir(args),
             "delete_file"    => tools::filesystem::delete_file(args),
             // Workspace
-            "orient"         => tools::workspace::orient(args, &self.state),
+            "orient"         => tools::workspace::orient(args, &self.state, &self.store),
             "note"           => tools::workspace::note(args, &self.state),
             // EDA
             "verilog_lint"   => tools::eda::verilog_lint(args),

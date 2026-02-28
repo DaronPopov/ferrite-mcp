@@ -7,7 +7,7 @@ authors.workspace   = true
 license.workspace   = true
 
 [[bin]]
-name = "cream"
+name = "ferrite"
 path = "src/main.rs"
 
 [dependencies]
@@ -19,3 +19,4 @@ shell-hooks   = { workspace = true }
 shell-tui     = { workspace = true }
 shell-mcp     = { workspace = true }
 anyhow        = { workspace = true }
+serde_json    = { workspace = true }

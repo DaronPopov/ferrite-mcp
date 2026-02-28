@@ -7,7 +7,7 @@
 //!   push     — push after commit (default: false)
 //!   remote   — remote name (default: "origin")
 //!   branch   — branch to push (default: current branch)
-//!   author   — "Name <email>" override (default: uses git config or cream fallback)
+//!   author   — "Name <email>" override (default: uses git config or ferrite fallback)
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -77,7 +77,7 @@ pub fn git_commit(args: &Value) -> Result<ToolResult, String> {
         if has_config {
             String::new()
         } else {
-            r#" -c user.name="cream" -c user.email="cream@local""#.to_owned()
+            r#" -c user.name="ferrite" -c user.email="ferrite@local""#.to_owned()
         }
     };
 

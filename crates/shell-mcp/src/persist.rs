@@ -1,10 +1,10 @@
-//! Session persistence for cream background jobs.
+//! Session persistence for ferrite background jobs.
 //!
-//! Saves job metadata to ~/.local/share/cream/session.json so job handles
-//! survive cream restarts (Claude context resets, server crashes, etc.).
+//! Saves job metadata to ~/.local/share/ferrite/session.json so job handles
+//! survive ferrite restarts (Claude context resets, server crashes, etc.).
 //!
 //! Layout:
-//!   ~/.local/share/cream/
+//!   ~/.local/share/ferrite/
 //!     session.json      — job snapshots + counter
 //!     logs/             — persistent combined stdout+stderr logs per job
 
@@ -22,7 +22,7 @@ pub fn data_dir() -> PathBuf {
             let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
             PathBuf::from(home).join(".local").join("share")
         });
-    base.join("cream")
+    base.join("ferrite")
 }
 
 pub fn logs_dir() -> PathBuf {
