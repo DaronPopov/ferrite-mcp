@@ -4,11 +4,17 @@ A machine intelligence layer for Claude Code and OpenAI Codex. Built in Rust.
 
 ## Install
 
+**Public repo (HTTPS):**
 ```sh
 curl -fsSL https://raw.githubusercontent.com/DaronPopov/ferrite-mcp/main/install.sh | sh
 ```
 
-Installs the `ferrite` binary via `cargo install` and registers the MCP server for both Claude Code and OpenAI Codex automatically.
+**Private repo / SSH:**
+```sh
+git -C /tmp/ferrite-mcp pull 2>/dev/null || git clone git@github.com:DaronPopov/ferrite-mcp.git /tmp/ferrite-mcp; sh /tmp/ferrite-mcp/install.sh
+```
+
+Safe to re-run any time — clones if missing, pulls latest if already cloned, skips steps already done.
 
 ## What it does
 
