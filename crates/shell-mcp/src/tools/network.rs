@@ -29,8 +29,15 @@ pub fn tailscale_status(_args: &Value) -> Result<ToolResult, String> {
         &cwd, &[], "", Duration::from_secs(10),
     );
 
-    if !raw["success"].as_bool().unwrap_or(false) {
-        // Tailscale not running or not installed
+    // Parse JSON from stdout regardless of exit code — tailscale exits 1
+    // on health warnings (e.g. DNS issues) even when fully running.
+    let ts: Value = serde_json::from_str(raw["stdout"].as_str().unwrap_or("{}"))
+        .unwrap_or(json!({}));
+
+    let backend_state = ts["BackendState"].as_str().unwrap_or("");
+    let is_running = backend_state == "Running" || backend_state == "Starting";
+
+    if !is_running {
         let stderr = raw["stderr"].as_str().unwrap_or("").to_owned();
         let installed = !stderr.contains("not found") && !stderr.contains("No such file");
         return Ok(ToolResult::json(&json!({
@@ -46,9 +53,6 @@ pub fn tailscale_status(_args: &Value) -> Result<ToolResult, String> {
             },
         })));
     }
-
-    let ts: Value = serde_json::from_str(raw["stdout"].as_str().unwrap_or("{}"))
-        .unwrap_or(json!({}));
 
     // Self node
     let self_node = &ts["Self"];
