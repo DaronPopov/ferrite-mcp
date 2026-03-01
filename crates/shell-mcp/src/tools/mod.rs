@@ -8,6 +8,7 @@ pub mod binary;
 pub mod code;
 pub mod debug;
 pub mod discovery;
+pub mod dynamic;
 pub mod eda;
 pub mod execution;
 pub mod filesystem;
@@ -19,6 +20,7 @@ pub mod hardware;
 pub mod history;
 pub mod http;
 pub mod ml;
+pub mod mobile_session;
 pub mod network;
 pub mod notify;
 pub mod perf_tools;
@@ -1441,6 +1443,106 @@ pub fn all_tool_definitions() -> Vec<ToolDef> {
                 Use this when you want to hand off to a clean Claude session. \
                 The current session will die ~1 s after the tool is called; \
                 a new session will appear within ~30 s.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {}
+            }),
+        },
+        ToolDef {
+            name: "session_handoff",
+            description: "Migrate the current Claude conversation to a new tmux session so you can \
+                continue from any terminal (local or remote SSH) without losing context. \
+                Creates a detached tmux session running `claude --continue`, then kills this \
+                session after a short delay. Returns the exact command to paste in the new terminal.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "session_name": {
+                        "type": "string",
+                        "description": "Name for the new tmux session (default: 'claude-remote')"
+                    },
+                    "delay_secs": {
+                        "type": "integer",
+                        "description": "Seconds before killing the current session (default: 3, 0 = don't kill)"
+                    },
+                    "ssh_host": {
+                        "type": "string",
+                        "description": "Optional SSH hostname — if set, connect_cmd will include the ssh prefix"
+                    }
+                },
+                "required": []
+            }),
+        },
+        ToolDef {
+            name: "mobile_session",
+            description: "Trigger the '/mobile-session' flow for Codex mobile attach. \
+                Ensures the codex-remote-auth sidecar is up (optional auto-start), then requests \
+                a magic-link login email and OTP flow for phone entry.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "email": {
+                        "type": "string",
+                        "description": "Email address to receive the sign-in link (defaults to allowed_email in config)"
+                    },
+                    "api_base": {
+                        "type": "string",
+                        "description": "Auth sidecar base URL (default: http://127.0.0.1:8787)"
+                    },
+                    "config_path": {
+                        "type": "string",
+                        "description": "Path to codex_remote_auth.toml (default: ~/.config/ferrite/codex_remote_auth.toml)"
+                    },
+                    "start_if_down": {
+                        "type": "boolean",
+                        "description": "Start sidecar automatically when health check fails (default: true)"
+                    },
+                    "start_cmd": {
+                        "type": "string",
+                        "description": "Override sidecar startup command"
+                    }
+                }
+            }),
+        },
+
+        // ── Dynamic tool registration ─────────────────────────────────────────
+        ToolDef {
+            name: "tool_define",
+            description: "Register a new tool at runtime without restarting. \
+                The tool becomes immediately callable after this returns. \
+                Sends notifications/tools/list_changed so the client re-fetches the tool list. \
+                Tools are persisted to disk and reloaded on next startup.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "name":        { "type": "string",  "description": "Tool name (no spaces, used as the call identifier)" },
+                    "description": { "type": "string",  "description": "What this tool does — shown to the model" },
+                    "params": {
+                        "type": "object",
+                        "description": "JSON Schema object for the tool's parameters (use {} for no params)",
+                        "default": {}
+                    },
+                    "command":     { "type": "string",  "description": "Shell command. Use {param_name} placeholders; args also in $FERRITE_ARGS (JSON) and on stdin." },
+                    "timeout_secs":{ "type": "integer", "description": "Execution timeout in seconds (default: 60)" }
+                },
+                "required": ["name", "description", "command"]
+            }),
+        },
+        ToolDef {
+            name: "tool_undefine",
+            description: "Remove a previously registered dynamic tool. \
+                Sends notifications/tools/list_changed so the client drops it from the list.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string", "description": "Name of the tool to remove" }
+                },
+                "required": ["name"]
+            }),
+        },
+        ToolDef {
+            name: "tool_list_dynamic",
+            description: "List all currently registered dynamic tools with their names, descriptions, and commands.",
             input_schema: json!({
                 "type": "object",
                 "properties": {}
