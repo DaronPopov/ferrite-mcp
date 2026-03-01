@@ -168,7 +168,94 @@ case "$CODEX_STATUS" in
     skip)        inf "OpenAI Codex  — not detected (skipped)" ;;
 esac
 
-# ── 5. ferrite-autostart script ───────────────────────────────────────────────
+# ── 5. Claude plugin (commands) ───────────────────────────────────────────────
+PLUGIN_SRC="$SCRIPT_DIR/plugin"
+PLUGIN_VERSION="1.0.0"
+PLUGIN_CACHE="$HOME/.claude/plugins/cache/ferrite/ferrite-mcp/$PLUGIN_VERSION"
+PLUGIN_KEY="ferrite-mcp@ferrite"
+
+install_plugin() {
+    if [ ! -d "$PLUGIN_SRC" ]; then
+        echo "skip"
+        return
+    fi
+    if ! command -v python3 >/dev/null 2>&1; then
+        echo "nopy"
+        return
+    fi
+
+    mkdir -p "$PLUGIN_CACHE"
+    cp -r "$PLUGIN_SRC/." "$PLUGIN_CACHE/"
+
+    # Register in installed_plugins.json and enable in settings.json
+    python3 - "$HOME/.claude/plugins/installed_plugins.json" \
+               "$HOME/.claude/settings.json" \
+               "$PLUGIN_CACHE" \
+               "$PLUGIN_KEY" \
+               "$PLUGIN_VERSION" <<'PYEOF'
+import json, sys, os, time
+
+plugins_path = sys.argv[1]
+settings_path = sys.argv[2]
+install_path  = sys.argv[3]
+key           = sys.argv[4]
+version       = sys.argv[5]
+
+# --- installed_plugins.json ---
+if os.path.exists(plugins_path):
+    with open(plugins_path) as f:
+        try:    p = json.load(f)
+        except: p = {}
+else:
+    p = {}
+p.setdefault("version", 2)
+p.setdefault("plugins", {})
+
+entry = {
+    "scope": "user",
+    "installPath": install_path,
+    "version": version,
+    "installedAt": "2026-01-01T00:00:00.000Z",
+    "lastUpdated": "2026-01-01T00:00:00.000Z",
+}
+existing = p["plugins"].get(key, [])
+if not any(e.get("installPath") == install_path for e in existing):
+    p["plugins"][key] = [entry]
+    tmp = plugins_path + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(p, f, indent=2)
+    os.replace(tmp, plugins_path)
+
+# --- settings.json ---
+if os.path.exists(settings_path):
+    with open(settings_path) as f:
+        try:    s = json.load(f)
+        except: s = {}
+else:
+    s = {}
+s.setdefault("enabledPlugins", {})
+if s["enabledPlugins"].get(key) is True:
+    print("already")
+    sys.exit(0)
+s["enabledPlugins"][key] = True
+tmp = settings_path + ".tmp"
+with open(tmp, "w") as f:
+    json.dump(s, f, indent=2)
+os.replace(tmp, settings_path)
+print("registered")
+PYEOF
+}
+
+PLUGIN_STATUS="$(install_plugin 2>/dev/null || echo "error")"
+case "$PLUGIN_STATUS" in
+    already)     grn "Claude plugin  — already enabled (ferrite-mcp@ferrite)" ;;
+    registered)  grn "Claude plugin  — installed → $PLUGIN_CACHE" ;;
+    skip)        inf "Claude plugin  — plugin/ dir not found (skipped)" ;;
+    nopy)        yel "Claude plugin  — python3 not found, skipped" ;;
+    *)           yel "Claude plugin  — skipped (see above)" ;;
+esac
+
+# ── 6. ferrite-autostart script ───────────────────────────────────────────────
 AUTOSTART_DST="$HOME/.local/bin/ferrite-autostart"
 AUTOSTART_SRC="$SCRIPT_DIR/scripts/ferrite-autostart"
 
@@ -188,5 +275,6 @@ echo ""
 bold "All done."
 inf "Binary  : $FERRITE_BIN"
 inf "Autostart: $AUTOSTART_DST"
+inf "Plugin  : /remote-control available after Claude Code restart"
 inf "Verify  : ferrite status"
 inf "Restart Claude Code / Codex to activate any new registrations."
