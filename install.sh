@@ -168,9 +168,25 @@ case "$CODEX_STATUS" in
     skip)        inf "OpenAI Codex  — not detected (skipped)" ;;
 esac
 
+# ── 5. ferrite-autostart script ───────────────────────────────────────────────
+AUTOSTART_DST="$HOME/.local/bin/ferrite-autostart"
+AUTOSTART_SRC="$SCRIPT_DIR/scripts/ferrite-autostart"
+
+if [ -f "$AUTOSTART_SRC" ]; then
+    mkdir -p "$HOME/.local/bin"
+    cp "$AUTOSTART_SRC" "$AUTOSTART_DST"
+    chmod +x "$AUTOSTART_DST"
+    grn "ferrite-autostart installed → $AUTOSTART_DST"
+    inf "Config  : ~/.config/cream/gmail.conf (GMAIL_USER, GMAIL_APP_PASSWORD, GMAIL_TO)"
+    inf "Run     : ferrite-autostart  (or enable systemd: see README)"
+else
+    yel "ferrite-autostart — scripts/ferrite-autostart not found (skipped)"
+fi
+
 # ── Done ───────────────────────────────────────────────────────────────────────
 echo ""
 bold "All done."
 inf "Binary  : $FERRITE_BIN"
+inf "Autostart: $AUTOSTART_DST"
 inf "Verify  : ferrite status"
 inf "Restart Claude Code / Codex to activate any new registrations."
