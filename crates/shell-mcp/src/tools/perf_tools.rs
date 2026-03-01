@@ -11,8 +11,7 @@ const FLAMEGRAPH_LOCATIONS: &[&str] = &[
     "flamegraph.pl",
     "/usr/local/bin/flamegraph.pl",
     "/opt/flamegraph/flamegraph.pl",
-    "inferno-flamegraph",        // Rust inferno crate CLI
-    "/home/daron/.cargo/bin/inferno-flamegraph",
+    "inferno-flamegraph",        // Rust inferno crate CLI (must be on PATH)
 ];
 
 // ── flamegraph ────────────────────────────────────────────────────────────────

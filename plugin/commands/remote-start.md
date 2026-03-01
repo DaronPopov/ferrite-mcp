@@ -28,7 +28,7 @@ Print a compact block with everything needed to connect:
 ```
 REMOTE ACCESS — <hostname>
 Tailscale IP : <ip>
-SSH          : ssh daron@<ip>
+SSH          : ssh <user>@<ip>
 Attach tmux  : tmux attach -t <session>  (or list: tmux ls)
 Session URL  : <url or "none">
 ```

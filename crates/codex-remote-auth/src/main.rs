@@ -57,10 +57,8 @@ impl Config {
     fn cookie_secure(&self) -> bool {
         self.cookie_secure.unwrap_or(true)
     }
-    fn email_command(&self) -> &str {
-        self.email_command
-            .as_deref()
-            .unwrap_or("/home/daron/.local/bin/cream-sendmail")
+    fn email_command(&self) -> Option<&str> {
+        self.email_command.as_deref()
     }
 }
 
@@ -600,12 +598,15 @@ fn codex_bin() -> String {
     if let Ok(v) = std::env::var("CODEX_BIN") {
         return v;
     }
-    let native = "/home/daron/.nvm/versions/node/v20.20.0/lib/node_modules/@openai/codex/node_modules/@openai/codex-linux-x64/vendor/x86_64-unknown-linux-musl/codex/codex";
-    if std::path::Path::new(native).exists() {
-        native.to_string()
-    } else {
-        "/home/daron/.nvm/versions/node/v20.20.0/bin/codex".to_string()
+    // Try to find codex on PATH
+    if let Ok(out) = Command::new("which").arg("codex").output() {
+        let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        if !s.is_empty() && std::path::Path::new(&s).exists() {
+            return s;
+        }
     }
+    // Fall back to bare name — let the shell resolve it
+    "codex".to_string()
 }
 
 fn tmux_capture(session: &str, lines: &str) -> Option<String> {
@@ -1145,12 +1146,19 @@ fn verify_token(token: &str, secret: &str) -> Result<MagicClaims> {
 }
 
 fn send_email(cfg: &Config, subject: &str, body: &str, to: &str) -> Result<()> {
-    let output = Command::new(cfg.email_command())
+    let cmd = match cfg.email_command() {
+        Some(c) => c,
+        None => {
+            info!("email_command not configured — skipping email to {to}");
+            return Ok(());
+        }
+    };
+    let output = Command::new(cmd)
         .arg(subject)
         .arg(body)
         .arg(to)
         .output()
-        .with_context(|| format!("failed to execute email command: {}", cfg.email_command()))?;
+        .with_context(|| format!("failed to execute email command: {cmd}"))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
