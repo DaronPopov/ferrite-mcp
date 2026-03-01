@@ -21,7 +21,6 @@ use serde_json::{json, Value};
 
 use crate::protocol::ToolResult;
 use crate::tools::execution::run;
-use crate::tools::project::expand_tilde;
 
 pub fn notify(args: &Value) -> Result<ToolResult, String> {
     let message  = args["message"].as_str().ok_or("notify: 'message' is required")?;
@@ -105,27 +104,8 @@ pub fn notify(args: &Value) -> Result<ToolResult, String> {
         }
     }
 
-    // Gmail via ferrite-sendmail helper
-    let gmail_result = {
-        let sendmail = expand_tilde("~/.local/bin/ferrite-sendmail");
-        if sendmail.exists() {
-            let cmd = format!(
-                "'{}' '{}' '{}'",
-                sendmail.display(),
-                title.replace('\'', "'\\''"),
-                message.replace('\'', "'\\''"),
-            );
-            let raw = run(&cmd, &cwd, &[], "", Duration::from_secs(20));
-            let ok  = raw["success"].as_bool().unwrap_or(false);
-            json!({ "sent": ok, "reason": if ok { json!(null) } else { json!(raw["stderr"].as_str().unwrap_or("")) } })
-        } else {
-            json!({ "sent": false, "reason": "ferrite-sendmail not found" })
-        }
-    };
-
     let any_sent = desktop_result["sent"].as_bool().unwrap_or(false)
-        || phone_result["sent"].as_bool().unwrap_or(false)
-        || gmail_result["sent"].as_bool().unwrap_or(false);
+        || phone_result["sent"].as_bool().unwrap_or(false);
 
     Ok(ToolResult::json(&json!({
         "sent":    any_sent,
@@ -133,6 +113,5 @@ pub fn notify(args: &Value) -> Result<ToolResult, String> {
         "message": message,
         "desktop": desktop_result,
         "phone":   phone_result,
-        "gmail":   gmail_result,
     })))
 }

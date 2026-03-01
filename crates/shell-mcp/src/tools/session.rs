@@ -103,7 +103,7 @@ pub fn session_status(_args: &Value) -> Result<ToolResult, String> {
 }
 
 /// session_restart — kill the current tmux Claude session so the watchdog
-/// respawns a fresh one (new session ID, new remote-control URL, new email).
+/// respawns a fresh one (new session ID, new remote-control URL, new ntfy notification).
 ///
 /// Because this tool kills the tmux pane Claude is running inside, the MCP
 /// response may not be delivered — that is expected. The watchdog detects the
@@ -128,7 +128,7 @@ pub fn session_restart(_args: &Value) -> Result<ToolResult, String> {
     Ok(ToolResult::json(&json!({
         "status":       if launched { "killing" } else { "error" },
         "session":      session_name,
-        "note":         "tmux session will be killed in ~1 s. The ferrite watchdog will spawn a fresh Claude session and send a new email within ~30 s.",
+        "note":         "tmux session will be killed in ~1 s. The ferrite watchdog will spawn a fresh Claude session and send a new ntfy notification within ~30 s.",
         "error":        if launched { json!(null) } else { result["stderr"].clone() },
     })))
 }

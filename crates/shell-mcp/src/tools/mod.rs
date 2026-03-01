@@ -1439,7 +1439,7 @@ pub fn all_tool_definitions() -> Vec<ToolDef> {
         ToolDef {
             name: "session_restart",
             description: "Kill the current Claude tmux session so the ferrite watchdog spawns a \
-                fresh one — new session ID, new remote-control URL, new email sent to the user. \
+                fresh one — new session ID, new remote-control URL, new ntfy notification sent to your phone. \
                 Use this when you want to hand off to a clean Claude session. \
                 The current session will die ~1 s after the tool is called; \
                 a new session will appear within ~30 s.",
