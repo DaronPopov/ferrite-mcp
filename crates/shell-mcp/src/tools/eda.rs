@@ -383,17 +383,21 @@ pub fn vivado_tcl(args: &Value) -> Result<ToolResult, String> {
 
 /// List FPGA boards connected via JTAG, using Vivado hw_manager.
 pub fn fpga_boards(_args: &Value) -> Result<ToolResult, String> {
+    // refresh_hw_server is required — without it get_hw_targets returns empty
+    // even when a board is physically connected and hw_server is running.
     let tcl = r#"
 open_hw_manager
-connect_hw_server -quiet
+connect_hw_server -allow_non_jtag -url TCP:127.0.0.1:3121
+refresh_hw_server
 set targets [get_hw_targets]
 foreach t $targets {
     puts "TARGET: $t"
     open_hw_target $t
     set devices [get_hw_devices]
     foreach d $devices {
-        set part [get_property PART $d]
-        puts "  DEVICE: $d PART: $part STATUS: Open"
+        set part   [get_property PART   $d]
+        set status [get_property STATUS $d]
+        puts "  DEVICE: $d PART: $part STATUS: $status"
     }
     close_hw_target
 }
@@ -457,6 +461,9 @@ pub fn fpga_program(args: &Value) -> Result<ToolResult, String> {
         return Ok(ToolResult::error(format!("fpga_program: bitfile not found: {bitfile}")));
     }
 
+    // Build the target-selection snippet.
+    // refresh_hw_server is critical — without it get_hw_targets returns empty
+    // even when a board is connected and hw_server is already running.
     let target_tcl = if target.is_empty() {
         "lindex [get_hw_targets] 0".to_owned()
     } else {
@@ -465,7 +472,8 @@ pub fn fpga_program(args: &Value) -> Result<ToolResult, String> {
 
     let tcl = format!(r#"
 open_hw_manager
-connect_hw_server -quiet
+connect_hw_server -allow_non_jtag -url TCP:127.0.0.1:3121
+refresh_hw_server
 set t [{target_tcl}]
 if {{$t eq ""}} {{ puts "ERROR: no JTAG target found"; exit 1 }}
 open_hw_target $t
@@ -482,7 +490,7 @@ close_hw_manager
     let tmp = format!("/tmp/ferrite_prog_{}.tcl", std::process::id());
     std::fs::write(&tmp, &tcl).map_err(|e| format!("fpga_program: write tmp: {e}"))?;
 
-    let start = std::time::Instant::now();
+    let start    = std::time::Instant::now();
     let deadline = start + std::time::Duration::from_secs(timeout);
 
     let mut child = std::process::Command::new(VIVADO)
@@ -492,32 +500,66 @@ close_hw_manager
         .spawn()
         .map_err(|e| format!("fpga_program: vivado: {e}"))?;
 
-    loop {
+    // Drain stdout + stderr in background threads so the OS pipe buffer never
+    // fills up and deadlocks the child process (Vivado can be verbose).
+    use std::io::Read;
+    use std::sync::{Arc, Mutex};
+
+    let stdout_buf = Arc::new(Mutex::new(Vec::<u8>::new()));
+    let stderr_buf = Arc::new(Mutex::new(Vec::<u8>::new()));
+
+    let stdout_t = {
+        let buf = Arc::clone(&stdout_buf);
+        let mut pipe = child.stdout.take().unwrap();
+        std::thread::spawn(move || { let _ = pipe.read_to_end(&mut buf.lock().unwrap()); })
+    };
+    let stderr_t = {
+        let buf = Arc::clone(&stderr_buf);
+        let mut pipe = child.stderr.take().unwrap();
+        std::thread::spawn(move || { let _ = pipe.read_to_end(&mut buf.lock().unwrap()); })
+    };
+
+    // Poll for completion with timeout.
+    let timed_out = loop {
         match child.try_wait().map_err(|e| format!("try_wait: {e}"))? {
-            Some(_) => break,
+            Some(_) => break false,
             None => {
                 if std::time::Instant::now() > deadline {
                     child.kill().ok();
-                    let _ = std::fs::remove_file(&tmp);
-                    return Ok(ToolResult::error(format!("fpga_program: timed out after {timeout}s")));
+                    break true;
                 }
                 std::thread::sleep(std::time::Duration::from_millis(200));
             }
         }
-    }
+    };
 
+    let _ = stdout_t.join();
+    let _ = stderr_t.join();
     let _ = std::fs::remove_file(&tmp);
     let duration_ms = start.elapsed().as_millis() as u64;
-    let out = child.wait_with_output().map_err(|e| format!("wait_with_output: {e}"))?;
 
-    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
-    let success = out.status.success() && stdout.contains("PROGRAMMED:");
+    if timed_out {
+        return Ok(ToolResult::error(format!("fpga_program: timed out after {timeout}s")));
+    }
+
+    let stdout = String::from_utf8_lossy(&stdout_buf.lock().unwrap()).to_string();
+    let stderr = String::from_utf8_lossy(&stderr_buf.lock().unwrap()).to_string();
+    let exit_ok = child.wait().map(|s| s.success()).unwrap_or(false);
+    let success = exit_ok && stdout.contains("PROGRAMMED:");
+
+    // Extract the programmed device/target line for a clean summary.
+    let programmed_line = stdout.lines()
+        .find(|l| l.starts_with("PROGRAMMED:"))
+        .unwrap_or("")
+        .to_owned();
 
     Ok(ToolResult::json(&json!({
         "success":     success,
         "bitfile":     bitfile,
+        "programmed":  programmed_line,
         "duration_ms": duration_ms,
         "output":      stdout,
+        "stderr":      if stderr.is_empty() { Value::Null } else { Value::String(stderr) },
     })))
 }
 

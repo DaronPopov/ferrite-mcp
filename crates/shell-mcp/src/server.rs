@@ -303,6 +303,13 @@ impl McpServer {
             "gh_clone"  => tools::github::gh_clone(args),
             "gh_sync"   => tools::github::gh_sync(args),
             "gh_status" => tools::github::gh_status(args),
+            // Permissions / pre-validation
+            "pre_validate"      => tools::permissions_tool::pre_validate(args),
+            "permissions_setup" => tools::permissions_tool::permissions_setup(args),
+            // PTY / interactive program driver
+            "tty_exec"          => tools::tty_exec::tty_exec(args, &self.store),
+            // Environment pre-flight
+            "env_doctor"        => tools::env_doctor::env_doctor(args),
             _           => Err(format!("unknown tool: {name}")),
         }
     }

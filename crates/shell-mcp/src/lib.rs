@@ -1,5 +1,6 @@
 pub mod config;
 pub mod job_store;
+pub mod permissions;
 pub mod persist;
 pub mod pipeline;
 pub mod protocol;

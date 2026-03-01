@@ -32,7 +32,10 @@ pub mod session;
 pub mod state;
 pub mod symbols;
 pub mod system;
+pub mod env_doctor;
+pub mod permissions_tool;
 pub mod tmux;
+pub mod tty_exec;
 pub mod workspace;
 
 use crate::protocol::ToolDef;
@@ -1546,6 +1549,118 @@ pub fn all_tool_definitions() -> Vec<ToolDef> {
             input_schema: json!({
                 "type": "object",
                 "properties": {}
+            }),
+        },
+
+        // ── Permissions / pre-validation ──────────────────────────────────────
+        ToolDef {
+            name: "pre_validate",
+            description: "Analyze a shell command for interactive blockers (sudo password prompts, \
+                           y/n confirmations, interactive TUI installers) before running it. \
+                           Returns the auto-rewritten non-interactive form, injected env vars, \
+                           and any unresolved blockers. Use this before exec for privileged or \
+                           installer-style commands. exec also applies rewrites automatically, \
+                           so this is mainly for transparency / go/no-go decisions.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "cmd": {
+                        "type": "string",
+                        "description": "The shell command to analyze (same syntax as exec's 'cmd')"
+                    }
+                },
+                "required": ["cmd"]
+            }),
+        },
+        ToolDef {
+            name: "permissions_setup",
+            description: "Report the current sudoers pre-authorization status for ferrite. \
+                           Shows whether /etc/sudoers.d/ferrite is installed (granting NOPASSWD \
+                           for apt, systemctl, ufw, snap, chmod, etc.) and how to install it \
+                           if missing. Pass show_entry=true to see the exact sudoers content.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "show_entry": {
+                        "type": "boolean",
+                        "description": "Include the full sudoers entry text in the response (default false)"
+                    }
+                }
+            }),
+        },
+
+        // ── PTY / interactive program driver ──────────────────────────────────
+        ToolDef {
+            name: "tty_exec",
+            description: "Execute a command in a PTY and automatically respond to interactive prompts. \
+                           Handles programs that open /dev/tty directly (custom installers, license dialogs, \
+                           y/n loops) that cannot be silenced by env vars alone. \
+                           default_yes=true (the default) pre-loads a response table covering the most \
+                           common confirmations. Supply a 'responses' map for custom prompts. \
+                           exec applies non-interactive rewrites automatically — use tty_exec only \
+                           when the program genuinely requires a TTY.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "cmd": {
+                        "type": "string",
+                        "description": "Shell command to run in a PTY"
+                    },
+                    "responses": {
+                        "type": "object",
+                        "description": "Map of {prompt_substring → answer_to_send}. Keys matched case-insensitively. \
+                                        Example: {\"overwrite?\": \"y\\n\", \"licence agreement\": \"yes\\n\"}"
+                    },
+                    "default_yes": {
+                        "type": "boolean",
+                        "description": "Pre-load built-in table of affirmative responses for common prompts (default true)"
+                    },
+                    "timeout_secs": {
+                        "type": "number",
+                        "description": "Kill command after this many seconds (default 120)"
+                    },
+                    "idle_done_secs": {
+                        "type": "number",
+                        "description": "Treat N seconds of silence as completion even without EOF (default 3)"
+                    },
+                    "cwd": {
+                        "type": "string",
+                        "description": "Working directory (default: ferrite cwd)"
+                    }
+                },
+                "required": ["cmd"]
+            }),
+        },
+
+        // ── Environment pre-flight ─────────────────────────────────────────────
+        ToolDef {
+            name: "env_doctor",
+            description: "Pre-flight environment check before complex workflows. Reports: \
+                           which tools are in PATH (and their versions), missing binaries with install hints, \
+                           free disk space on / and $HOME, network reachability to pypi/crates.io/npmjs/github, \
+                           write access to key directories, and sudoers status. \
+                           Call this at the start of any multi-step setup task to surface blockers before they bite.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "check_bins": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Additional binaries to check beyond the default list"
+                    },
+                    "check_network": {
+                        "type": "boolean",
+                        "description": "Probe package registries for reachability (default true; adds ~5s)"
+                    },
+                    "check_disk": {
+                        "type": "boolean",
+                        "description": "Check free disk space on / and $HOME (default true)"
+                    },
+                    "check_versions": {
+                        "type": "boolean",
+                        "description": "Query --version for each found binary (default true)"
+                    }
+                }
             }),
         },
     ]

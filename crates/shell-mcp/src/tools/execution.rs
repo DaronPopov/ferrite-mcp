@@ -32,15 +32,98 @@ pub fn exec_cmd(args: &Value, state: &Arc<Mutex<ServerState>>) -> Result<ToolRes
     let timeout_secs = args["timeout_secs"].as_u64().unwrap_or(60);
     let stdin_data   = args["stdin"].as_str().unwrap_or("").to_owned();
 
-    // Merge any caller-supplied env vars on top of the inherited environment
-    let extra_env: Vec<(String, String)> = args["env"]
-        .as_object()
-        .map(|m| m.iter().filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_owned()))).collect())
-        .unwrap_or_default();
+    // Pre-process: rewrite command to non-interactive form + inject baseline env.
+    // This is transparent — the agent always gets the best-effort non-blocking version.
+    let (cmd_rewritten, perm_env) = crate::permissions::preprocess(cmd);
 
-    let title = format!("ferrite | exec: {}", &cmd[..cmd.len().min(40)]);
-    let result = run_observed(cmd, &cwd, &extra_env, &stdin_data,
-        Duration::from_secs(timeout_secs), &title, &config);
+    // Merge env: permission baseline → caller-supplied (caller wins on conflicts).
+    let mut extra_env: Vec<(String, String)> = perm_env;
+    if let Some(caller_env) = args["env"].as_object() {
+        for (k, v) in caller_env {
+            if let Some(s) = v.as_str() {
+                // Caller overrides; remove any perm baseline entry for this key first.
+                extra_env.retain(|(ek, _)| ek != k);
+                extra_env.push((k.clone(), s.to_owned()));
+            }
+        }
+    }
+
+    // Auto-recovery retry loop: up to 3 attempts on recoverable failures.
+    // On each failure, classify_error() decides what to do next.
+    const MAX_RETRIES: usize = 3;
+    let mut current_cmd = cmd_rewritten.clone();
+    let mut attempt      = 0usize;
+    let mut recovery_log: Vec<serde_json::Value> = Vec::new();
+
+    let result = loop {
+        let title = format!("ferrite | exec: {}", &current_cmd[..current_cmd.len().min(40)]);
+        let raw = run_observed(&current_cmd, &cwd, &extra_env, &stdin_data,
+            Duration::from_secs(timeout_secs), &title, &config);
+
+        let exit_code = raw["exit_code"].as_i64().unwrap_or(-1);
+        if exit_code == 0 || attempt >= MAX_RETRIES {
+            // Attach recovery log to result when non-trivial.
+            let mut out = raw;
+            if !recovery_log.is_empty() {
+                out["auto_recovery"] = serde_json::Value::Array(recovery_log.clone());
+            }
+            break out;
+        }
+
+        let stdout = raw["stdout"].as_str().unwrap_or("");
+        let stderr = raw["stderr"].as_str().unwrap_or("");
+
+        match crate::permissions::classify_error(&current_cmd, stdout, stderr) {
+            Some(crate::permissions::RecoveryAction::RetryAfterDelay { secs, reason }) => {
+                recovery_log.push(serde_json::json!({
+                    "attempt": attempt + 1,
+                    "action":  "retry_after_delay",
+                    "delay_secs": secs,
+                    "reason":  reason,
+                }));
+                std::thread::sleep(Duration::from_secs(secs));
+            }
+            Some(crate::permissions::RecoveryAction::RetryWithFlag { flag, reason }) => {
+                let new_cmd = crate::permissions::apply_flag(&current_cmd, &flag);
+                recovery_log.push(serde_json::json!({
+                    "attempt": attempt + 1,
+                    "action":  "retry_with_flag",
+                    "flag":    flag,
+                    "reason":  reason,
+                    "new_cmd": new_cmd,
+                }));
+                current_cmd = new_cmd;
+            }
+            Some(crate::permissions::RecoveryAction::RetryWithSudo { reason }) => {
+                let new_cmd = format!("sudo {current_cmd}");
+                recovery_log.push(serde_json::json!({
+                    "attempt": attempt + 1,
+                    "action":  "retry_with_sudo",
+                    "reason":  reason,
+                    "new_cmd": new_cmd,
+                }));
+                current_cmd = new_cmd;
+            }
+            Some(crate::permissions::RecoveryAction::Unrecoverable { reason }) => {
+                let mut out = raw;
+                out["recovery_note"] = serde_json::Value::String(reason);
+                if !recovery_log.is_empty() {
+                    out["auto_recovery"] = serde_json::Value::Array(recovery_log.clone());
+                }
+                break out;
+            }
+            None => {
+                let mut out = raw;
+                if !recovery_log.is_empty() {
+                    out["auto_recovery"] = serde_json::Value::Array(recovery_log.clone());
+                }
+                break out;
+            }
+        }
+
+        attempt += 1;
+    };
+
     Ok(ToolResult::json(&result))
 }
 
