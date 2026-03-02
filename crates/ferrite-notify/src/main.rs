@@ -117,12 +117,12 @@ fn load_config(path: &PathBuf) -> Config {
     }
 }
 
-/// Backwards-compat: if no smtp entries in notify.toml, fall back to cream gmail.conf
+/// Backwards-compat: if no smtp entries in notify.toml, fall back to ferrite gmail.conf
 fn maybe_load_legacy_gmail(cfg: &mut Config) {
     if !cfg.smtp.is_empty() {
         return;
     }
-    let path = home().join(".config/cream/gmail.conf");
+    let path = home().join(".config/ferrite/gmail.conf");
     let Ok(content) = std::fs::read_to_string(&path) else { return };
     let mut kv: HashMap<String, String> = HashMap::new();
     for line in content.lines() {
@@ -136,7 +136,7 @@ fn maybe_load_legacy_gmail(cfg: &mut Config) {
     let pass = kv.get("GMAIL_APP_PASSWORD").cloned().unwrap_or_default();
     let to   = kv.get("GMAIL_TO").cloned().unwrap_or_else(|| user.clone());
     if !user.is_empty() && !pass.is_empty() {
-        eprintln!("INFO: using legacy ~/.config/cream/gmail.conf (migrate to ~/.config/ferrite/notify.toml)");
+        eprintln!("INFO: using legacy ~/.config/ferrite/gmail.conf (migrate to ~/.config/ferrite/notify.toml)");
         cfg.smtp.push(SmtpConfig {
             host: "smtp.gmail.com".to_string(),
             port: 587,

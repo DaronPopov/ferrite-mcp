@@ -42,6 +42,7 @@ CONFIG_FILE   = HOME / ".config/ferrite/env"
 URL_FILE      = HOME / ".local/share/ferrite/remote-session-url.txt"
 LOG_FILE      = HOME / ".local/share/ferrite/autostart.log"
 LOCK_FILE     = HOME / ".local/share/ferrite/autostart.lock"
+NOTIFY_STATE  = HOME / ".local/share/ferrite/autostart-notify.state"
 
 def load_env(path: Path) -> dict:
     env = {}
@@ -55,12 +56,14 @@ def load_env(path: Path) -> dict:
     return env
 
 cfg           = load_env(CONFIG_FILE)
-gmail_cfg     = load_env(HOME / ".config/cream/gmail.conf")
+gmail_cfg     = load_env(HOME / ".config/ferrite/gmail.conf")
 NTFY_TOPIC    = os.environ.get("NTFY_TOPIC",            cfg.get("NTFY_TOPIC", ""))
 SESSION       = os.environ.get("FERRITE_SESSION",         cfg.get("FERRITE_SESSION", "claude-remote"))
 READY_TIMEOUT = int(os.environ.get("FERRITE_READY_TIMEOUT", cfg.get("FERRITE_READY_TIMEOUT", "90")))
 URL_TIMEOUT   = int(os.environ.get("FERRITE_URL_TIMEOUT",   cfg.get("FERRITE_URL_TIMEOUT", "30")))
 WATCHDOG      = os.environ.get("FERRITE_WATCHDOG", "1") == "1"
+REPLACE_SESSION = os.environ.get("FERRITE_REPLACE_SESSION", cfg.get("FERRITE_REPLACE_SESSION", "0")) == "1"
+EMAIL_COOLDOWN_SECS = int(os.environ.get("FERRITE_EMAIL_COOLDOWN", cfg.get("FERRITE_EMAIL_COOLDOWN", "900")))
 GMAIL_USER    = gmail_cfg.get("GMAIL_USER", "")
 GMAIL_PASS    = gmail_cfg.get("GMAIL_APP_PASSWORD", "")
 GMAIL_TO      = gmail_cfg.get("GMAIL_TO", GMAIL_USER)
@@ -81,8 +84,36 @@ log = logging.getLogger("ferrite-autostart")
 
 # ── Notifications ─────────────────────────────────────────────────────────────
 
-def notify(title: str, body: str, url: str = "", tags: str = "tada,laptop", priority: str = "high"):
-    """Desktop notify-send + Gmail + optional ntfy.sh."""
+def _read_notify_state() -> tuple[float, str]:
+    try:
+        raw = NOTIFY_STATE.read_text().strip().split("\t", 1)
+        ts = float(raw[0]) if raw and raw[0] else 0.0
+        url = raw[1].strip() if len(raw) > 1 else ""
+        return ts, url
+    except Exception:
+        return 0.0, ""
+
+
+def _write_notify_state(ts: float, url: str):
+    NOTIFY_STATE.parent.mkdir(parents=True, exist_ok=True)
+    NOTIFY_STATE.write_text(f"{ts}\t{url}\n")
+
+
+def _should_send_email(url: str) -> tuple[bool, str]:
+    if not url:
+        return False, "no_url"
+    now = time.time()
+    last_ts, last_url = _read_notify_state()
+    if last_url and url == last_url:
+        return False, "duplicate_url"
+    if now - last_ts < EMAIL_COOLDOWN_SECS:
+        return False, f"cooldown:{int(EMAIL_COOLDOWN_SECS - (now - last_ts))}s"
+    return True, "ok"
+
+def notify(title: str, body: str, url: str = "", tags: str = "tada,laptop", priority: str = "high",
+           email: bool = True):
+    """Desktop notify-send + Gmail (if email=True and cooldown passed) + optional ntfy.sh."""
+
     # Desktop
     try:
         subprocess.run(
@@ -92,9 +123,14 @@ def notify(title: str, body: str, url: str = "", tags: str = "tada,laptop", prio
     except Exception:
         pass
 
-    # Gmail
-    if GMAIL_USER and GMAIL_PASS:
-        _send_gmail(title, body, url)
+    # Gmail — only when explicitly requested and policy allows
+    if email and GMAIL_USER and GMAIL_PASS:
+        allowed, reason = _should_send_email(url)
+        if allowed:
+            if _send_gmail(title, body, url):
+                _write_notify_state(time.time(), url)
+        else:
+            log.info(f"email suppressed ({reason})")
 
     # ntfy.sh
     if NTFY_TOPIC:
@@ -113,7 +149,7 @@ def notify(title: str, body: str, url: str = "", tags: str = "tada,laptop", prio
             log.warning(f"ntfy failed: {e}")
 
 
-def _send_gmail(subject: str, body: str, url: str = ""):
+def _send_gmail(subject: str, body: str, url: str = "") -> bool:
     """Send session link to Gmail via SMTP."""
     try:
         link_html = (
@@ -144,10 +180,12 @@ def _send_gmail(subject: str, body: str, url: str = ""):
             server.login(GMAIL_USER, GMAIL_PASS)
             server.sendmail(GMAIL_USER, GMAIL_TO, msg.as_string())
         log.info(f"email sent to {GMAIL_TO}")
+        return True
     except smtplib.SMTPAuthenticationError:
         log.error("Gmail auth failed — check GMAIL_APP_PASSWORD in ~/.config/cream/gmail.conf")
     except Exception as e:
         log.warning(f"Gmail send failed: {e}")
+    return False
 
 # ── tmux helpers ──────────────────────────────────────────────────────────────
 
@@ -181,8 +219,9 @@ def start_session() -> bool:
     log.info(f"tmux session '{SESSION}' created with claude")
     return True
 
-def pane_content(lines: int = 120) -> str:
-    r = tmux("capture-pane", "-t", SESSION, "-p", "-S", f"-{lines}")
+def pane_content(lines: int = 200) -> str:
+    # -J joins wrapped lines so long URLs are captured as a single token.
+    r = tmux("capture-pane", "-t", f"{SESSION}:0.0", "-p", "-J", "-S", f"-{lines}")
     return r.stdout
 
 def send_keys(keys: str, enter: bool = True):
@@ -204,19 +243,27 @@ def strip_ansi(text: str) -> str:
 #   https://claude.ai/code/...  or  https://claude.ai/chat/...
 _URL_RE = re.compile(r'https://claude\.ai/\S{8,}')
 
-def extract_url(raw: str) -> str | None:
+def extract_urls(raw: str) -> list[str]:
     clean = strip_ansi(raw)
     matches = _URL_RE.findall(clean)
+    urls: list[str] = []
     for m in matches:
         url = m.rstrip(".,)\"'")
-        if len(url) > 30:   # filter out short partial matches
-            return url
-    return None
+        if len(url) > 30 and url not in urls:   # filter out short/duplicate partial matches
+            urls.append(url)
+    return urls
 
 def save_url(url: str):
     URL_FILE.parent.mkdir(parents=True, exist_ok=True)
     URL_FILE.write_text(url + "\n")
     log.info(f"URL saved to {URL_FILE}")
+
+
+def clear_saved_url():
+    try:
+        URL_FILE.unlink(missing_ok=True)
+    except Exception:
+        pass
 
 # ── Session boot sequence ─────────────────────────────────────────────────────
 
@@ -252,9 +299,11 @@ def wait_for_ready(timeout: int) -> bool:
 
 def enable_remote_control() -> str | None:
     """Send /remote-control, confirm autocomplete, and capture the URL. Retries once."""
+    baseline_urls = set(extract_urls(pane_content(600)))
     for attempt in range(1, 3):
         log.info(f"sending /remote-control (attempt {attempt})")
-        send_keys("/remote-control")
+        tmux("clear-history", "-t", f"{SESSION}:0.0")
+        send_keys("/remote-control", enter=False)
         time.sleep(3)   # wait for autocomplete menu to render
 
         log.info("confirming command with Enter")
@@ -264,9 +313,11 @@ def enable_remote_control() -> str | None:
         log.info(f"waiting up to {URL_TIMEOUT}s for session URL...")
         deadline = time.time() + URL_TIMEOUT
         while time.time() < deadline:
-            content = pane_content(120)
-            url = extract_url(content)
-            if url:
+            content = pane_content(600)
+            urls = extract_urls(content)
+            fresh = [u for u in urls if u not in baseline_urls]
+            if fresh:
+                url = fresh[-1]
                 log.info(f"captured URL: {url}")
                 return url
             time.sleep(0.75)
@@ -276,21 +327,53 @@ def enable_remote_control() -> str | None:
     log.warning("URL not captured after all attempts")
     return None
 
-def run_boot_sequence() -> bool:
+def run_boot_sequence(from_watchdog: bool = False) -> bool:
     """Full boot: start session, enable remote-control, notify."""
     if session_alive():
-        log.info(f"session '{SESSION}' already running — killing it")
-        kill_session()
-        time.sleep(1)
+        if REPLACE_SESSION:
+            log.info(f"session '{SESSION}' already running — replacing by config")
+            clear_saved_url()
+            kill_session()
+            time.sleep(1)
+        else:
+            log.info(f"session '{SESSION}' already running — reusing existing session")
+            wait_for_ready(min(READY_TIMEOUT, 30))
+            url = enable_remote_control()
+            if url:
+                save_url(url)
+                notify(
+                    "Claude Ready",
+                    "Remote session live — tap link to open",
+                    url=url,
+                    tags="tada,laptop",
+                    priority="high",
+                    email=not from_watchdog,
+                )
+                log.info("boot sequence complete ✓")
+                return True
+            notify(
+                "Claude Session Running",
+                f"tmux session '{SESSION}' is active, but URL capture failed. Attach: tmux attach -t {SESSION}",
+                tags="laptop",
+                priority="default",
+                email=False,
+            )
+            log.warning("boot sequence complete (URL not captured)")
+            return True
 
     if not start_session():
-        notify("ferrite FAIL", "Failed to start claude session", tags="x,laptop", priority="urgent")
+        notify("ferrite FAIL", "Failed to start claude session", tags="x,laptop", priority="urgent",
+               email=not from_watchdog)
         return False
+    clear_saved_url()
 
     # Give claude time to start before checking
     time.sleep(4)
 
     wait_for_ready(READY_TIMEOUT)
+    if not session_alive():
+        notify("ferrite FAIL", "Claude session exited during startup", tags="x,laptop", priority="urgent", email=False)
+        return False
 
     url = enable_remote_control()
 
@@ -302,6 +385,7 @@ def run_boot_sequence() -> bool:
             url=url,
             tags="tada,laptop",
             priority="high",
+            email=not from_watchdog,
         )
         log.info("boot sequence complete ✓")
         return True
@@ -312,6 +396,7 @@ def run_boot_sequence() -> bool:
             f"tmux session '{SESSION}' running. Open terminal → tmux attach -t {SESSION}",
             tags="laptop",
             priority="default",
+            email=False,
         )
         log.warning("boot sequence complete (URL not captured)")
         return True
@@ -335,9 +420,9 @@ def watchdog_loop():
             break
         if not session_alive():
             log.warning("session died — restarting...")
-            notify("ferrite WARN", "Claude session died — restarting...", tags="warning,laptop", priority="default")
+            notify("ferrite WARN", "Claude session died — restarting...", tags="warning,laptop", priority="default", email=False)
             time.sleep(5)
-            run_boot_sequence()
+            run_boot_sequence(from_watchdog=True)
 
 # ── Entry point ───────────────────────────────────────────────────────────────
 
@@ -357,6 +442,7 @@ if __name__ == "__main__":
     log.info(f"  gmail     : {'configured' if GMAIL_USER else 'NOT SET'}")
     log.info(f"  ntfy      : {'configured' if NTFY_TOPIC else 'not set'}")
     log.info(f"  watchdog  : {WATCHDOG}")
+    log.info(f"  replace   : {REPLACE_SESSION}")
 
     if not CLAUDE_BIN.exists():
         log.error(f"claude binary not found at {CLAUDE_BIN}")

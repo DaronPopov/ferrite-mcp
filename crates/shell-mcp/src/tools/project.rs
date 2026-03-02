@@ -130,7 +130,7 @@ fn collect_active_targets(root: &Path, ptype: &str) -> Vec<Value> {
 fn context_hints_for(ptype: &str) -> Vec<&'static str> {
     match ptype {
         "rtl_lab"      => vec!["Use chip_status to see all chips", "Use chip_build_pipeline to run RTL flow", "Use board_status to detect hardware"],
-        "mcp_server"   => vec!["cargo build --release -p shell-mcp", "cp target/release/cream ~/.cargo/bin/cream"],
+        "mcp_server"   => vec!["cargo build --release -p shell-mcp", "cp target/release/ferrite ~/.cargo/bin/ferrite"],
         "rtl_tcfp"     => vec!["Use vivado_tcl for synthesis", "Use fpga_program to flash"],
         "cuda_runtime" => vec!["Use build_check for CUDA compilation", "Use ncu_profile to benchmark"],
         "rust_project" => vec!["Use cargo_tree to inspect workspace", "Use test_run for tests"],

@@ -59,7 +59,7 @@ pub fn session_status(_args: &Value) -> Result<ToolResult, String> {
 
     // ── systemd unit status ───────────────────────────────────────────────────
     let systemd_raw = run(
-        "systemctl --user is-active ferrite-session.service 2>/dev/null || echo inactive",
+        "systemctl --user is-active ferrite-session 2>/dev/null || echo inactive",
         &cwd, &[], "", Duration::from_secs(5),
     );
     let systemd_state = systemd_raw["stdout"].as_str().unwrap_or("unknown").trim().to_owned();
@@ -97,7 +97,7 @@ pub fn session_status(_args: &Value) -> Result<ToolResult, String> {
         "note": match status {
             "ready"           => "Session live — remote_url is the link to open on your phone",
             "running_no_url"  => "Session running but URL not captured — check autostart_log",
-            _                 => "Session offline — run ferrite-autostart or enable systemd service",
+            _                 => "Session offline — run ferrite-autostart or start ferrite-session manually",
         },
     })))
 }

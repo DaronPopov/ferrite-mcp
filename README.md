@@ -46,7 +46,7 @@ NTFY_TOPIC=your-private-topic-name   # ntfy.sh push to phone (free, install ntfy
 FERRITE_SESSION=claude-remote        # tmux session name
 ```
 
-For Gmail notifications, create `~/.config/cream/gmail.conf`:
+For Gmail notifications, create `~/.config/ferrite/gmail.conf`:
 ```sh
 GMAIL_USER=you@gmail.com
 GMAIL_APP_PASSWORD=your-app-password
@@ -56,11 +56,11 @@ GMAIL_TO=you@gmail.com
 ### 3. Start the autostart daemon
 ```sh
 ferrite-autostart           # run manually
-# or
-systemctl --user enable --now ferrite-autostart
+# or start the service only when needed
+systemctl --user start ferrite-session
 ```
 
-`ferrite-autostart` spawns a Claude Code session in tmux on boot, captures the remote session URL, and pushes it to your phone. Restarts automatically if the session dies.
+`ferrite-autostart` spawns a Claude Code session in tmux on demand, captures the remote session URL, and pushes it to your phone.
 
 ### 4. Connect from anywhere
 ```
