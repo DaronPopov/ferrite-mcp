@@ -88,13 +88,14 @@ const SUDOERS_BINS: &[&str] = &[
     "/usr/sbin/update-alternatives",
     "/usr/bin/update-alternatives",
     "/usr/bin/install",
+    "/usr/bin/tailscale",
 ];
 
 /// Short names (without path) — used for matching in command strings.
 const SUDOERS_SHORT: &[&str] = &[
     "apt", "apt-get", "systemctl", "ufw", "snap", "dpkg",
     "ldconfig", "tee", "chmod", "chown", "usermod", "groupmod",
-    "add-apt-repository", "update-alternatives", "install",
+    "add-apt-repository", "update-alternatives", "install", "tailscale",
 ];
 
 // ── Error classification for exec auto-recovery ───────────────────────────────
@@ -228,20 +229,101 @@ pub fn preprocess(cmd: &str) -> (String, Vec<(String, String)>) {
 }
 
 /// Check whether the sudoers entry for ferrite is installed and current.
+///
+/// The file is root-owned 440 — `read_to_string` would fail with EACCES for
+/// a normal user.  Instead we use two probes:
+///
+///   1. `Path::exists()` (stat syscall — only needs parent dir +x, which
+///      /etc/sudoers.d has) to check file presence.
+///   2. `sudo -k -n /usr/bin/tee /dev/null` — the `-k` flag invalidates any
+///      cached credential before the check, so success means our NOPASSWD
+///      entry is genuinely active (not just a cached token).
 pub fn sudoers_status() -> SudoersStatus {
     let path = sudoers_path();
-    let content = match std::fs::read_to_string(path) {
-        Ok(c)  => c,
-        Err(_) => return SudoersStatus::Missing,
-    };
-    let username = current_username();
-    if content.contains(&format!("{username} ALL=(ALL) NOPASSWD")) ||
-       content.contains(&format!("{username} ALL = (ALL) NOPASSWD"))
-    {
+
+    // Step 1 — file presence (no read permission required).
+    if !std::path::Path::new(path).exists() {
+        return SudoersStatus::Missing;
+    }
+
+    // Step 2 — probe NOPASSWD without relying on a cached sudo token.
+    // `/usr/bin/tee` is in our FERRITE_CMDS alias; `tee /dev/null` with
+    // stdin=null is a no-op that exits 0.
+    let probe_ok = std::process::Command::new("sudo")
+        .args(["-k", "-n", "/usr/bin/tee", "/dev/null"])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+
+    if probe_ok {
         SudoersStatus::Active
     } else {
+        // File exists but NOPASSWD isn't working — stale user or broken entry.
         SudoersStatus::StaleUser
     }
+}
+
+/// Attempt to self-install the sudoers entry without a TTY.
+///
+/// Tries in order:
+///   1. `sudo -n tee` — works if there is a cached sudo credential
+///      or if a broader NOPASSWD rule already covers this user.
+///   2. `pkexec tee`  — triggers a graphical Polkit dialog (desktop sessions).
+///
+/// Returns `Ok(())` on success, `Err(reason)` if both methods fail.
+pub fn try_install_sudoers() -> Result<(), String> {
+    let entry   = sudoers_entry_content();
+    let path    = sudoers_path();
+    let chmod   = "/usr/bin/chmod";
+
+    // Helper: write entry via `<writer> /usr/bin/tee <path>` then chmod 440.
+    let write_via = |writer: &str, extra_args: &[&str]| -> bool {
+        use std::io::Write;
+        let mut cmd = std::process::Command::new(writer);
+        for a in extra_args { cmd.arg(a); }
+        cmd.arg("/usr/bin/tee").arg(path);
+        cmd.stdin(std::process::Stdio::piped())
+           .stdout(std::process::Stdio::null())
+           .stderr(std::process::Stdio::null());
+
+        let mut child = match cmd.spawn() {
+            Ok(c)  => c,
+            Err(_) => return false,
+        };
+        if let Some(mut stdin) = child.stdin.take() {
+            let _ = stdin.write_all(entry.as_bytes());
+        }
+        let wrote_ok = child.wait().map(|s| s.success()).unwrap_or(false);
+        if !wrote_ok { return false; }
+
+        // chmod 440
+        std::process::Command::new("sudo")
+            .args(["-n", chmod, "440", path])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    };
+
+    // 1. Try sudo -n (cached credential or existing broader NOPASSWD).
+    if write_via("sudo", &["-n"]) {
+        return Ok(());
+    }
+
+    // 2. Try pkexec (graphical Polkit — works on desktop without a TTY).
+    if write_via("pkexec", &[]) {
+        return Ok(());
+    }
+
+    Err(format!(
+        "Could not install {path} automatically.\n\
+         Run install.sh once for a one-time interactive sudo prompt, or:\n\
+         sudo tee {path} <<'EOF'\n{entry}EOF\n  sudo chmod 440 {path}"
+    ))
 }
 
 pub fn sudoers_path() -> &'static str {

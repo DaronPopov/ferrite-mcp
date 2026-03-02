@@ -80,14 +80,21 @@ fn tmux_list() -> Result<ToolResult, String> {
 
     if !sess_raw["success"].as_bool().unwrap_or(false) {
         let stderr = sess_raw["stderr"].as_str().unwrap_or("");
-        if stderr.contains("no server running") || stderr.contains("No such file") {
+        let stdout = sess_raw["stdout"].as_str().unwrap_or("");
+        let err_text = format!("{stderr}\n{stdout}");
+        if err_text.contains("no server running")
+            || err_text.contains("No such file")
+            || err_text.contains("failed to connect")
+            || err_text.contains("error connecting")
+            || err_text.trim().is_empty()
+        {
             return Ok(ToolResult::json(&json!({
                 "running":  false,
                 "sessions": [],
                 "note":     "tmux server not running — use op:new to create a session",
             })));
         }
-        return Err(format!("tmux list-sessions: {stderr}"));
+        return Err(format!("tmux list-sessions: {}", err_text.trim()));
     }
 
     let sessions: Vec<Value> = sess_raw["stdout"].as_str().unwrap_or("").lines()

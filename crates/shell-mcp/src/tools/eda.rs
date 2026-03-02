@@ -392,14 +392,21 @@ refresh_hw_server
 set targets [get_hw_targets]
 foreach t $targets {
     puts "TARGET: $t"
-    open_hw_target $t
+    if {[catch {open_hw_target $t} open_err]} {
+        puts "OPEN_ERROR: $t :: $open_err"
+        continue
+    }
     set devices [get_hw_devices]
     foreach d $devices {
-        set part   [get_property PART   $d]
-        set status [get_property STATUS $d]
-        puts "  DEVICE: $d PART: $part STATUS: $status"
+        set part [get_property PART $d]
+        set status "unknown"
+        if {[catch {set status [get_property STATUS $d]}]} {
+            # Some families expose STATE instead of STATUS on hw_device.
+            catch {set status [get_property STATE $d]}
+        }
+        puts "DEVICE|||$d|||$part|||$status"
     }
-    close_hw_target
+    catch {close_hw_target}
 }
 disconnect_hw_server
 close_hw_manager
@@ -431,10 +438,20 @@ fn parse_hw_targets(output: &str) -> Vec<Value> {
     for line in output.lines() {
         if let Some(t) = line.strip_prefix("TARGET: ") {
             current_target = t.trim().to_owned();
+        } else if let Some(rest) = line.trim().strip_prefix("DEVICE|||") {
+            let parts: Vec<&str> = rest.split("|||").collect();
+            let device = parts.get(0).copied().unwrap_or("").to_owned();
+            let part   = parts.get(1).copied().unwrap_or("").to_owned();
+            let status = parts.get(2).copied().unwrap_or("").to_owned();
+            boards.push(json!({
+                "target": current_target,
+                "device": device,
+                "part":   part,
+                "status": status,
+            }));
         } else if line.trim_start().starts_with("DEVICE: ") {
-            // "  DEVICE: xc7a35t_0 PART: xc7a35tcsg324-1 STATUS: Open"
+            // Backward-compat parser for older "DEVICE: ... PART: ... STATUS: ..." format.
             let tokens: Vec<&str> = line.trim().split_whitespace().collect();
-            // tokens: ["DEVICE:", device, "PART:", part, "STATUS:", status]
             let device = tokens.get(1).copied().unwrap_or("").to_owned();
             let part   = tokens.get(3).copied().unwrap_or("").to_owned();
             let status = tokens.get(5).copied().unwrap_or("").to_owned();

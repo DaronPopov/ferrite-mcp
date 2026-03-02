@@ -6,6 +6,7 @@ use std::time::UNIX_EPOCH;
 use serde_json::{json, Value};
 
 use crate::protocol::ToolResult;
+use crate::tools::project::expand_tilde;
 
 // ── read_file ─────────────────────────────────────────────────────────────────
 
@@ -13,9 +14,11 @@ use crate::protocol::ToolResult;
 const MAX_LINES: usize = 2_000;
 
 pub fn read_file(args: &Value) -> Result<ToolResult, String> {
-    let path = args["path"].as_str().ok_or("read_file: 'path' is required")?;
+    let path_str = args["path"].as_str().ok_or("read_file: 'path' is required")?;
+    let path_buf = expand_tilde(path_str);
+    let path = path_buf.to_str().unwrap_or(path_str);
 
-    let raw = std::fs::read_to_string(path)
+    let raw = std::fs::read_to_string(&path_buf)
         .map_err(|e| format!("read_file: {path}: {e}"))?;
 
     let all_lines: Vec<&str> = raw.lines().collect();

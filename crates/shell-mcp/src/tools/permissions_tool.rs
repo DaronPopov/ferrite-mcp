@@ -64,15 +64,34 @@ pub fn pre_validate(args: &Value) -> Result<ToolResult, String> {
 
 // ── permissions_setup ─────────────────────────────────────────────────────────
 
-/// Report the current sudoers status and print the entry content the agent
-/// (or user) can install manually. Does NOT write anything — that requires
-/// an interactive sudo prompt, which is done by install.sh.
+/// Report the current sudoers status.  With `install: true`, attempt to
+/// self-install the NOPASSWD entry without requiring a TTY — tries a cached
+/// sudo credential first, then falls back to a graphical Polkit (pkexec) dialog.
 pub fn permissions_setup(args: &Value) -> Result<ToolResult, String> {
-    let status = permissions::sudoers_status();
-    let path   = permissions::sudoers_path();
-    let entry  = permissions::sudoers_entry_content();
-
     let show_entry = args["show_entry"].as_bool().unwrap_or(false);
+    let install    = args["install"].as_bool().unwrap_or(false);
+    let path       = permissions::sudoers_path();
+
+    // ── Optional self-install ─────────────────────────────────────────────────
+    let install_result: Option<String> = if install {
+        match permissions::sudoers_status() {
+            SudoersStatus::Active => {
+                Some("already_active".to_owned())
+            }
+            _ => {
+                match permissions::try_install_sudoers() {
+                    Ok(())   => Some("installed".to_owned()),
+                    Err(msg) => Some(format!("failed: {msg}")),
+                }
+            }
+        }
+    } else {
+        None
+    };
+
+    // ── Re-read status (may have just changed) ────────────────────────────────
+    let status = permissions::sudoers_status();
+    let entry  = permissions::sudoers_entry_content();
 
     let status_str = match &status {
         SudoersStatus::Active    => "active",
@@ -86,14 +105,15 @@ pub fn permissions_setup(args: &Value) -> Result<ToolResult, String> {
         }
         SudoersStatus::StaleUser => {
             format!(
-                "Sudoers file exists at {path} but the current user is not listed. \
-                 Re-run install.sh to regenerate, or manually edit the file."
+                "Sudoers file exists at {path} but NOPASSWD probe failed — wrong user or broken entry. \
+                 Re-run install.sh to regenerate, or call permissions_setup with install:true."
             )
         }
         SudoersStatus::Missing => {
             format!(
-                "Sudoers entry not installed. Run install.sh to set it up (requires one sudo prompt), \
-                 or install manually:\n\n  sudo tee {path} <<'EOF'\n{entry}EOF\n  sudo chmod 440 {path}"
+                "Sudoers entry not installed. Call permissions_setup with install:true to attempt \
+                 auto-install (uses cached sudo token or graphical Polkit prompt), or run install.sh \
+                 manually for a one-time interactive sudo prompt."
             )
         }
     };
@@ -103,6 +123,10 @@ pub fn permissions_setup(args: &Value) -> Result<ToolResult, String> {
         "sudoers_path":   path,
         "advice":         advice,
     });
+
+    if let Some(r) = install_result {
+        result["install_result"] = Value::String(r);
+    }
 
     if show_entry {
         result["entry_content"] = Value::String(entry);

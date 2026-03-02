@@ -1577,13 +1577,22 @@ pub fn all_tool_definitions() -> Vec<ToolDef> {
             description: "Report the current sudoers pre-authorization status for ferrite. \
                            Shows whether /etc/sudoers.d/ferrite is installed (granting NOPASSWD \
                            for apt, systemctl, ufw, snap, chmod, etc.) and how to install it \
-                           if missing. Pass show_entry=true to see the exact sudoers content.",
+                           if missing. Pass show_entry=true to see the exact sudoers content. \
+                           Pass install=true to attempt self-installation without a TTY — tries \
+                           a cached sudo credential first, then falls back to a graphical Polkit \
+                           (pkexec) dialog.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
                     "show_entry": {
                         "type": "boolean",
                         "description": "Include the full sudoers entry text in the response (default false)"
+                    },
+                    "install": {
+                        "type": "boolean",
+                        "description": "Attempt to self-install /etc/sudoers.d/ferrite. Tries cached sudo \
+                                        credential, then pkexec graphical prompt. Returns install_result: \
+                                        'installed', 'already_active', or 'failed: <reason>' (default false)"
                     }
                 }
             }),

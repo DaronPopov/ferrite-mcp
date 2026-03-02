@@ -461,15 +461,25 @@ pub fn board_status(args: &Value) -> Result<ToolResult, String> {
 fn probe_jtag_boards() -> Vec<Value> {
     let tcl = r#"
 open_hw_manager
-connect_hw_server -quiet
-set targets [get_hw_targets -quiet]
+connect_hw_server -allow_non_jtag -url TCP:127.0.0.1:3121
+refresh_hw_server
+set targets [get_hw_targets]
 foreach t $targets {
-    open_hw_target $t -quiet
-    foreach d [get_hw_devices -quiet] {
-        puts "JTAG_TARGET:$t:$d:[get_property PART $d]:[get_property STATUS $d]"
+    if {[catch {open_hw_target $t} open_err]} {
+        continue
     }
-    close_hw_target $t -quiet
+    foreach d [get_hw_devices] {
+        set part [get_property PART $d]
+        set status "unknown"
+        if {[catch {set status [get_property STATUS $d]}]} {
+            # Some families expose STATE instead of STATUS on hw_device.
+            catch {set status [get_property STATE $d]}
+        }
+        puts "JTAG_TARGET|||$t|||$d|||$part|||$status"
+    }
+    catch {close_hw_target}
 }
+disconnect_hw_server
 close_hw_manager
 "#;
 
@@ -492,6 +502,16 @@ close_hw_manager
         for line in stdout.lines() {
             if let Some(rest) = line.strip_prefix("JTAG_TARGET:") {
                 let parts: Vec<&str> = rest.splitn(4, ':').collect();
+                if parts.len() >= 4 {
+                    boards.push(json!({
+                        "target": parts[0],
+                        "device": parts[1],
+                        "part":   parts[2],
+                        "status": parts[3],
+                    }));
+                }
+            } else if let Some(rest) = line.strip_prefix("JTAG_TARGET|||") {
+                let parts: Vec<&str> = rest.split("|||").collect();
                 if parts.len() >= 4 {
                     boards.push(json!({
                         "target": parts[0],
