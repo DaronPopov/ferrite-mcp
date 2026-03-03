@@ -13,9 +13,7 @@ Built in Rust. 75 tools. Zero friction for trusted operations.
 curl -fsSL https://raw.githubusercontent.com/DaronPopov/ferrite-mcp/main/install.sh | sh
 ```
 
-**Private repo / SSH:**
-```sh
-```
+
 
 Safe to re-run — skips steps already done.
 
