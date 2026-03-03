@@ -1,3 +1,4 @@
+pub mod authz;
 pub mod config;
 pub mod job_store;
 pub mod permissions;

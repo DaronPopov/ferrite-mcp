@@ -174,6 +174,15 @@ impl McpServer {
             .map(|v| v as usize)
             .unwrap_or(DEFAULT_MAX_CHARS);
 
+        let decision = crate::authz::authorize(name, args);
+        crate::authz::audit(&decision, name, args);
+        if !decision.allowed {
+            return Err(format!(
+                "authorization denied for {} as principal={} role={} reason={}",
+                decision.action, decision.principal, decision.role, decision.reason
+            ));
+        }
+
         let result = self.call_tool(name, args)?;
         let result = cap_and_filter(result, filter, max_chars);
         serde_json::to_value(&result).map_err(|e| e.to_string())
@@ -199,6 +208,8 @@ impl McpServer {
             // State
             "shell_state"    => tools::state::shell_state(args, &self.state),
             "set_cwd"        => tools::state::set_cwd(args, &self.state),
+            "config_ux"      => tools::config_ux::config_ux(args),
+            "ux_wizard"      => tools::ux_wizard::ux_wizard(args),
             // Execution
             "exec"           => tools::execution::exec_cmd(args, &self.state),
             "build_check"    => tools::execution::build_check(args, &self.state),
@@ -296,6 +307,8 @@ impl McpServer {
             "tmux_ctl"          => tools::tmux::tmux_ctl(args),
             // Network / reachability
             "tailscale_status"  => tools::network::tailscale_status(args),
+            // feRcuda runtime
+            "fercuda_runtime"   => tools::fercuda::runtime(args),
             // Session health
             "session_status"    => tools::session::session_status(args),
             "session_restart"   => tools::session::session_restart(args),

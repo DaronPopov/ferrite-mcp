@@ -1,0 +1,56 @@
+# Ferrite MCP authorization policy (Phase 1)
+#
+# Copy to:
+#   ~/.config/ferrite/authz_policy.toml
+# Or set:
+#   FERRITE_AUTHZ_POLICY=/path/to/policy.toml
+#
+# Principal is selected by:
+#   FERRITE_PRINCIPAL=<name>
+
+default_role = "observer"
+
+[principals]
+default = "observer"
+daron = "admin"
+
+[roles.observer]
+allow = [
+  "fercuda_runtime.job_status",
+  "fercuda_runtime.download_f32",
+]
+deny = []
+[roles.observer.limits]
+max_total_alloc_bytes = 1048576
+max_concurrent_jobs = 1
+
+[roles.operator]
+allow = [
+  "fercuda_runtime.session_create",
+  "fercuda_runtime.session_destroy",
+  "fercuda_runtime.buffer_alloc",
+  "fercuda_runtime.buffer_free",
+  "fercuda_runtime.upload_f32",
+  "fercuda_runtime.download_f32",
+  "fercuda_runtime.submit_matmul",
+  "fercuda_runtime.submit_layer_norm",
+  "fercuda_runtime.job_status",
+  "fercuda_runtime.job_wait",
+]
+deny = []
+[roles.operator.limits]
+max_session_mutable_bytes = 536870912
+max_session_immutable_bytes = 1073741824
+max_total_alloc_bytes = 1073741824
+max_concurrent_jobs = 8
+
+[roles.admin]
+allow = [
+  "fercuda_runtime.*",
+]
+deny = []
+[roles.admin.limits]
+max_session_mutable_bytes = 8589934592
+max_session_immutable_bytes = 8589934592
+max_total_alloc_bytes = 17179869184
+max_concurrent_jobs = 256

@@ -375,6 +375,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "37909eebbb50d72f9059c3b6d82c0463f2ff062c9e95845c43a6c9c0355411be"
 
 [[package]]
+name = "fercuda-ffi"
+version = "0.1.0"
+
+[[package]]
 name = "ferrite-notify"
 version = "0.1.0"
 dependencies = [
@@ -1400,6 +1404,7 @@ dependencies = [
 name = "shell-mcp"
 version = "0.1.0"
 dependencies = [
+ "fercuda-ffi",
  "glob",
  "libc",
  "nix",

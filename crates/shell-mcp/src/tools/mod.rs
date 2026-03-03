@@ -6,11 +6,13 @@ pub mod bg_spawn;
 pub mod bg_window;
 pub mod binary;
 pub mod code;
+pub mod config_ux;
 pub mod debug;
 pub mod discovery;
 pub mod dynamic;
 pub mod eda;
 pub mod execution;
+pub mod fercuda;
 pub mod filesystem;
 pub mod git;
 pub mod git_new;
@@ -36,6 +38,7 @@ pub mod env_doctor;
 pub mod permissions_tool;
 pub mod tmux;
 pub mod tty_exec;
+pub mod ux_wizard;
 pub mod workspace;
 
 use crate::protocol::ToolDef;
@@ -210,6 +213,32 @@ pub fn all_tool_definitions() -> Vec<ToolDef> {
                     "path": { "type": "string", "description": "Absolute or ~ path" }
                 },
                 "required": ["path"]
+            }),
+        },
+        ToolDef {
+            name: "config_ux",
+            description: "Read and update ferrite config through MCP. op=list|get|set. Includes authz policy path introspection.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "op":   { "type": "string", "enum": ["list","get","set"], "description": "Operation (default list)" },
+                    "key":  { "type": "string", "description": "Config key for get/set (e.g. terminal.mode)" },
+                    "value":{ "type": "string", "description": "Value for set" }
+                }
+            }),
+        },
+        ToolDef {
+            name: "ux_wizard",
+            description: "Interactive question flow for staged config changes. Current workflow: fercuda_authz_limits. op=start|answer|status|apply|reset.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "op":         { "type": "string", "enum": ["start","answer","status","apply","reset"], "description": "Wizard operation" },
+                    "workflow":   { "type": "string", "description": "Workflow id (default fercuda_authz_limits)" },
+                    "question_id":{ "type": "string", "description": "Question id when op=answer" },
+                    "value":      { "description": "Answer value when op=answer (string or integer)" }
+                },
+                "required": ["op"]
             }),
         },
 
@@ -1425,6 +1454,56 @@ pub fn all_tool_definitions() -> Vec<ToolDef> {
             input_schema: json!({
                 "type": "object",
                 "properties": {}
+            }),
+        },
+        // ── feRcuda runtime ───────────────────────────────────────────────────
+        ToolDef {
+            name: "fercuda_runtime",
+            description: "Single-entry control plane for feRcuda GPU runtime via Rust->C bridge. \
+                Use op-based calls for status/guide, session lifecycle, memory ops, kernel submission, \
+                and job tracking.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "op": {
+                        "type": "string",
+                        "enum": [
+                            "status",
+                            "guide",
+                            "session_create",
+                            "session_destroy",
+                            "buffer_alloc",
+                            "buffer_free",
+                            "upload_f32",
+                            "download_f32",
+                            "submit_matmul",
+                            "submit_layer_norm",
+                            "job_status",
+                            "job_wait"
+                        ],
+                        "description": "Runtime operation"
+                    },
+                    "session_id":      { "type": "integer", "description": "Session handle for all non-create ops" },
+                    "device":          { "type": "integer", "description": "GPU device index (session_create, default 0)" },
+                    "mutable_bytes":   { "type": "integer", "description": "Mutable pool bytes (session_create)" },
+                    "immutable_bytes": { "type": "integer", "description": "Immutable pool bytes (session_create)" },
+                    "cuda_reserve":    { "type": "integer", "description": "Reserved VRAM bytes (session_create)" },
+                    "verbose":         { "type": "boolean", "description": "Verbose allocator logs (session_create)" },
+                    "rank":            { "type": "integer", "description": "Buffer rank [1..4] (buffer_alloc)" },
+                    "dims":            { "type": "array", "items": { "type": "integer" }, "description": "Dimensions (length must match rank)" },
+                    "immutable":       { "type": "boolean", "description": "Allocate immutable buffer tier (buffer_alloc)" },
+                    "tag":             { "type": "integer", "description": "User tag (buffer_alloc)" },
+                    "buffer_id":       { "type": "integer", "description": "Buffer handle for buffer/data ops" },
+                    "data":            { "type": "array", "items": { "type": "number" }, "description": "f32 payload (upload_f32)" },
+                    "count":           { "type": "integer", "description": "f32 element count (download_f32)" },
+                    "a":               { "type": "integer", "description": "Matmul input A buffer id" },
+                    "b":               { "type": "integer", "description": "Matmul input B buffer id" },
+                    "out":             { "type": "integer", "description": "Output buffer id" },
+                    "x":               { "type": "integer", "description": "Layer norm input buffer id" },
+                    "eps":             { "type": "number", "description": "Layer norm epsilon (default 1e-6)" },
+                    "job_id":          { "type": "integer", "description": "Job handle for status/wait" }
+                },
+                "required": ["op"]
             }),
         },
         // ── session ───────────────────────────────────────────────────────────
