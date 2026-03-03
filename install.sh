@@ -52,7 +52,7 @@ if [ -n "$LOCAL_PATH" ]; then
     cargo install --path "$LOCAL_PATH/crates/shell-bin" || true
 else
     inf "Building from $REPO ..."
-    cargo install --git "$REPO" --bin "$BIN" --locked || true
+    cargo install --git "$REPO" shell-bin --bin "$BIN" --locked || true
 fi
 
 if ! command -v "$BIN" >/dev/null 2>&1; then

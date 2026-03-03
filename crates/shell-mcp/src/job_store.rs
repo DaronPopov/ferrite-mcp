@@ -470,7 +470,7 @@ impl JobStore {
             cmd_builder.pre_exec(move || {
                 // New session — fd 0 becomes controlling terminal.
                 libc::setsid();
-                libc::ioctl(0, libc::TIOCSCTTY, 0i32);
+                libc::ioctl(0, libc::TIOCSCTTY.into(), 0i32);
                 Ok(())
             });
         }

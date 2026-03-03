@@ -307,8 +307,6 @@ impl McpServer {
             "tmux_ctl"          => tools::tmux::tmux_ctl(args),
             // Network / reachability
             "tailscale_status"  => tools::network::tailscale_status(args),
-            // feRcuda runtime
-            "fercuda_runtime"   => tools::fercuda::runtime(args),
             // Session health
             "session_status"    => tools::session::session_status(args),
             "session_restart"   => tools::session::session_restart(args),
