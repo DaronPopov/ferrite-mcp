@@ -2,7 +2,6 @@
 resolver = "2"
 members = [
     "crates/ferrite-notify",
-    "crates/codex-remote-auth",
     "crates/shell-core",
     "crates/shell-lexer",
     "crates/shell-parser",
