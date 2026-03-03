@@ -1,36 +1,30 @@
 # ferrite-mcp
 
-An MCP server that gives Claude Code and OpenAI Codex deep access to your local machine — hardware, builds, EDA tools, GPU profiling, background jobs, autonomous permission handling
+An MCP server that gives Claude Code and OpenAI Codex deep access to your local machine — hardware, builds, EDA tools, GPU profiling, and background job orchestration.
+
+Works on **macOS** and **Linux**.
+
+---
 
 ## Install
 
-**Public repo (HTTPS):**
 ```sh
 curl -fsSL https://raw.githubusercontent.com/DaronPopov/ferrite-mcp/main/install.sh | sh
 ```
 
-
-
-Safe to re-run — skips steps already done.
+Safe to re-run — skips steps already done. Restart your AI client after install to activate.
 
 The installer:
 - Detects Rust/cargo, installs via rustup if missing
-- Builds and installs `ferrite` from source
+- Builds and installs the `ferrite` binary from source
 - Registers `ferrite` in `~/.claude.json` (Claude Code)
 - Registers `ferrite` in `~/.codex/config.toml` (OpenAI Codex) if present
-- Installs the Claude plugin (`/remote-start` skill)
-- Installs `ferrite-autostart` to `~/.local/bin/`
-- Writes `/etc/sudoers.d/ferrite` — one-time sudo prompt granting NOPASSWD for apt, systemctl, ufw, snap, chmod, tee, etc. so the agent never blocks on privileged ops
-
-Restart your AI IDE after install to activate.
-
-
 
 ---
 
-## Manual MCP registration
+## Manual registration
 
-**Claude Code** — add to `~/.claude.json`:
+**Claude Code** — `~/.claude.json`:
 ```json
 {
   "mcpServers": {
@@ -44,7 +38,7 @@ Restart your AI IDE after install to activate.
 }
 ```
 
-**OpenAI Codex** — add to `~/.codex/config.toml`:
+**OpenAI Codex** — `~/.codex/config.toml`:
 ```toml
 [mcp_servers.ferrite]
 command = "/home/you/.cargo/bin/ferrite"
@@ -53,41 +47,32 @@ args    = ["--mcp"]
 
 ---
 
-## Tools (75 total)
+## Tools
 
 | Category | Tools |
 |---|---|
 | **Filesystem** | `read_file`, `glob`, `grep_code`, `list_dir`, `move_file`, `mkdir`, `delete_file`, `changed_since` |
-| **Execution** | `exec` (auto-rewrites commands non-interactive, auto-retries on lock/permission errors), `task_run`, `launch` |
-| **PTY driver** | `tty_exec` — runs programs in a real PTY, auto-responds to prompts (`[Y/n]`, licence dialogs, pagers) |
-| **Permissions** | `pre_validate`, `permissions_setup`, `env_doctor` — pre-flight checks, sudoers status, PATH/disk/network |
-| **Build** | `build_check` — Rust/CUDA/C/C++ with structured errors (file, line, col) |
+| **Execution** | `exec`, `build_check`, `task_run`, `launch`, `tty_exec` |
+| **Background jobs** | `bg_spawn`, `bg_send`, `bg_status`, `bg_wait`, `bg_tail`, `bg_list`, `bg_kill`, `wait_for_pattern`, `wait_for_idle`, `output_summary`, `pipeline_run`, `pipeline_status`, `pipeline_cancel`, `live_window` |
 | **Hardware / GPU** | `gpu_info`, `gpu_live`, `cpu_info`, `occupancy_calc`, `ptx_inspect` |
 | **Profiling** | `ncu_profile`, `compute_sanitizer`, `perf_stat`, `flamegraph` |
-| **EDA / FPGA** | `vivado_tcl`, `synth_report`, `fpga_program`, `fpga_boards`, `board_status`, `verilog_lint`, `verilog_sim`, `cocotb_run`, `waveform_query`, `fpga_serial`, `fpga_monitor` |
-| **Background jobs** | `bg_spawn` (PTY), `bg_send`, `bg_status`, `bg_wait`, `bg_tail`, `bg_list`, `bg_kill`, `wait_for_pattern`, `wait_for_idle`, `output_summary`, `pipeline_run`, `pipeline_status`, `pipeline_cancel`, `live_window` |
 | **Git** | `git_log`, `git_diff`, `git_status`, `git_commit`, `gh_clone`, `gh_sync`, `gh_status` |
-| **Remote / session** | `tailscale_status`, `tmux_ctl`, `remote_exec`, `remote_build`, `sync_project`, `session_status`, `session_restart`, `session_handoff`, `notify` |
+| **EDA / FPGA** | `vivado_tcl`, `synth_report`, `fpga_program`, `fpga_boards`, `board_status`, `verilog_lint`, `verilog_sim`, `cocotb_run`, `waveform_query`, `fpga_serial`, `fpga_monitor` |
 | **ML** | `tensor_inspect`, `checkpoint_list` |
-| **Project / discovery** | `orient`, `project_context`, `chip_status`, `chip_build_pipeline`, `find_lib`, `discover` |
-| **Dynamic tools** | `tool_define`, `tool_undefine`, `tool_list_dynamic` — register tools at runtime without restart |
+| **Project** | `orient`, `project_context`, `chip_status`, `chip_build_pipeline`, `find_lib`, `discover` |
+| **System** | `process_tree`, `port_list`, `tmux_ctl`, `session_status`, `session_restart` |
+| **Workspace** | `shell_state`, `set_cwd`, `note`, `symbol_index`, `find_symbol` |
+| **Dynamic tools** | `tool_define`, `tool_undefine`, `tool_list_dynamic` |
+| **Pre-flight** | `pre_validate`, `permissions_setup`, `env_doctor` |
 
 ---
 
 ## Config
 
-File: `~/.config/ferrite/config.toml`
+`~/.config/ferrite/config.toml`
 
-| Key / Env var | Effect |
+| Key | Effect |
 |---|---|
-| `terminal.mode` / `FERRITE_TERMINAL_MODE` | `always` or `never` — open observer window on exec |
-| `terminal.emulator` / `FERRITE_TERMINAL_EMULATOR` | `kitty`, `xterm`, `auto`, … |
-| `paths.vivado` / `FERRITE_VIVADO_PATH` | Override Vivado bin directory |
-| `NTFY_TOPIC` | ntfy.sh topic for phone push notifications |
-| `FERRITE_SESSION` | tmux session name (default: `claude-remote`) |
-
----
-
-## Platforms
-
-Linux (primary). macOS supported for non-EDA tools.
+| `terminal.mode` | `always` or `never` — open observer window on exec |
+| `terminal.emulator` | `kitty`, `xterm`, `auto`, … |
+| `paths.vivado` | Override Vivado bin directory |
