@@ -28,41 +28,7 @@ The installer:
 
 Restart your AI IDE after install to activate.
 
----
 
-## Remote access setup
-
-### 1. Tailscale
-Install [Tailscale](https://tailscale.com) on your dev machine and phone for a stable private IP without port forwarding.
-
-### 2. Notifications
-Create `~/.config/ferrite/env`:
-```sh
-NTFY_TOPIC=your-private-topic-name   # ntfy.sh push to phone (free, install ntfy app)
-FERRITE_SESSION=claude-remote        # tmux session name
-```
-
-For Gmail notifications, create `~/.config/ferrite/gmail.conf`:
-```sh
-GMAIL_USER=you@gmail.com
-GMAIL_APP_PASSWORD=your-app-password
-GMAIL_TO=you@gmail.com
-```
-
-### 3. Start the autostart daemon
-```sh
-ferrite-autostart           # run manually
-# or start the service only when needed
-systemctl --user start ferrite-session
-```
-
-`ferrite-autostart` spawns a Claude Code session in tmux on demand, captures the remote session URL, and pushes it to your phone.
-
-### 4. Connect from anywhere
-```
-/remote-start
-```
-Returns your Tailscale IP, SSH command, tmux attach command, and live session URL.
 
 ---
 
