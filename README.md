@@ -15,8 +15,6 @@ curl -fsSL https://raw.githubusercontent.com/DaronPopov/ferrite-mcp/main/install
 
 **Private repo / SSH:**
 ```sh
-git -C /tmp/ferrite-mcp pull 2>/dev/null || git clone git@github.com:DaronPopov/ferrite-mcp.git /tmp/ferrite-mcp
-sh /tmp/ferrite-mcp/install.sh
 ```
 
 Safe to re-run — skips steps already done.
