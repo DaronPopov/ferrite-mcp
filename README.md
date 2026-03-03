@@ -1,10 +1,6 @@
 # ferrite-mcp
 
-An MCP server that gives Claude Code and OpenAI Codex deep access to your local machine — hardware, builds, EDA tools, GPU profiling, background jobs, autonomous permission handling, and a full remote-access system.
-
-Built in Rust. 75 tools. Zero friction for trusted operations.
-
----
+An MCP server that gives Claude Code and OpenAI Codex deep access to your local machine — hardware, builds, EDA tools, GPU profiling, background jobs, autonomous permission handling
 
 ## Install
 
