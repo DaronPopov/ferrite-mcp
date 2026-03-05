@@ -455,7 +455,7 @@ fn detect_cuda_arch_flags() -> Vec<String> {
             {
                 if !cap.is_empty() {
                     return vec![
-                        format!("-arch=sm_{cap}"),
+                        format!("-arch=compute_{cap}"),
                         format!("-code=sm_{cap},compute_{cap}"),
                     ];
                 }
@@ -464,7 +464,7 @@ fn detect_cuda_arch_flags() -> Vec<String> {
     }
 
     // Conservative fallback — runs on anything Pascal+
-    vec!["-arch=sm_60".to_owned(), "-code=sm_60,compute_60".to_owned()]
+    vec!["-arch=compute_60".to_owned(), "-code=sm_60,compute_60".to_owned()]
 }
 
 /// Parse nvcc diagnostic output into structured error/warning lists.
