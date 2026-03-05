@@ -670,7 +670,7 @@ unsafe fn open_pty() -> Result<(i32, i32), String> {
     // Get the PTY slave path (ptsname_r on Linux; ptsname on macOS).
     #[cfg(target_os = "linux")]
     let slave_cstr = {
-        let mut buf = [0i8; 256];
+        let mut buf = [0 as libc::c_char; 256];
         if libc::ptsname_r(master, buf.as_mut_ptr(), buf.len()) < 0 {
             libc::close(master);
             return Err(format!("ptsname_r: {}", std::io::Error::last_os_error()));
