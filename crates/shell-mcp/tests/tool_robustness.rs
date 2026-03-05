@@ -60,6 +60,47 @@ fn which_handles_blocking_binary() {
     assert!(elapsed.as_secs() < 10, "which must not hang; took {}s", elapsed.as_secs());
 }
 
+#[test]
+fn which_handles_binary_that_leaks_stdio_fds() {
+    use std::io::Write;
+    let dir = std::env::temp_dir().join("ferrite_test_which_leaked_stdio");
+    let _ = std::fs::create_dir_all(&dir);
+    let fake_bin = dir.join("fake_leaky_bin");
+    let pid_file = dir.join("fake_leaky_bin.pid");
+    {
+        let mut f = std::fs::File::create(&fake_bin).unwrap();
+        writeln!(f, "#!/bin/sh").unwrap();
+        writeln!(f, "(sleep 999) &").unwrap();
+        writeln!(f, "echo $! > '{}'", pid_file.display()).unwrap();
+        writeln!(f, "echo 'fake-leaky-bin 1.0'").unwrap();
+        writeln!(f, "exit 0").unwrap();
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&fake_bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    let orig_path = std::env::var("PATH").unwrap_or_default();
+    unsafe { std::env::set_var("PATH", format!("{}:{}", dir.display(), orig_path)); }
+
+    let start = std::time::Instant::now();
+    let result = which_bin(&json!({ "name": "fake_leaky_bin" })).unwrap();
+    let elapsed = start.elapsed();
+
+    unsafe { std::env::set_var("PATH", &orig_path); }
+    if let Ok(pid) = std::fs::read_to_string(&pid_file) {
+        let _ = std::process::Command::new("kill").arg(pid.trim()).status();
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+
+    let v = result_json(&result);
+    assert!(v["found"].as_bool().unwrap(), "leaky binary should still be found");
+    assert_eq!(v["version"].as_str(), Some("fake-leaky-bin 1.0"));
+    assert!(elapsed.as_secs() < 10, "which must not hang; took {}s", elapsed.as_secs());
+}
+
 // ── git tools on non-repo path ──────────────────────────────────────────────
 
 #[test]

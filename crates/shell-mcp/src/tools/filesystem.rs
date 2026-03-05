@@ -352,21 +352,51 @@ fn is_executable(path: &std::path::Path) -> bool {
 /// Try common `--version` / `-V` flags to extract a version string.
 /// Bounded by a short timeout so nonstandard CLIs (e.g. ferrite shell) never hang.
 fn probe_version(bin: &str) -> Option<String> {
+    use std::fs::{self, OpenOptions};
     use std::process::{Command, Stdio};
     use std::time::{Duration, Instant};
 
     const TIMEOUT: Duration = Duration::from_secs(2);
 
     for flag in ["--version", "-V", "version"] {
+        let unique_ns = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let capture_path = std::env::temp_dir().join(format!(
+            "ferrite-which-{}-{}.log",
+            std::process::id(),
+            unique_ns,
+        ));
+        let capture = match OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .read(true)
+            .open(&capture_path)
+        {
+            Ok(file) => file,
+            Err(_) => continue,
+        };
+        let capture_err = match capture.try_clone() {
+            Ok(file) => file,
+            Err(_) => {
+                let _ = fs::remove_file(&capture_path);
+                continue;
+            }
+        };
+
         let mut child = match Command::new(bin)
             .arg(flag)
             .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
+            .stdout(Stdio::from(capture))
+            .stderr(Stdio::from(capture_err))
             .spawn()
         {
             Ok(c) => c,
-            Err(_) => continue,
+            Err(_) => {
+                let _ = fs::remove_file(&capture_path);
+                continue;
+            }
         };
 
         let deadline = Instant::now() + TIMEOUT;
@@ -385,17 +415,12 @@ fn probe_version(bin: &str) -> Option<String> {
             }
         };
 
+        let text = fs::read_to_string(&capture_path).unwrap_or_default();
+        let _ = fs::remove_file(&capture_path);
+
         let Some(st) = status else { continue };
         if !st.success() { continue; }
 
-        let stdout = child.stdout.take()
-            .and_then(|mut r| { let mut b = Vec::new(); std::io::Read::read_to_end(&mut r, &mut b).ok().map(|_| b) })
-            .unwrap_or_default();
-        let stderr = child.stderr.take()
-            .and_then(|mut r| { let mut b = Vec::new(); std::io::Read::read_to_end(&mut r, &mut b).ok().map(|_| b) })
-            .unwrap_or_default();
-        let text = String::from_utf8_lossy(&stdout).to_string()
-            + &String::from_utf8_lossy(&stderr);
         if let Some(line) = text.lines().find(|l| !l.trim().is_empty()) {
             return Some(line.trim().to_owned());
         }
