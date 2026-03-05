@@ -13,7 +13,7 @@ use serde_json::{json, Value};
 
 use crate::authz::{self, RuntimeLimits};
 use crate::protocol::ToolResult;
-use fercuda_ffi::{BufferDesc, BufferDType, LayerNormRequest, MatmulRequest, PoolConfig, Session};
+use fercuda_ffi::{BufferDesc, BufferDType, LayerNormRequest, MatmulRequest, MemoryRegime, PoolConfig, Session};
 
 struct SessionEntry {
     owner: String,
@@ -266,6 +266,7 @@ pub fn runtime(args: &Value) -> Result<ToolResult, String> {
                 } else {
                     0
                 },
+                memory_regime: MemoryRegime::CustomPool as u32,
             };
 
             let session =
@@ -460,7 +461,7 @@ pub fn runtime(args: &Value) -> Result<ToolResult, String> {
                 }
                 let job = entry
                     .session
-                    .submit_matmul(MatmulRequest { a, b, out })
+                    .submit_matmul(MatmulRequest { a, b, out, memory_regime: MemoryRegime::Auto as u32 })
                     .map_err(|e| format!("fercuda submit_matmul failed: {e}"))?;
                 entry.active_jobs.insert(job);
                 Ok(ToolResult::json(&json!({
@@ -493,7 +494,7 @@ pub fn runtime(args: &Value) -> Result<ToolResult, String> {
                 }
                 let job = entry
                     .session
-                    .submit_layer_norm(LayerNormRequest { x, out, eps })
+                    .submit_layer_norm(LayerNormRequest { x, out, eps, memory_regime: MemoryRegime::Auto as u32 })
                     .map_err(|e| format!("fercuda submit_layer_norm failed: {e}"))?;
                 entry.active_jobs.insert(job);
                 Ok(ToolResult::json(&json!({

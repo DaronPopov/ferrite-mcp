@@ -6,6 +6,7 @@ pub mod bg_spawn;
 pub mod bg_window;
 pub mod binary;
 pub mod code;
+pub mod control;
 pub mod config_ux;
 pub mod debug;
 pub mod discovery;
@@ -15,6 +16,7 @@ pub mod execution;
 pub mod filesystem;
 pub mod git;
 pub mod git_new;
+pub mod git_guard;
 pub mod git_write;
 pub mod github;
 pub mod hardware;
@@ -34,6 +36,8 @@ pub mod state;
 pub mod symbols;
 pub mod system;
 pub mod env_doctor;
+#[cfg(feature = "fercuda-runtime-apply")]
+pub mod fercuda;
 pub mod permissions_tool;
 pub mod tmux;
 pub mod tty_exec;
@@ -212,6 +216,50 @@ pub fn all_tool_definitions() -> Vec<ToolDef> {
                     "path": { "type": "string", "description": "Absolute or ~ path" }
                 },
                 "required": ["path"]
+            }),
+        },
+        ToolDef {
+            name: "control_reconcile",
+            description: concat!(
+                "Desired-state control loop scaffold for a self-maintaining stack. ",
+                "Use op=set_desired|get_desired|tick|status|clear. ",
+                "tick computes desired-vs-actual actions and emits execution intents. ",
+                "Pass 'actual' to reconcile against observed runtime state."
+            ),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "op": { "type": "string", "enum": ["set_desired","get_desired","tick","status","clear"] },
+                    "desired": {
+                        "type": "object",
+                        "description": "DesiredState v0 object. Required for set_desired; optional for tick."
+                    },
+                    "apply": {
+                        "type": "boolean",
+                        "description": "When op=tick: apply safe actions (default false)."
+                    },
+                    "enable_apply_runtime": {
+                        "type": "boolean",
+                        "description": "When op=tick and apply=true: permit direct execution bridge for supported actions."
+                    }
+                },
+                "required": ["op"]
+            }),
+        },
+        #[cfg(feature = "fercuda-runtime-apply")]
+        ToolDef {
+            name: "fercuda_runtime",
+            description: concat!(
+                "Feature-gated feRcuda runtime control endpoint. ",
+                "Use op=status|guide|session_create|session_destroy|buffer_alloc|buffer_free|",
+                "upload_f32|download_f32|submit_matmul|submit_layer_norm|job_status|job_wait."
+            ),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "op": { "type": "string", "description": "Runtime op" }
+                },
+                "required": ["op"]
             }),
         },
         ToolDef {
@@ -1372,6 +1420,41 @@ pub fn all_tool_definitions() -> Vec<ToolDef> {
             }),
         },
         // ── git write ─────────────────────────────────────────────────────────
+        ToolDef {
+            name: "git_checkpoint",
+            description: "Create a structured git checkpoint in one call: optional stage + commit + push, with before/after repo state and commit provenance trailers.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "path":    { "type": "string",  "description": "Repo root path (default: cwd)" },
+                    "stage":   { "type": "boolean", "description": "Run git add before commit (default: true)" },
+                    "add": {
+                        "description": "Files to stage: \"all\", \"tracked\" (default), \"none\", a path string, or array of paths",
+                        "oneOf": [
+                            { "type": "string" },
+                            { "type": "array", "items": { "type": "string" } }
+                        ]
+                    },
+                    "commit":      { "type": "boolean", "description": "Create a commit from staged changes (default: true)" },
+                    "message":     { "type": "string",  "description": "Commit message (default: generated checkpoint summary)" },
+                    "allow_empty": { "type": "boolean", "description": "Allow empty commits (default: false)" },
+                    "author":      { "type": "string",  "description": "Author override \"Name <email>\"" },
+                    "push":        { "type": "boolean", "description": "Push after commit/status checkpoint (default: false)" },
+                    "remote":      { "type": "string",  "description": "Remote name (default: origin)" },
+                    "branch":      { "type": "string",  "description": "Branch to push (default: current)" },
+                    "provenance": {
+                        "type": "object",
+                        "description": "Optional checkpoint provenance fields appended as commit trailers",
+                        "properties": {
+                            "agent":      { "type": "string", "description": "Agent name/id" },
+                            "session_id": { "type": "string", "description": "Session identifier" },
+                            "reason":     { "type": "string", "description": "Reason for this checkpoint" },
+                            "tags":       { "type": "array", "items": { "type": "string" }, "description": "Short labels for later filtering" }
+                        }
+                    }
+                }
+            }),
+        },
         ToolDef {
             name: "git_commit",
             description: "Stage files and commit in a git repo. Optionally push after commit. \

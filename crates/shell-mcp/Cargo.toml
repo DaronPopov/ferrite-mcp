@@ -6,6 +6,10 @@ edition.workspace   = true
 authors.workspace   = true
 license.workspace   = true
 
+[features]
+default = []
+fercuda-runtime-apply = ["dep:fercuda_ffi"]
+
 [dependencies]
 shell-core = { workspace = true }
 serde      = { workspace = true }
@@ -15,3 +19,4 @@ glob       = { workspace = true }
 regex      = { workspace = true }
 nix        = { workspace = true }
 libc       = { workspace = true }
+fercuda_ffi = { package = "fercuda-ffi", path = "../../../feRcuda/rust/fercuda-ffi", optional = true }

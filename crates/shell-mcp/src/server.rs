@@ -183,6 +183,8 @@ impl McpServer {
             ));
         }
 
+        crate::tools::git_guard::maybe_auto_checkpoint(name, args, &self.state)?;
+
         let result = self.call_tool(name, args)?;
         let result = cap_and_filter(result, filter, max_chars);
         serde_json::to_value(&result).map_err(|e| e.to_string())
@@ -208,6 +210,9 @@ impl McpServer {
             // State
             "shell_state"    => tools::state::shell_state(args, &self.state),
             "set_cwd"        => tools::state::set_cwd(args, &self.state),
+            "control_reconcile" => tools::control::control_reconcile(args, &self.state),
+            #[cfg(feature = "fercuda-runtime-apply")]
+            "fercuda_runtime" => tools::fercuda::runtime(args),
             "config_ux"      => tools::config_ux::config_ux(args),
             "ux_wizard"      => tools::ux_wizard::ux_wizard(args),
             // Execution
@@ -300,6 +305,7 @@ impl McpServer {
             // Project creation
             "project_new"  => tools::git_new::project_new(args),
             // Git write
+            "git_checkpoint" => tools::git_write::git_checkpoint(args),
             "git_commit"   => tools::git_write::git_commit(args),
             // Notifications
             "notify"            => tools::notify::notify(args),
