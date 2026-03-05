@@ -17,6 +17,16 @@ REPO="https://github.com/DaronPopov/ferrite-mcp"
 BIN="ferrite"
 CARGO_BIN="$HOME/.cargo/bin/$BIN"
 
+find_ferrite_bin() {
+    if command -v "$BIN" >/dev/null 2>&1; then
+        command -v "$BIN"
+    elif [ -x "$CARGO_BIN" ]; then
+        printf '%s\n' "$CARGO_BIN"
+    else
+        return 1
+    fi
+}
+
 # Detect if we're running from a local clone — use --path instead of --git
 SCRIPT_DIR="$(cd "$(dirname "$0")" 2>/dev/null && pwd || echo "")"
 if [ -f "$SCRIPT_DIR/crates/shell-bin/Cargo.toml" ]; then
@@ -45,26 +55,25 @@ fi
 
 # ── 2. ferrite binary ──────────────────────────────────────────────────────────
 ALREADY_INSTALLED=0
-command -v "$BIN" >/dev/null 2>&1 && ALREADY_INSTALLED=1
+find_ferrite_bin >/dev/null 2>&1 && ALREADY_INSTALLED=1
 
 if [ -n "$LOCAL_PATH" ]; then
     inf "Building from local clone ($LOCAL_PATH) ..."
-    cargo install --path "$LOCAL_PATH/crates/shell-bin" || true
+    cargo install --path "$LOCAL_PATH/crates/shell-bin"
 else
     inf "Building from $REPO ..."
-    cargo install --git "$REPO" shell-bin --bin "$BIN" --locked || true
+    cargo install --git "$REPO" shell-bin --bin "$BIN" --locked
 fi
 
-if ! command -v "$BIN" >/dev/null 2>&1; then
+if ! FERRITE_BIN="$(find_ferrite_bin)"; then
     printf '\033[31m  ✗ build failed — ferrite binary not found after install\033[0m\n'
+    inf "Looked for: $(command -v "$BIN" 2>/dev/null || printf '%s' "$BIN") and $CARGO_BIN"
     exit 1
 elif [ "$ALREADY_INSTALLED" = "1" ]; then
     grn "ferrite updated"
 else
     grn "ferrite installed"
 fi
-
-FERRITE_BIN="$(command -v $BIN 2>/dev/null || echo "$CARGO_BIN")"
 
 echo ""
 bold "Registering MCP server..."
