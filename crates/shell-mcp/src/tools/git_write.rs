@@ -4,7 +4,8 @@
 //! `git_commit`: backward-compatible wrapper retained for existing clients.
 
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::{Command, Output, Stdio};
+use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 
@@ -363,24 +364,24 @@ fn staged_diff_stat(root: &Path) -> Result<String, String> {
 }
 
 fn commit_changes(root: &Path, message: &str, author: Option<&str>, allow_empty: bool) -> Result<Output, String> {
-    let mut cmd = Command::new("git");
+    let mut args: Vec<String> = Vec::new();
 
     if !has_local_identity(root) {
-        cmd.arg("-c")
-            .arg("user.name=ferrite")
-            .arg("-c")
-            .arg("user.email=ferrite@local");
+        args.extend(["-c".into(), "user.name=ferrite".into(), "-c".into(), "user.email=ferrite@local".into()]);
     }
 
-    cmd.arg("commit").arg("-m").arg(message);
+    args.push("commit".into());
+    args.push("-m".into());
+    args.push(message.into());
     if allow_empty {
-        cmd.arg("--allow-empty");
+        args.push("--allow-empty".into());
     }
     if let Some(a) = author {
-        cmd.arg(format!("--author={a}"));
+        args.push(format!("--author={a}"));
     }
-    cmd.current_dir(root);
-    cmd.output().map_err(|e| format!("git commit: {e}"))
+
+    let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+    run_git_timeout(root, &arg_refs, GIT_TIMEOUT)
 }
 
 fn has_local_identity(root: &Path) -> bool {
@@ -433,20 +434,44 @@ fn short_head_hash(root: &Path) -> Option<String> {
     }
 }
 
+/// Default timeout for git write operations.
+const GIT_TIMEOUT: Duration = Duration::from_secs(30);
+
 fn run_git(root: &Path, args: &[&str]) -> Result<Output, String> {
-    Command::new("git")
+    run_git_timeout(root, args, GIT_TIMEOUT)
+}
+
+/// Run a git command with a timeout. Kills the child if it exceeds the deadline.
+fn run_git_timeout(cwd: &Path, args: &[&str], timeout: Duration) -> Result<Output, String> {
+    let mut child = Command::new("git")
         .args(args)
-        .current_dir(root)
-        .output()
-        .map_err(|e| format!("git {}: {e}", args.join(" ")))
+        .current_dir(cwd)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("git {}: {e}", args.join(" ")))?;
+
+    let deadline = Instant::now() + timeout;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => return child.wait_with_output()
+                .map_err(|e| format!("git {}: {e}", args.join(" "))),
+            Ok(None) => {
+                if Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(format!("git {}: timed out after {}s", args.join(" "), timeout.as_secs()));
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            Err(e) => return Err(format!("git {}: {e}", args.join(" "))),
+        }
+    }
 }
 
 fn resolve_git_root(start: &Path) -> Result<PathBuf, String> {
-    let out = Command::new("git")
-        .args(["rev-parse", "--show-toplevel"])
-        .current_dir(start)
-        .output()
-        .map_err(|e| format!("git: {e}"))?;
+    let out = run_git_timeout(start, &["rev-parse", "--show-toplevel"], Duration::from_secs(5))?;
     if !out.status.success() {
         return Err(format!("not a git repo: {}", start.display()));
     }

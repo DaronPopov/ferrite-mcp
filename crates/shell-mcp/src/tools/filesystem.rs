@@ -350,18 +350,54 @@ fn is_executable(path: &std::path::Path) -> bool {
 }
 
 /// Try common `--version` / `-V` flags to extract a version string.
+/// Bounded by a short timeout so nonstandard CLIs (e.g. ferrite shell) never hang.
 fn probe_version(bin: &str) -> Option<String> {
+    use std::process::{Command, Stdio};
+    use std::time::{Duration, Instant};
+
+    const TIMEOUT: Duration = Duration::from_secs(2);
+
     for flag in ["--version", "-V", "version"] {
-        if let Ok(out) = std::process::Command::new(bin)
+        let mut child = match Command::new(bin)
             .arg(flag)
-            .output()
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
         {
-            let text = String::from_utf8_lossy(&out.stdout).to_string()
-                + &String::from_utf8_lossy(&out.stderr);
-            // Grab first non-empty line
-            if let Some(line) = text.lines().find(|l| !l.trim().is_empty()) {
-                return Some(line.trim().to_owned());
+            Ok(c) => c,
+            Err(_) => continue,
+        };
+
+        let deadline = Instant::now() + TIMEOUT;
+        let status = loop {
+            match child.try_wait() {
+                Ok(Some(s)) => break Some(s),
+                Ok(None) => {
+                    if Instant::now() >= deadline {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        break None;
+                    }
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+                Err(_) => break None,
             }
+        };
+
+        let Some(st) = status else { continue };
+        if !st.success() { continue; }
+
+        let stdout = child.stdout.take()
+            .and_then(|mut r| { let mut b = Vec::new(); std::io::Read::read_to_end(&mut r, &mut b).ok().map(|_| b) })
+            .unwrap_or_default();
+        let stderr = child.stderr.take()
+            .and_then(|mut r| { let mut b = Vec::new(); std::io::Read::read_to_end(&mut r, &mut b).ok().map(|_| b) })
+            .unwrap_or_default();
+        let text = String::from_utf8_lossy(&stdout).to_string()
+            + &String::from_utf8_lossy(&stderr);
+        if let Some(line) = text.lines().find(|l| !l.trim().is_empty()) {
+            return Some(line.trim().to_owned());
         }
     }
     None

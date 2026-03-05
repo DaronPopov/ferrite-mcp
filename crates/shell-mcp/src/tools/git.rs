@@ -6,8 +6,13 @@
 //!   git_status — staged / unstaged / untracked + branch info
 
 use std::path::PathBuf;
+use std::process::{Command, Output, Stdio};
+use std::time::{Duration, Instant};
 use serde_json::{json, Value};
 use crate::protocol::ToolResult;
+
+/// Default timeout for git subprocess calls.
+const GIT_TIMEOUT: Duration = Duration::from_secs(15);
 
 // ── git_log ───────────────────────────────────────────────────────────────────
 
@@ -24,18 +29,18 @@ pub fn git_log(args: &Value) -> Result<ToolResult, String> {
     // Format: hash|short|author|email|date(iso)|subject
     let fmt = "%H%x00%h%x00%an%x00%ae%x00%ai%x00%s";
 
-    let mut cmd = std::process::Command::new("git");
-    cmd.arg("log")
-       .arg(format!("--format={fmt}"))
-       .arg(format!("-{limit}"))
-       .arg(branch)
-       .current_dir(&root);
+    let mut args: Vec<String> = vec![
+        "log".into(),
+        format!("--format={fmt}"),
+        format!("-{limit}"),
+        branch.into(),
+    ];
+    if !author.is_empty() { args.push(format!("--author={author}")); }
+    if !since.is_empty()  { args.push(format!("--since={since}")); }
+    if !file.is_empty()   { args.push("--".into()); args.push(file.into()); }
 
-    if !author.is_empty() { cmd.arg(format!("--author={author}")); }
-    if !since.is_empty()  { cmd.arg(format!("--since={since}")); }
-    if !file.is_empty()   { cmd.args(["--", file]); }
-
-    let out = cmd.output().map_err(|e| format!("git log: {e}"))?;
+    let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+    let out = run_git_timeout(&root, &arg_refs, GIT_TIMEOUT)?;
     if !out.status.success() {
         let err = String::from_utf8_lossy(&out.stderr);
         return Ok(ToolResult::error(format!("git log: {err}")));
@@ -78,14 +83,13 @@ pub fn git_diff(args: &Value) -> Result<ToolResult, String> {
 
     let root = git_root(path)?;
 
-    let mut cmd = std::process::Command::new("git");
-    cmd.arg("diff").current_dir(&root);
+    let mut args: Vec<String> = vec!["diff".into()];
+    if staged  { args.push("--staged".into()); }
+    if !commit.is_empty() { args.push(commit.into()); }
+    if !file.is_empty()   { args.push("--".into()); args.push(file.into()); }
 
-    if staged  { cmd.arg("--staged"); }
-    if !commit.is_empty() { cmd.arg(commit); }
-    if !file.is_empty()   { cmd.args(["--", file]); }
-
-    let out = cmd.output().map_err(|e| format!("git diff: {e}"))?;
+    let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+    let out = run_git_timeout(&root, &arg_refs, GIT_TIMEOUT)?;
     let stdout = String::from_utf8_lossy(&out.stdout).to_string();
 
     if stdout.is_empty() {
@@ -210,11 +214,7 @@ pub fn git_status(args: &Value) -> Result<ToolResult, String> {
     let root = git_root(path)?;
 
     // --porcelain=v1 -b gives branch header + XY status lines
-    let out = std::process::Command::new("git")
-        .args(["status", "--porcelain=v1", "-b", "--untracked-files=all"])
-        .current_dir(&root)
-        .output()
-        .map_err(|e| format!("git status: {e}"))?;
+    let out = run_git_timeout(&root, &["status", "--porcelain=v1", "-b", "--untracked-files=all"], GIT_TIMEOUT)?;
 
     if !out.status.success() {
         let err = String::from_utf8_lossy(&out.stderr);
@@ -288,12 +288,7 @@ pub fn git_status(args: &Value) -> Result<ToolResult, String> {
 // ── helpers ───────────────────────────────────────────────────────────────────
 
 fn git_root(from: &str) -> Result<PathBuf, String> {
-    let out = std::process::Command::new("git")
-        .args(["rev-parse", "--show-toplevel"])
-        .current_dir(from)
-        .output()
-        .map_err(|e| format!("git: {e}"))?;
-
+    let out = run_git_timeout(from, &["rev-parse", "--show-toplevel"], Duration::from_secs(5))?;
     if !out.status.success() {
         return Err(format!("git: '{from}' is not inside a git repository"));
     }
@@ -301,10 +296,39 @@ fn git_root(from: &str) -> Result<PathBuf, String> {
 }
 
 fn current_branch(root: &PathBuf) -> Result<String, String> {
-    let out = std::process::Command::new("git")
-        .args(["rev-parse", "--abbrev-ref", "HEAD"])
-        .current_dir(root)
-        .output()
-        .map_err(|e| format!("git branch: {e}"))?;
+    let out = run_git_timeout(root, &["rev-parse", "--abbrev-ref", "HEAD"], Duration::from_secs(5))?;
     Ok(String::from_utf8_lossy(&out.stdout).trim().to_owned())
+}
+
+/// Run a git command with a timeout. Kills the child if it exceeds the deadline.
+fn run_git_timeout<P: AsRef<std::path::Path>>(
+    cwd: P,
+    args: &[&str],
+    timeout: Duration,
+) -> Result<Output, String> {
+    let mut child = Command::new("git")
+        .args(args)
+        .current_dir(cwd)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("git {}: {e}", args.join(" ")))?;
+
+    let deadline = Instant::now() + timeout;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => return child.wait_with_output()
+                .map_err(|e| format!("git {}: {e}", args.join(" "))),
+            Ok(None) => {
+                if Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(format!("git {}: timed out after {}s", args.join(" "), timeout.as_secs()));
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            Err(e) => return Err(format!("git {}: {e}", args.join(" "))),
+        }
+    }
 }
