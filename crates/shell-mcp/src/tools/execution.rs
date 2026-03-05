@@ -4,6 +4,7 @@
 //! build_check: Smart compilation — auto-resolves CUDA flags, returns parsed error list.
 //! task_run:    Write a script to a tempfile and execute it atomically in one call.
 
+use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -390,6 +391,18 @@ fn build_cuda(file: &Path, extra_flags: &[String], cwd: &Path, title: &str, conf
         }),
     };
 
+    let source_file = match resolve_cuda_source(file) {
+        Ok(path) => path,
+        Err((message, candidates)) => return json!({
+            "success": false,
+            "build_type": "cuda",
+            "compiler": nvcc,
+            "error": message,
+            "candidate_count": candidates.len(),
+            "candidates": candidates,
+        }),
+    };
+
     // Detect compute capability from cached gpu_info
     let arch_flags = detect_cuda_arch_flags();
 
@@ -409,7 +422,7 @@ fn build_cuda(file: &Path, extra_flags: &[String], cwd: &Path, title: &str, conf
     }
 
     cmd_parts.extend(extra_flags.iter().cloned());
-    cmd_parts.push(file.display().to_string());
+    cmd_parts.push(source_file.display().to_string());
 
     let cmd = cmd_parts.join(" ");
     let raw = run_observed(&cmd, cwd, &[], "", Duration::from_secs(120), title, config);
@@ -436,6 +449,57 @@ fn build_cuda(file: &Path, extra_flags: &[String], cwd: &Path, title: &str, conf
         "raw_stderr": if success { Value::Null } else { Value::String(stderr) },
         "raw_stdout": if stdout.is_empty() { Value::Null } else { Value::String(stdout) },
     })
+}
+
+fn resolve_cuda_source(path: &Path) -> Result<PathBuf, (String, Vec<String>)> {
+    if path.is_file() {
+        if path.extension().and_then(|e| e.to_str()) == Some("cu") {
+            return Ok(path.to_owned());
+        }
+        return Err((
+            format!("CUDA build_check expects a .cu file, got '{}'", path.display()),
+            Vec::new(),
+        ));
+    }
+
+    if !path.is_dir() {
+        return Err((
+            format!("CUDA input '{}' does not exist", path.display()),
+            Vec::new(),
+        ));
+    }
+
+    let mut candidates = Vec::new();
+    collect_cuda_sources(path, &mut candidates);
+    candidates.sort();
+
+    match candidates.len() {
+        0 => Err((
+            format!("No .cu files found under '{}'", path.display()),
+            Vec::new(),
+        )),
+        1 => Ok(PathBuf::from(&candidates[0])),
+        _ => Err((
+            format!(
+                "CUDA directory '{}' is ambiguous; found {} .cu files. Pass a specific file.",
+                path.display(),
+                candidates.len()
+            ),
+            candidates.into_iter().take(20).collect(),
+        )),
+    }
+}
+
+fn collect_cuda_sources(dir: &Path, out: &mut Vec<String>) {
+    let Ok(entries) = fs::read_dir(dir) else { return; };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_cuda_sources(&path, out);
+        } else if path.extension().and_then(|e| e.to_str()) == Some("cu") {
+            out.push(path.display().to_string());
+        }
+    }
 }
 
 fn detect_cuda_arch_flags() -> Vec<String> {
