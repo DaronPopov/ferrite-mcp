@@ -36,8 +36,6 @@ pub mod state;
 pub mod symbols;
 pub mod system;
 pub mod env_doctor;
-#[cfg(feature = "fercuda-runtime-apply")]
-pub mod fercuda;
 pub mod permissions_tool;
 pub mod tmux;
 pub mod tty_exec;
@@ -242,22 +240,6 @@ pub fn all_tool_definitions() -> Vec<ToolDef> {
                         "type": "boolean",
                         "description": "When op=tick and apply=true: permit direct execution bridge for supported actions."
                     }
-                },
-                "required": ["op"]
-            }),
-        },
-        #[cfg(feature = "fercuda-runtime-apply")]
-        ToolDef {
-            name: "fercuda_runtime",
-            description: concat!(
-                "Feature-gated feRcuda runtime control endpoint. ",
-                "Use op=status|guide|session_create|session_destroy|buffer_alloc|buffer_free|",
-                "upload_f32|download_f32|submit_matmul|submit_layer_norm|job_status|job_wait."
-            ),
-            input_schema: json!({
-                "type": "object",
-                "properties": {
-                    "op": { "type": "string", "description": "Runtime op" }
                 },
                 "required": ["op"]
             }),

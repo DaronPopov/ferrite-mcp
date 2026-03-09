@@ -31,38 +31,12 @@ fn collect_actual_state(args: &Value, desired: &DesiredStateV0) -> Result<Actual
         return serde_json::from_value(args["actual"].clone())
             .map_err(|e| format!("invalid actual schema: {e}"));
     }
-    #[cfg(feature = "fercuda-runtime-apply")]
-    let mut actual = ActualState {
-        fercuda_owned_sessions: Vec::new(),
-    };
-    #[cfg(not(feature = "fercuda-runtime-apply"))]
     let actual = ActualState {
         fercuda_owned_sessions: Vec::new(),
     };
     if desired.fercuda.is_some() {
-        #[cfg(feature = "fercuda-runtime-apply")]
-        {
-            let status = crate::tools::fercuda::runtime(&json!({ "op": "status" }))?;
-            let txt = status
-                .content
-                .first()
-                .map(|c| c.text.as_str())
-                .ok_or("empty fercuda status result".to_owned())?;
-            let v = serde_json::from_str::<Value>(txt)
-                .map_err(|e| format!("failed to parse fercuda status result: {e}"))?;
-            if let Some(arr) = v["sessions"]["owned_session_ids"].as_array() {
-                for sid in arr {
-                    if let Some(id) = sid.as_u64() {
-                        actual.fercuda_owned_sessions.push(id);
-                    }
-                }
-            }
-        }
-        #[cfg(not(feature = "fercuda-runtime-apply"))]
-        {
-            // Decoupled default: no runtime probe in this module.
-            // Caller can pass `actual.fercuda_owned_sessions` when available.
-        }
+        // Standalone install: no feRcuda runtime probe from this crate.
+        // Caller can pass `actual.fercuda_owned_sessions` when available.
     }
     Ok(actual)
 }

@@ -211,8 +211,6 @@ impl McpServer {
             "shell_state"    => tools::state::shell_state(args, &self.state),
             "set_cwd"        => tools::state::set_cwd(args, &self.state),
             "control_reconcile" => tools::control::control_reconcile(args, &self.state),
-            #[cfg(feature = "fercuda-runtime-apply")]
-            "fercuda_runtime" => tools::fercuda::runtime(args),
             "config_ux"      => tools::config_ux::config_ux(args),
             "ux_wizard"      => tools::ux_wizard::ux_wizard(args),
             // Execution
