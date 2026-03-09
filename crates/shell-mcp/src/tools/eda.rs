@@ -17,6 +17,11 @@ use serde_json::{json, Value};
 use crate::protocol::ToolResult;
 
 const VIVADO: &str = "/opt/2025.2/Vivado/bin/vivado";
+const XVLOG: &str = "/opt/2025.2/Vivado/bin/xvlog";
+const XELAB: &str = "/opt/2025.2/Vivado/bin/xelab";
+const XILINX_UNISIMS_DIR: &str = "/opt/2025.2/Vivado/data/verilog/src/unisims";
+const XILINX_GLBL_V: &str = "/opt/2025.2/Vivado/ids_lite/ISE/verilog/src/glbl.v";
+const XILINX_XPM_MEMORY_SV: &str = "/opt/2025.2/Vivado/data/ip/xpm/xpm_memory/hdl/xpm_memory.sv";
 
 // ── verilog_lint ──────────────────────────────────────────────────────────────
 
@@ -26,12 +31,17 @@ pub fn verilog_lint(args: &Value) -> Result<ToolResult, String> {
     let files = collect_str_array(args, "files", "verilog_lint")?;
     let top          = args["top"].as_str().unwrap_or("");
     let include_dirs = collect_str_array(args, "include_dirs", "verilog_lint").unwrap_or_default();
+    let libraries    = collect_optional_str_array(args, "libraries", "verilog_lint")?;
     let standard     = args["standard"].as_str().unwrap_or("2012");
 
     let mut cmd = std::process::Command::new("iverilog");
     cmd.arg("-tnull").arg(format!("-g{standard}"));
     if !top.is_empty() { cmd.args(["-s", top]); }
     for d in &include_dirs { cmd.args(["-I", d]); }
+    let resolved_libraries = apply_iverilog_libraries(&mut cmd, &libraries, "verilog_lint")?;
+    if uses_xilinx_glbl(&libraries) {
+        cmd.args(["-s", "glbl"]);
+    }
     for f in &files        { cmd.arg(f); }
 
     let out = cmd.output().map_err(|e| format!("iverilog: {e}"))?;
@@ -49,6 +59,7 @@ pub fn verilog_lint(args: &Value) -> Result<ToolResult, String> {
         "success":       out.status.success(),
         "error_count":   error_count,
         "warning_count": warning_count,
+        "libraries_used": resolved_libraries,
         "diagnostics":   diagnostics,
     })))
 }
@@ -92,6 +103,22 @@ fn parse_iverilog_diag(output: &str) -> Vec<Value> {
     results
 }
 
+fn combine_output(out: &std::process::Output) -> String {
+    format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    )
+}
+
+fn collect_prefixed_lines(output: &str, prefixes: &[&str]) -> Vec<String> {
+    output.lines()
+        .map(str::trim)
+        .filter(|line| prefixes.iter().any(|prefix| line.starts_with(prefix)))
+        .map(str::to_owned)
+        .collect()
+}
+
 // ── verilog_sim ───────────────────────────────────────────────────────────────
 
 /// Compile Verilog with iverilog then simulate with vvp.
@@ -100,6 +127,7 @@ pub fn verilog_sim(args: &Value) -> Result<ToolResult, String> {
     let files        = collect_str_array(args, "files", "verilog_sim")?;
     let top          = args["top"].as_str().unwrap_or("tb");
     let include_dirs = collect_str_array(args, "include_dirs", "verilog_sim").unwrap_or_default();
+    let libraries    = collect_optional_str_array(args, "libraries", "verilog_sim")?;
     let vcd_out      = args["vcd_out"].as_str();
     let standard     = args["standard"].as_str().unwrap_or("2012");
     let timeout_secs = args["timeout_secs"].as_u64().unwrap_or(30);
@@ -110,6 +138,10 @@ pub fn verilog_sim(args: &Value) -> Result<ToolResult, String> {
     let mut compile = std::process::Command::new("iverilog");
     compile.arg(format!("-g{standard}")).args(["-s", top, "-o", &bin]);
     for d in &include_dirs { compile.args(["-I", d]); }
+    let resolved_libraries = apply_iverilog_libraries(&mut compile, &libraries, "verilog_sim")?;
+    if uses_xilinx_glbl(&libraries) {
+        compile.args(["-s", "glbl"]);
+    }
     if let Some(vcd) = vcd_out {
         // Emit VCD — user must have $dumpfile/$dumpvars in testbench,
         // but we pass the preferred path via plusarg
@@ -129,6 +161,7 @@ pub fn verilog_sim(args: &Value) -> Result<ToolResult, String> {
         return Ok(ToolResult::json(&json!({
             "phase":    "compile",
             "success":  false,
+            "libraries_used": resolved_libraries,
             "diagnostics": parse_iverilog_diag(&compile_diag),
             "raw":      compile_diag,
         })));
@@ -177,11 +210,98 @@ pub fn verilog_sim(args: &Value) -> Result<ToolResult, String> {
     Ok(ToolResult::json(&json!({
         "phase":               "simulate",
         "success":             out.status.success(),
+        "libraries_used":      resolved_libraries,
         "finished":            finished,
         "assertion_failures":  asserts.len(),
         "duration_ms":         duration_ms,
         "stdout":              stdout,
         "stderr":              stderr,
+    })))
+}
+
+/// Run Vivado Simulator front-end checks via xvlog/xelab.
+/// Uses precompiled Xilinx libraries so XPM and UNISIM-heavy designs elaborate cleanly.
+pub fn xsim_elab(args: &Value) -> Result<ToolResult, String> {
+    let files = collect_str_array(args, "files", "xsim_elab")?;
+    let top = args["top"].as_str().ok_or("xsim_elab: 'top' required")?;
+    let include_dirs = collect_optional_str_array(args, "include_dirs", "xsim_elab")?;
+    let libraries = collect_optional_str_array(args, "libraries", "xsim_elab")?;
+    let defines = collect_optional_str_array(args, "defines", "xsim_elab")?;
+    let standard = args["standard"].as_str().unwrap_or("2012");
+    let snapshot = args["snapshot"].as_str().unwrap_or("ferrite_xsim");
+
+    if !Path::new(XVLOG).exists() {
+        return Err(format!("xsim_elab: missing xvlog: {XVLOG}"));
+    }
+    if !Path::new(XELAB).exists() {
+        return Err(format!("xsim_elab: missing xelab: {XELAB}"));
+    }
+
+    let workdir = std::env::temp_dir().join(format!(
+        "ferrite_xsim_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0)
+    ));
+    std::fs::create_dir_all(&workdir).map_err(|e| format!("xsim_elab: create workdir: {e}"))?;
+
+    let resolved_libraries = resolve_xsim_libraries(&libraries, "xsim_elab")?;
+    let compile_files = xsim_compile_files(&files, &libraries)?;
+    let elaborate_tops = xsim_elab_tops(top, &libraries);
+
+    let mut xvlog = std::process::Command::new(XVLOG);
+    xvlog.current_dir(&workdir);
+    for flag in xsim_compile_flags(standard) {
+        xvlog.arg(flag);
+    }
+    for dir in &include_dirs {
+        xvlog.args(["-i", dir]);
+    }
+    for define in &defines {
+        xvlog.args(["-d", define]);
+    }
+    for file in &compile_files {
+        xvlog.arg(file);
+    }
+
+    let xvlog_out = xvlog.output().map_err(|e| format!("xsim_elab xvlog: {e}"))?;
+    let xvlog_text = combine_output(&xvlog_out);
+    if !xvlog_out.status.success() {
+        return Ok(ToolResult::json(&json!({
+            "phase": "compile",
+            "success": false,
+            "libraries_used": resolved_libraries,
+            "workdir": workdir,
+            "errors": collect_prefixed_lines(&xvlog_text, &["ERROR:"]),
+            "warnings": collect_prefixed_lines(&xvlog_text, &["WARNING:"]),
+            "output": xvlog_text,
+        })));
+    }
+
+    let mut xelab = std::process::Command::new(XELAB);
+    xelab.current_dir(&workdir).args(["--nolog", "--relax", "-mt", "off"]);
+    for lib in xsim_search_libraries(&libraries) {
+        xelab.args(["-L", &lib]);
+    }
+    for unit in &elaborate_tops {
+        xelab.arg(unit);
+    }
+    xelab.args(["-s", snapshot]);
+
+    let xelab_out = xelab.output().map_err(|e| format!("xsim_elab xelab: {e}"))?;
+    let xelab_text = combine_output(&xelab_out);
+
+    Ok(ToolResult::json(&json!({
+        "phase": "elaborate",
+        "success": xelab_out.status.success(),
+        "libraries_used": resolved_libraries,
+        "top_units": elaborate_tops,
+        "workdir": workdir,
+        "errors": collect_prefixed_lines(&xelab_text, &["ERROR:"]),
+        "warnings": collect_prefixed_lines(&xelab_text, &["WARNING:"]),
+        "output": xelab_text,
     })))
 }
 
@@ -1216,5 +1336,325 @@ fn collect_str_array(args: &Value, key: &str, tool: &str) -> Result<Vec<String>,
             .collect()),
         Value::Null => Err(format!("{tool}: '{key}' array required")),
         _ => Err(format!("{tool}: '{key}' must be an array")),
+    }
+}
+
+fn collect_optional_str_array(args: &Value, key: &str, tool: &str) -> Result<Vec<String>, String> {
+    match &args[key] {
+        Value::Array(arr) => Ok(arr.iter()
+            .filter_map(|v| v.as_str().map(str::to_owned))
+            .collect()),
+        Value::Null => Ok(Vec::new()),
+        _ => Err(format!("{tool}: '{key}' must be an array")),
+    }
+}
+
+fn apply_iverilog_libraries(
+    cmd: &mut std::process::Command,
+    libraries: &[String],
+    tool: &str,
+) -> Result<Vec<String>, String> {
+    let mut resolved = Vec::new();
+
+    for lib in libraries {
+        match lib.as_str() {
+            "xilinx_unisims" | "xilinx_unisims_7series" => {
+                if !Path::new(XILINX_UNISIMS_DIR).exists() {
+                    return Err(format!("{tool}: missing Xilinx unisims dir: {XILINX_UNISIMS_DIR}"));
+                }
+                if !Path::new(XILINX_GLBL_V).exists() {
+                    return Err(format!("{tool}: missing Xilinx glbl.v: {XILINX_GLBL_V}"));
+                }
+                cmd.args(["-y", XILINX_UNISIMS_DIR]);
+                cmd.arg(XILINX_GLBL_V);
+                resolved.push(format!("{} (dir:{}, glbl:{})", lib, XILINX_UNISIMS_DIR, XILINX_GLBL_V));
+            }
+            "xilinx_xpm_memory" => {
+                if !Path::new(XILINX_XPM_MEMORY_SV).exists() {
+                    return Err(format!("{tool}: missing Xilinx XPM source: {XILINX_XPM_MEMORY_SV}"));
+                }
+                cmd.arg(XILINX_XPM_MEMORY_SV);
+                resolved.push(format!("{} (file:{})", lib, XILINX_XPM_MEMORY_SV));
+            }
+            other => {
+                return Err(format!(
+                    "{tool}: unsupported library preset '{other}'. supported: xilinx_unisims, xilinx_unisims_7series, xilinx_xpm_memory"
+                ));
+            }
+        }
+    }
+
+    Ok(resolved)
+}
+
+fn uses_xilinx_glbl(libraries: &[String]) -> bool {
+    libraries.iter().any(|lib| matches!(lib.as_str(), "xilinx_unisims" | "xilinx_unisims_7series"))
+}
+
+fn xsim_compile_flags(standard: &str) -> Vec<&'static str> {
+    let mut flags = vec!["--nolog", "--relax"];
+    if matches!(standard, "2012" | "sv") {
+        flags.push("--sv");
+    }
+    flags
+}
+
+fn xsim_compile_files(files: &[String], libraries: &[String]) -> Result<Vec<String>, String> {
+    let mut compile_files = files.to_vec();
+    if uses_xsim_glbl(libraries) {
+        if !Path::new(XILINX_GLBL_V).exists() {
+            return Err(format!("xsim_elab: missing Xilinx glbl.v: {XILINX_GLBL_V}"));
+        }
+        compile_files.push(XILINX_GLBL_V.to_owned());
+    }
+    Ok(compile_files)
+}
+
+fn resolve_xsim_libraries(libraries: &[String], tool: &str) -> Result<Vec<String>, String> {
+    let mut resolved = Vec::new();
+
+    for lib in libraries {
+        match lib.as_str() {
+            "xilinx_unisims" | "xilinx_unisims_7series" => {
+                resolved.push(format!("{lib} (xelab -L unisims_ver, glbl:{XILINX_GLBL_V})"));
+            }
+            "xilinx_xpm_cdc" | "xilinx_xpm_fifo" | "xilinx_xpm_memory" => {
+                let mut detail = format!("{lib} (xelab -L xpm");
+                if lib == "xilinx_xpm_cdc" {
+                    detail.push_str(&format!(", glbl:{XILINX_GLBL_V}"));
+                }
+                detail.push(')');
+                resolved.push(detail);
+            }
+            other => {
+                return Err(format!(
+                    "{tool}: unsupported library preset '{other}'. supported: xilinx_unisims, xilinx_unisims_7series, xilinx_xpm_cdc, xilinx_xpm_fifo, xilinx_xpm_memory"
+                ));
+            }
+        }
+    }
+
+    Ok(resolved)
+}
+
+fn xsim_search_libraries(libraries: &[String]) -> Vec<String> {
+    let mut libs = Vec::new();
+
+    for lib in libraries {
+        let name = match lib.as_str() {
+            "xilinx_unisims" | "xilinx_unisims_7series" => Some("unisims_ver"),
+            "xilinx_xpm_cdc" | "xilinx_xpm_fifo" | "xilinx_xpm_memory" => Some("xpm"),
+            _ => None,
+        };
+        if let Some(name) = name {
+            if !libs.iter().any(|existing| existing == name) {
+                libs.push(name.to_owned());
+            }
+        }
+    }
+
+    libs
+}
+
+fn xsim_elab_tops(top: &str, libraries: &[String]) -> Vec<String> {
+    let mut tops = vec![top.to_owned()];
+    if uses_xsim_glbl(libraries) {
+        tops.push("glbl".to_owned());
+    }
+    tops
+}
+
+fn uses_xsim_glbl(libraries: &[String]) -> bool {
+    libraries.iter().any(|lib| matches!(lib.as_str(), "xilinx_unisims" | "xilinx_unisims_7series" | "xilinx_xpm_cdc"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::sync::{Mutex, OnceLock};
+
+    fn xsim_test_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    fn parse_tool_json(result: ToolResult) -> Value {
+        serde_json::from_str(&result.content[0].text).expect("tool result json")
+    }
+
+    #[test]
+    fn verilog_lint_accepts_xilinx_unisims_for_mmcm_design() {
+        let tmp = std::env::temp_dir().join(format!("ferrite_mcp_mmcm_{}_{}.sv", std::process::id(), 1));
+        fs::write(&tmp, r#"
+`default_nettype none
+module mmcm_top(
+    input  wire clk,
+    input  wire rst,
+    output wire out_clk,
+    output wire locked
+);
+    wire clkfb;
+    wire clkfb_bufg;
+    wire clk_mmcm;
+
+    MMCME2_BASE #(
+        .CLKIN1_PERIOD(10.0),
+        .DIVCLK_DIVIDE(1),
+        .CLKFBOUT_MULT_F(10.0),
+        .CLKOUT0_DIVIDE_F(20.0)
+    ) u_mmcm (
+        .CLKFBOUT(clkfb), .CLKFBOUTB(), .CLKOUT0(clk_mmcm), .CLKOUT0B(),
+        .CLKOUT1(), .CLKOUT1B(), .CLKOUT2(), .CLKOUT2B(), .CLKOUT3(), .CLKOUT3B(),
+        .CLKOUT4(), .CLKOUT5(), .CLKOUT6(), .LOCKED(locked),
+        .CLKFBIN(clkfb_bufg), .CLKIN1(clk), .PWRDWN(1'b0), .RST(rst)
+    );
+
+    BUFG u_fb  (.I(clkfb),    .O(clkfb_bufg));
+    BUFG u_out (.I(clk_mmcm), .O(out_clk));
+endmodule
+`default_nettype wire
+"#).expect("write temp sv");
+
+        let args = json!({
+            "files": [tmp.to_string_lossy().to_string()],
+            "top": "mmcm_top",
+            "standard": "2012",
+            "libraries": ["xilinx_unisims_7series"]
+        });
+
+        let result = verilog_lint(&args).expect("verilog_lint should return");
+        let payload = parse_tool_json(result);
+        let _ = fs::remove_file(&tmp);
+
+        assert_eq!(payload["success"], Value::Bool(true), "payload={payload}");
+        assert!(payload["error_count"].as_u64().unwrap_or(1) == 0, "payload={payload}");
+        let libs = payload["libraries_used"].as_array().expect("libraries_used array");
+        assert!(libs.iter().any(|v| v.as_str().unwrap_or("").contains("xilinx_unisims_7series")));
+    }
+
+    #[test]
+    fn xsim_elab_accepts_xilinx_xpm_cdc_single() {
+        let _guard = xsim_test_lock().lock().expect("xsim test lock");
+        let tmp = std::env::temp_dir().join(format!("ferrite_mcp_xsim_xpm_cdc_{}_{}.sv", std::process::id(), 1));
+        fs::write(&tmp, r#"
+`default_nettype none
+module xpm_cdc_top(
+    input  wire src_clk,
+    input  wire src_in,
+    input  wire dest_clk,
+    output wire dest_out
+);
+    xpm_cdc_single #(
+        .DEST_SYNC_FF(2),
+        .SRC_INPUT_REG(0)
+    ) u_cdc (
+        .src_clk(src_clk),
+        .src_in(src_in),
+        .dest_clk(dest_clk),
+        .dest_out(dest_out)
+    );
+endmodule
+`default_nettype wire
+"#).expect("write temp sv");
+
+        let args = json!({
+            "files": [tmp.to_string_lossy().to_string()],
+            "top": "xpm_cdc_top",
+            "standard": "2012",
+            "libraries": ["xilinx_xpm_cdc"]
+        });
+
+        let result = xsim_elab(&args).expect("xsim_elab should return");
+        let payload = parse_tool_json(result);
+        let _ = fs::remove_file(&tmp);
+
+        assert_eq!(payload["success"], Value::Bool(true), "payload={payload}");
+        let libs = payload["libraries_used"].as_array().expect("libraries_used array");
+        assert!(libs.iter().any(|v| v.as_str().unwrap_or("").contains("xilinx_xpm_cdc")));
+    }
+
+    #[test]
+    fn xsim_elab_accepts_xilinx_xpm_fifo_sync() {
+        let _guard = xsim_test_lock().lock().expect("xsim test lock");
+        let tmp = std::env::temp_dir().join(format!("ferrite_mcp_xsim_xpm_fifo_{}_{}.sv", std::process::id(), 1));
+        fs::write(&tmp, r#"
+`default_nettype none
+module xpm_fifo_top(
+    input  wire       clk,
+    input  wire       rst,
+    input  wire       wr_en,
+    input  wire       rd_en,
+    input  wire [7:0] din,
+    output wire [7:0] dout,
+    output wire       full,
+    output wire       empty
+);
+    wire prog_full;
+    wire [0:0] wr_data_count;
+    wire overflow;
+    wire wr_rst_busy;
+    wire almost_full;
+    wire wr_ack;
+    wire prog_empty;
+    wire [0:0] rd_data_count;
+    wire underflow;
+    wire rd_rst_busy;
+    wire almost_empty;
+    wire data_valid;
+    wire sbiterr;
+    wire dbiterr;
+
+    xpm_fifo_sync #(
+        .FIFO_WRITE_DEPTH(16),
+        .WRITE_DATA_WIDTH(8),
+        .READ_DATA_WIDTH(8),
+        .WR_DATA_COUNT_WIDTH(1),
+        .RD_DATA_COUNT_WIDTH(1)
+    ) u_fifo (
+        .sleep(1'b0),
+        .rst(rst),
+        .wr_clk(clk),
+        .wr_en(wr_en),
+        .din(din),
+        .full(full),
+        .prog_full(prog_full),
+        .wr_data_count(wr_data_count),
+        .overflow(overflow),
+        .wr_rst_busy(wr_rst_busy),
+        .almost_full(almost_full),
+        .wr_ack(wr_ack),
+        .rd_en(rd_en),
+        .dout(dout),
+        .empty(empty),
+        .prog_empty(prog_empty),
+        .rd_data_count(rd_data_count),
+        .underflow(underflow),
+        .rd_rst_busy(rd_rst_busy),
+        .almost_empty(almost_empty),
+        .data_valid(data_valid),
+        .injectsbiterr(1'b0),
+        .injectdbiterr(1'b0),
+        .sbiterr(sbiterr),
+        .dbiterr(dbiterr)
+    );
+endmodule
+`default_nettype wire
+"#).expect("write temp sv");
+
+        let args = json!({
+            "files": [tmp.to_string_lossy().to_string()],
+            "top": "xpm_fifo_top",
+            "standard": "2012",
+            "libraries": ["xilinx_xpm_fifo"]
+        });
+
+        let result = xsim_elab(&args).expect("xsim_elab should return");
+        let payload = parse_tool_json(result);
+        let _ = fs::remove_file(&tmp);
+
+        assert_eq!(payload["success"], Value::Bool(true), "payload={payload}");
+        let libs = payload["libraries_used"].as_array().expect("libraries_used array");
+        assert!(libs.iter().any(|v| v.as_str().unwrap_or("").contains("xilinx_xpm_fifo")));
     }
 }

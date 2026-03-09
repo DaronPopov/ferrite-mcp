@@ -265,6 +265,7 @@ impl McpServer {
             // EDA
             "verilog_lint"   => tools::eda::verilog_lint(args),
             "verilog_sim"    => tools::eda::verilog_sim(args),
+            "xsim_elab"      => tools::eda::xsim_elab(args),
             "cocotb_run"     => tools::eda::cocotb_run(args),
             "vivado_tcl"     => tools::eda::vivado_tcl(args),
             "fpga_boards"         => tools::eda::fpga_boards(args),

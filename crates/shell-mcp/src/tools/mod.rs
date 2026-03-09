@@ -505,6 +505,7 @@ pub fn all_tool_definitions() -> Vec<ToolDef> {
                     "files":        { "type": "array",  "items": { "type": "string" }, "description": "Source files to lint" },
                     "top":          { "type": "string", "description": "Top-level module name (optional)" },
                     "include_dirs": { "type": "array",  "items": { "type": "string" }, "description": "Include search paths" },
+                    "libraries":    { "type": "array",  "items": { "type": "string" }, "description": "Optional library presets: xilinx_unisims, xilinx_unisims_7series, xilinx_xpm_memory" },
                     "standard":     { "type": "string", "description": "Verilog standard: 2005, 2012 (default), sv" }
                 },
                 "required": ["files"]
@@ -520,11 +521,30 @@ pub fn all_tool_definitions() -> Vec<ToolDef> {
                     "files":        { "type": "array",   "items": { "type": "string" }, "description": "Source files (testbench + DUT)" },
                     "top":          { "type": "string",  "description": "Top module / testbench name (default: tb)" },
                     "include_dirs": { "type": "array",   "items": { "type": "string" }, "description": "Include paths" },
+                    "libraries":    { "type": "array",   "items": { "type": "string" }, "description": "Optional library presets: xilinx_unisims, xilinx_unisims_7series, xilinx_xpm_memory" },
                     "vcd_out":      { "type": "string",  "description": "Optional VCD output path" },
                     "standard":     { "type": "string",  "description": "Verilog standard (default: 2012)" },
                     "timeout_secs": { "type": "integer", "description": "Simulation timeout (default 30s)" }
                 },
                 "required": ["files"]
+            }),
+        },
+        ToolDef {
+            name: "xsim_elab",
+            description: "Run Vivado Simulator front-end checks via xvlog/xelab. \
+                           Supports Xilinx precompiled libraries for UNISIM and XPM-heavy designs.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "files":        { "type": "array",   "items": { "type": "string" }, "description": "Source files to compile with xvlog" },
+                    "top":          { "type": "string",  "description": "Top module to elaborate with xelab" },
+                    "include_dirs": { "type": "array",   "items": { "type": "string" }, "description": "Include search paths passed via xvlog -i" },
+                    "defines":      { "type": "array",   "items": { "type": "string" }, "description": "Verilog macro defines in NAME or NAME=VALUE form" },
+                    "libraries":    { "type": "array",   "items": { "type": "string" }, "description": "Optional Xilinx library presets: xilinx_unisims, xilinx_unisims_7series, xilinx_xpm_cdc, xilinx_xpm_fifo, xilinx_xpm_memory" },
+                    "standard":     { "type": "string",  "description": "Verilog standard hint: 2005, 2012 (default), sv" },
+                    "snapshot":     { "type": "string",  "description": "Optional xelab snapshot name (default: ferrite_xsim)" }
+                },
+                "required": ["files", "top"]
             }),
         },
         ToolDef {
