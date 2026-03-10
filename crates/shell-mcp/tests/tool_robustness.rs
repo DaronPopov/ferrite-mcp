@@ -1,12 +1,34 @@
 //! Integration tests for MCP tool robustness: timeouts, non-repo paths, blocking binaries.
 
 use serde_json::json;
+use std::sync::{Arc, Mutex};
+use std::thread;
+use std::time::Duration;
 
+use shell_mcp::job_store::JobStore;
+use shell_mcp::persist::Persistence;
+use shell_mcp::pipeline::PipelineStore;
 use shell_mcp::tools::filesystem::which_bin;
+use shell_mcp::tools::bg_pipeline::pipeline_run;
+use shell_mcp::tools::bg_spawn::bg_spawn;
+use shell_mcp::tools::code::{grep_code, read_context};
+use shell_mcp::tools::filesystem::{changed_since, glob_files, list_dir, read_file};
 use shell_mcp::tools::git::{git_log, git_status, git_diff};
+use shell_mcp::tools::github::gh_status;
+use shell_mcp::tools::ml::checkpoint_list;
+use shell_mcp::tools::project::project_context;
+use shell_mcp::tools::symbols::symbol_index;
+use shell_mcp::tools::tty_exec::tty_exec;
+use shell_mcp::server::ServerState;
 
 fn result_json(r: &shell_mcp::protocol::ToolResult) -> serde_json::Value {
     serde_json::from_str(&r.content[0].text).unwrap_or(json!({}))
+}
+
+fn state_with_cwd(cwd: &std::path::Path) -> Arc<Mutex<ServerState>> {
+    let mut server_state = ServerState::default();
+    server_state.cwd = cwd.to_path_buf();
+    Arc::new(Mutex::new(server_state))
 }
 
 // ── which ────────────────────────────────────────────────────────────────────
@@ -105,7 +127,8 @@ fn which_handles_binary_that_leaks_stdio_fds() {
 
 #[test]
 fn git_status_non_repo_returns_error() {
-    let result = git_status(&json!({ "path": "/tmp" }));
+    let state = Arc::new(Mutex::new(ServerState::default()));
+    let result = git_status(&json!({ "path": "/tmp" }), &state);
     match result {
         Err(e) => assert!(e.contains("not inside a git repository") || e.contains("timed out")),
         Ok(r) => assert!(r.is_error, "should be an error result for non-repo"),
@@ -114,7 +137,8 @@ fn git_status_non_repo_returns_error() {
 
 #[test]
 fn git_log_non_repo_returns_error() {
-    let result = git_log(&json!({ "path": "/tmp" }));
+    let state = Arc::new(Mutex::new(ServerState::default()));
+    let result = git_log(&json!({ "path": "/tmp" }), &state);
     match result {
         Err(e) => assert!(e.contains("not inside a git repository") || e.contains("timed out")),
         Ok(r) => assert!(r.is_error, "should be an error result for non-repo"),
@@ -123,7 +147,8 @@ fn git_log_non_repo_returns_error() {
 
 #[test]
 fn git_diff_non_repo_returns_error() {
-    let result = git_diff(&json!({ "path": "/tmp" }));
+    let state = Arc::new(Mutex::new(ServerState::default()));
+    let result = git_diff(&json!({ "path": "/tmp" }), &state);
     match result {
         Err(e) => assert!(e.contains("not inside a git repository") || e.contains("timed out")),
         Ok(r) => assert!(r.is_error, "should be an error result for non-repo"),
@@ -140,8 +165,147 @@ fn git_status_on_real_repo() {
         if !p.pop() { return; } // no git repo — skip
     }
 
-    let result = git_status(&json!({ "path": p.to_str().unwrap() })).unwrap();
+    let state = Arc::new(Mutex::new(ServerState::default()));
+    let result = git_status(&json!({ "path": p.to_str().unwrap() }), &state).unwrap();
     let v = result_json(&result);
     assert!(!result.is_error, "git_status should succeed on a real repo");
     assert!(v["branch"].is_string(), "should have a branch field");
+}
+
+#[test]
+fn git_status_defaults_to_server_cwd() {
+    let mut p = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    loop {
+        if p.join(".git").exists() { break; }
+        if !p.pop() { return; }
+    }
+
+    let mut server_state = ServerState::default();
+    server_state.cwd = p;
+    let state = Arc::new(Mutex::new(server_state));
+    let result = git_status(&json!({}), &state).unwrap();
+    let v = result_json(&result);
+    assert!(!result.is_error, "git_status should honor server cwd when path is omitted");
+    assert!(v["branch"].is_string(), "should have a branch field");
+}
+
+#[test]
+fn gh_status_discovers_repos_under_custom_root() {
+    let root = std::env::temp_dir().join(format!(
+        "ferrite_gh_status_{}",
+        std::process::id()
+    ));
+    let repo = root.join("child_repo");
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&repo).unwrap();
+    std::process::Command::new("git").args(["init", "-b", "main"]).current_dir(&repo).output().unwrap();
+    std::process::Command::new("git").args(["config", "user.name", "ferrite"]).current_dir(&repo).output().unwrap();
+    std::process::Command::new("git").args(["config", "user.email", "ferrite@local"]).current_dir(&repo).output().unwrap();
+    std::fs::write(repo.join("README.md"), "test\n").unwrap();
+    std::process::Command::new("git").args(["add", "README.md"]).current_dir(&repo).output().unwrap();
+    std::process::Command::new("git").args(["commit", "-m", "init"]).current_dir(&repo).output().unwrap();
+
+    let state = Arc::new(Mutex::new(ServerState::default()));
+    let result = gh_status(&json!({ "paths": [root.display().to_string()] }), &state).unwrap();
+    let v = result_json(&result);
+    assert_eq!(v["count"].as_u64(), Some(1), "gh_status should discover nested repos under custom roots");
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn core_path_tools_default_to_server_cwd() {
+    let root = std::env::temp_dir().join(format!(
+        "ferrite_path_tools_{}",
+        std::process::id()
+    ));
+    let src = root.join("src");
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&src).unwrap();
+    std::fs::write(root.join("hello.txt"), "hello from session cwd\n").unwrap();
+    std::fs::write(
+        src.join("lib.rs"),
+        "pub struct SessionOnlySymbol;\npub fn session_only_symbol() {}\n",
+    ).unwrap();
+    std::fs::write(root.join("model.ckpt"), "fake checkpoint\n").unwrap();
+
+    let state = state_with_cwd(&root);
+
+    let file = result_json(&read_file(&json!({ "path": "hello.txt" }), &state).unwrap());
+    assert_eq!(file["content"].as_str(), Some("hello from session cwd"));
+
+    let listing = result_json(&list_dir(&json!({}), &state).unwrap());
+    assert_eq!(listing["path"].as_str(), Some(root.to_str().unwrap()));
+    assert!(listing["entries"].as_array().unwrap().iter().any(|e| e["name"] == "hello.txt"));
+
+    let glob = result_json(&glob_files(&json!({ "pattern": "*.txt" }), &state).unwrap());
+    assert_eq!(glob["count"].as_u64(), Some(1));
+
+    let changed = result_json(&changed_since(&json!({ "since_relative": "1h" }), &state).unwrap());
+    assert!(changed["changed"].as_array().unwrap().iter().any(|e| {
+        e["path"].as_str().unwrap_or("").ends_with("/hello.txt")
+    }));
+
+    let ctx = result_json(&read_context(&json!({ "file": "src/lib.rs", "line": 1 }), &state).unwrap());
+    assert_eq!(ctx["file"].as_str(), Some("src/lib.rs"));
+    assert!(ctx["lines"].as_array().unwrap().iter().any(|l| {
+        l["content"].as_str().unwrap_or("").contains("session_only_symbol")
+    }));
+
+    let grep = result_json(&grep_code(&json!({ "pattern": "session_only_symbol" }), &state).unwrap());
+    assert_eq!(grep["count"].as_u64(), Some(1));
+
+    let symbols = result_json(&symbol_index(&json!({}), &state).unwrap());
+    assert_eq!(symbols["files_scanned"].as_u64(), Some(1));
+
+    let checkpoints = result_json(&checkpoint_list(&json!({ "inspect": false }), &state).unwrap());
+    assert_eq!(checkpoints["count"].as_u64(), Some(1));
+
+    let project = result_json(&project_context(&json!({}), &state).unwrap());
+    assert_eq!(project["root"].as_str(), Some(root.to_str().unwrap()));
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn bg_tools_default_to_server_cwd() {
+    let root = std::env::temp_dir().join(format!(
+        "ferrite_bg_tools_{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    let state = state_with_cwd(&root);
+
+    let store = Arc::new(JobStore::new(Arc::new(Persistence::new())));
+    let spawned = result_json(&bg_spawn(&json!({ "cmd": "pwd" }), &store, &state).unwrap());
+    let job_id = spawned["job_id"].as_str().unwrap();
+    let job = store.get(job_id).unwrap();
+    assert_eq!(job.cwd, root);
+
+    let tty = result_json(&tty_exec(&json!({ "cmd": "pwd", "timeout_secs": 5 }), &store, &state).unwrap());
+    let expected_output = format!("{}\r\n", root.display());
+    assert_eq!(tty["output"].as_str(), Some(expected_output.as_str()));
+
+    let pipelines = Arc::new(PipelineStore::new(Arc::clone(&store)));
+    let pipeline = result_json(&pipeline_run(&json!({ "steps": [{ "id": "s1", "cmd": "pwd" }] }), &pipelines, &state).unwrap());
+    let pipeline_id = pipeline["pipeline_id"].as_str().unwrap();
+
+    let mut step_job = None;
+    for _ in 0..20 {
+        if let Some(p) = pipelines.get(pipeline_id) {
+            if let Some(step) = p.step_by_id("s1") {
+                if let Some(job_id) = step.job_id.lock().unwrap().clone() {
+                    step_job = Some(job_id);
+                    break;
+                }
+            }
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    let step_job = step_job.expect("pipeline step should spawn a job");
+    let job = store.get(&step_job).unwrap();
+    assert_eq!(job.cwd, root);
+
+    let _ = std::fs::remove_dir_all(&root);
 }

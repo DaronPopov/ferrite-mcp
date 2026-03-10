@@ -56,7 +56,7 @@ pub fn maybe_auto_checkpoint(
         "message": format!("checkpoint: before {class} tool '{tool}'")
     });
 
-    match git_write::git_checkpoint(&cp_args) {
+    match git_write::git_checkpoint(&cp_args, state) {
         Ok(_) => {
             write_audit(tool, class, "committed", None, &repo_path);
             Ok(())

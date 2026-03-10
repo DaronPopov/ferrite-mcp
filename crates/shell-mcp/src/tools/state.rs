@@ -1,11 +1,13 @@
 //! shell_state and set_cwd tool implementations.
 
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use serde_json::{json, Value};
 
 use crate::protocol::ToolResult;
 use crate::server::ServerState;
+use crate::tools::project::expand_tilde;
 
 // ── shell_state ───────────────────────────────────────────────────────────────
 
@@ -47,6 +49,27 @@ pub fn shell_state(_args: &Value, state: &Arc<Mutex<ServerState>>) -> Result<Too
         "path_entries": path_entries,
         "env": env_snapshot,
     })))
+}
+
+pub fn session_cwd(state: &Arc<Mutex<ServerState>>) -> Result<PathBuf, String> {
+    let state = state.lock().map_err(|e| format!("state lock poisoned: {e}"))?;
+    Ok(state.cwd.clone())
+}
+
+pub fn resolve_path(state: &Arc<Mutex<ServerState>>, raw: &str) -> Result<PathBuf, String> {
+    let expanded = expand_tilde(raw);
+    if expanded.is_absolute() {
+        Ok(expanded)
+    } else {
+        Ok(session_cwd(state)?.join(expanded))
+    }
+}
+
+pub fn resolve_or_cwd(state: &Arc<Mutex<ServerState>>, raw: Option<&str>) -> Result<PathBuf, String> {
+    match raw {
+        Some(path) => resolve_path(state, path),
+        None => session_cwd(state),
+    }
 }
 
 // ── set_cwd ───────────────────────────────────────────────────────────────────

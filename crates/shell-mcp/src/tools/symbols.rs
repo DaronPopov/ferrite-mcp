@@ -8,20 +8,22 @@
 //!   find_symbol  — search for a symbol by name (and optional kind)
 
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 use serde_json::{json, Value};
 use regex::Regex;
 use crate::protocol::ToolResult;
+use crate::server::ServerState;
+use crate::tools::state::resolve_or_cwd;
 
 // ── symbol_index ──────────────────────────────────────────────────────────────
 
-pub fn symbol_index(args: &Value) -> Result<ToolResult, String> {
-    let path  = args["path"].as_str().unwrap_or(".");
+pub fn symbol_index(args: &Value, state: &Arc<Mutex<ServerState>>) -> Result<ToolResult, String> {
+    let root = resolve_or_cwd(state, args["path"].as_str())?;
     let kinds = collect_kinds(args);
     let limit = args["limit"].as_u64().unwrap_or(2000) as usize;
 
-    let root = PathBuf::from(path);
     if !root.exists() {
-        return Ok(ToolResult::error(format!("symbol_index: path not found: {path}")));
+        return Ok(ToolResult::error(format!("symbol_index: path not found: {}", root.display())));
     }
 
     let rs_files = collect_rs_files(&root);
@@ -34,7 +36,7 @@ pub fn symbol_index(args: &Value) -> Result<ToolResult, String> {
     }
 
     Ok(ToolResult::json(&json!({
-        "path":         path,
+        "path":         root.display().to_string(),
         "files_scanned": rs_files.len(),
         "symbol_count": symbols.len(),
         "symbols":      symbols,
@@ -43,15 +45,14 @@ pub fn symbol_index(args: &Value) -> Result<ToolResult, String> {
 
 // ── find_symbol ───────────────────────────────────────────────────────────────
 
-pub fn find_symbol(args: &Value) -> Result<ToolResult, String> {
+pub fn find_symbol(args: &Value, state: &Arc<Mutex<ServerState>>) -> Result<ToolResult, String> {
     let name  = args["name"].as_str().ok_or("find_symbol: 'name' required")?;
-    let path  = args["path"].as_str().unwrap_or(".");
+    let root = resolve_or_cwd(state, args["path"].as_str())?;
     let kinds = collect_kinds(args);
     let exact = args["exact"].as_bool().unwrap_or(false);
 
-    let root = PathBuf::from(path);
     if !root.exists() {
-        return Ok(ToolResult::error(format!("find_symbol: path not found: {path}")));
+        return Ok(ToolResult::error(format!("find_symbol: path not found: {}", root.display())));
     }
 
     let rs_files = collect_rs_files(&root);

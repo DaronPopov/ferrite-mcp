@@ -5,11 +5,13 @@
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 
 use crate::protocol::ToolResult;
+use crate::server::ServerState;
 use crate::tools::project::expand_tilde;
 
 #[derive(Clone)]
@@ -70,8 +72,8 @@ struct CheckpointOutcome {
     push_stderr: String,
 }
 
-pub fn git_checkpoint(args: &Value) -> Result<ToolResult, String> {
-    let req = parse_checkpoint_request(args, false)?;
+pub fn git_checkpoint(args: &Value, state: &Arc<Mutex<ServerState>>) -> Result<ToolResult, String> {
+    let req = parse_checkpoint_request(args, state, false)?;
     let out = run_checkpoint(req)?;
     Ok(ToolResult::json(&json!({
         "ok": true,
@@ -98,8 +100,8 @@ pub fn git_checkpoint(args: &Value) -> Result<ToolResult, String> {
     })))
 }
 
-pub fn git_commit(args: &Value) -> Result<ToolResult, String> {
-    let req = parse_checkpoint_request(args, true)?;
+pub fn git_commit(args: &Value, state: &Arc<Mutex<ServerState>>) -> Result<ToolResult, String> {
+    let req = parse_checkpoint_request(args, state, true)?;
     let out = run_checkpoint(req)?;
 
     if !out.commit_attempted || !out.committed {
@@ -132,9 +134,20 @@ pub fn git_commit(args: &Value) -> Result<ToolResult, String> {
     })))
 }
 
-fn parse_checkpoint_request(args: &Value, require_message: bool) -> Result<CheckpointRequest, String> {
-    let path_str = args["path"].as_str().unwrap_or(".");
-    let root = resolve_git_root(&expand_tilde(path_str))?;
+fn parse_checkpoint_request(
+    args: &Value,
+    state: &Arc<Mutex<ServerState>>,
+    require_message: bool,
+) -> Result<CheckpointRequest, String> {
+    let base_path = if let Some(path_str) = args["path"].as_str() {
+        expand_tilde(path_str)
+    } else {
+        state.lock()
+            .map_err(|e| format!("state lock poisoned: {e}"))?
+            .cwd
+            .clone()
+    };
+    let root = resolve_git_root(&base_path)?;
     let push = args["push"].as_bool().unwrap_or(false);
     let remote = args["remote"].as_str().unwrap_or("origin").to_owned();
     let branch = args["branch"].as_str().map(ToOwned::to_owned);

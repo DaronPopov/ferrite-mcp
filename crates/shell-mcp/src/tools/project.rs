@@ -9,19 +9,21 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::time::Duration;
 
 use serde_json::{json, Value};
 
 use crate::job_store::JobStore;
 use crate::protocol::ToolResult;
+use crate::server::ServerState;
 use crate::tools::execution::run;
+use crate::tools::state::resolve_or_cwd;
 
 // ── project_context ───────────────────────────────────────────────────────────
 
-pub fn project_context(args: &Value) -> Result<ToolResult, String> {
-    let path_str = args["path"].as_str().unwrap_or(".");
-    let start = expand_tilde(path_str);
+pub fn project_context(args: &Value, state: &Arc<Mutex<ServerState>>) -> Result<ToolResult, String> {
+    let start = resolve_or_cwd(state, args["path"].as_str())?;
 
     // Walk up to find project root
     let mut dir = start.clone();

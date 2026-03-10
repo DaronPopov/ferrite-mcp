@@ -1,23 +1,21 @@
 //! bg_spawn and bg_attach tool implementations.
 
-use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use serde_json::{json, Value};
 
 use crate::job_store::JobStore;
 use crate::protocol::ToolResult;
+use crate::server::ServerState;
+use crate::tools::state::resolve_or_cwd;
 
 // ── bg_spawn ──────────────────────────────────────────────────────────────────
 
-pub fn bg_spawn(args: &Value, store: &Arc<JobStore>) -> Result<ToolResult, String> {
+pub fn bg_spawn(args: &Value, store: &Arc<JobStore>, state: &Arc<Mutex<ServerState>>) -> Result<ToolResult, String> {
     let cmd = args["cmd"].as_str().ok_or("bg_spawn: 'cmd' is required")?;
 
     // Resolve cwd: caller-supplied → ferrite's state → process cwd.
-    let cwd = args["cwd"]
-        .as_str()
-        .map(PathBuf::from)
-        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/")));
+    let cwd = resolve_or_cwd(state, args["cwd"].as_str())?;
 
     if !cwd.exists() {
         return Err(format!("bg_spawn: cwd does not exist: {}", cwd.display()));

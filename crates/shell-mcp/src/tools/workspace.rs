@@ -48,7 +48,7 @@ pub fn orient(args: &Value, state: &Arc<Mutex<ServerState>>, store: &Arc<JobStor
     let projects = discover_projects(&discover_root);
 
     // ── git status of cwd (cap untracked to avoid blowup on dirty repos) ──────
-    let git_val = match git::git_status(&json!({ "path": path })) {
+    let git_val = match git::git_status(&json!({ "path": path }), state) {
         Ok(tr) => {
             let mut v = parse_tool_result_json(&tr);
             cap_array_field(&mut v, "untracked", 20);
@@ -62,7 +62,7 @@ pub fn orient(args: &Value, state: &Arc<Mutex<ServerState>>, store: &Arc<JobStor
         "path":           home,
         "since_relative": recent_window,
         "max_results":    80,
-    })) {
+    }), state) {
         Ok(tr) => slim_changed_filtered(parse_tool_result_json(&tr)),
         Err(_) => (json!({ "count": 0, "changed": [] }), 0usize),
     };

@@ -5,8 +5,11 @@
 //!   checkpoint_list  — enumerate checkpoint files in a directory with metadata
 
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 use serde_json::{json, Value};
 use crate::protocol::ToolResult;
+use crate::server::ServerState;
+use crate::tools::state::resolve_or_cwd;
 
 // ── tensor_inspect ────────────────────────────────────────────────────────────
 
@@ -97,14 +100,13 @@ print(json.dumps({{"path": "{path}", "tensor_count": tensor_count, "data": resul
 
 /// Enumerate PyTorch checkpoint files (.pt/.pth/.ckpt) in a directory.
 /// Returns basic metadata for each: size, mtime, and key listing if loadable.
-pub fn checkpoint_list(args: &Value) -> Result<ToolResult, String> {
-    let root = args["path"].as_str().unwrap_or(".");
+pub fn checkpoint_list(args: &Value, state: &Arc<Mutex<ServerState>>) -> Result<ToolResult, String> {
+    let root_path = resolve_or_cwd(state, args["path"].as_str())?;
     let inspect = args["inspect"].as_bool().unwrap_or(true);
     let max_files = args["max_files"].as_u64().unwrap_or(20) as usize;
 
-    let root_path = PathBuf::from(root);
     if !root_path.exists() {
-        return Ok(ToolResult::error(format!("checkpoint_list: path not found: {root}")));
+        return Ok(ToolResult::error(format!("checkpoint_list: path not found: {}", root_path.display())));
     }
 
     // Collect checkpoint files
@@ -119,7 +121,7 @@ pub fn checkpoint_list(args: &Value) -> Result<ToolResult, String> {
 
     if files.is_empty() {
         return Ok(ToolResult::json(&json!({
-            "path": root, "count": 0, "files": []
+            "path": root_path.display().to_string(), "count": 0, "files": []
         })));
     }
 
@@ -132,7 +134,7 @@ pub fn checkpoint_list(args: &Value) -> Result<ToolResult, String> {
                 .map(|d| d.as_secs());
             json!({ "path": f.display().to_string(), "size_bytes": size, "mtime": mtime })
         }).collect();
-        return Ok(ToolResult::json(&json!({ "path": root, "count": listing.len(), "files": listing })));
+        return Ok(ToolResult::json(&json!({ "path": root_path.display().to_string(), "count": listing.len(), "files": listing })));
     }
 
     // Build Python script to inspect all files at once
@@ -186,8 +188,8 @@ for p in paths:
                 meta["load_error"] = str(e2)
     results.append(meta)
 
-print(json.dumps({{"path": "{root}", "count": len(results), "files": results}}))
-"#);
+print(json.dumps({{"path": "{}", "count": len(results), "files": results}}))
+"#, root_path.display());
 
     run_python_script(&script, "checkpoint_list")
 }

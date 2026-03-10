@@ -5,12 +5,15 @@
 //!   gh_sync   — pull or push for a local git repo
 //!   gh_status — git status across all known project roots
 
+use std::collections::BTreeSet;
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use serde_json::{json, Value};
 
 use crate::protocol::ToolResult;
+use crate::server::ServerState;
 use crate::tools::execution::run;
 use crate::tools::project::expand_tilde;
 
@@ -69,13 +72,12 @@ pub fn gh_clone(args: &Value) -> Result<ToolResult, String> {
 
 // ── gh_sync ───────────────────────────────────────────────────────────────────
 
-pub fn gh_sync(args: &Value) -> Result<ToolResult, String> {
-    let path_str = args["path"].as_str().unwrap_or(".");
+pub fn gh_sync(args: &Value, state: &Arc<Mutex<ServerState>>) -> Result<ToolResult, String> {
     let op       = args["op"].as_str().unwrap_or("pull");
     let branch   = args["branch"].as_str().unwrap_or("");
     let remote   = args["remote"].as_str().unwrap_or("origin");
 
-    let path = expand_tilde(path_str);
+    let path = resolve_work_path(args, state)?;
     let root = git_root_for(&path)?;
 
     // Determine current branch if not specified
@@ -115,7 +117,7 @@ pub fn gh_sync(args: &Value) -> Result<ToolResult, String> {
 
 // ── gh_status ─────────────────────────────────────────────────────────────────
 
-pub fn gh_status(args: &Value) -> Result<ToolResult, String> {
+pub fn gh_status(args: &Value, state: &Arc<Mutex<ServerState>>) -> Result<ToolResult, String> {
     let default_paths = [
         "~/processor_lab",
         "~/verilogchill",
@@ -125,27 +127,25 @@ pub fn gh_status(args: &Value) -> Result<ToolResult, String> {
         "~/aws_tool",
     ];
 
-    let paths: Vec<PathBuf> = if let Some(arr) = args["paths"].as_array() {
+    let mut paths: Vec<PathBuf> = if let Some(arr) = args["paths"].as_array() {
         arr.iter()
             .filter_map(|v| v.as_str())
             .map(expand_tilde)
             .collect()
     } else {
-        default_paths.iter().map(|p| expand_tilde(p)).collect()
+        vec![resolve_work_path(args, state)?]
     };
+    if args["paths"].as_array().is_none() {
+        paths.extend(default_paths.iter().map(|p| expand_tilde(p)));
+    }
 
     let mut results = Vec::new();
+    let mut seen = BTreeSet::new();
 
-    for path in &paths {
-        if !path.exists() {
-            continue; // skip non-existent dirs silently
+    for root in discover_repo_roots(&paths) {
+        if !seen.insert(root.clone()) {
+            continue;
         }
-
-        // Check if it's a git repo
-        let root = match git_root_for(path) {
-            Ok(r) => r,
-            Err(_) => continue, // not a git repo
-        };
 
         let project = root.file_name()
             .unwrap_or_default()
@@ -267,4 +267,51 @@ fn last_commit_info(root: &PathBuf) -> Value {
         }
     }
     json!(null)
+}
+
+fn resolve_work_path(args: &Value, state: &Arc<Mutex<ServerState>>) -> Result<PathBuf, String> {
+    if let Some(path) = args["path"].as_str() {
+        Ok(expand_tilde(path))
+    } else {
+        Ok(state.lock()
+            .map_err(|e| format!("state lock poisoned: {e}"))?
+            .cwd
+            .clone())
+    }
+}
+
+fn discover_repo_roots(paths: &[PathBuf]) -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+    for path in paths {
+        collect_repo_roots(path, 2, &mut roots);
+    }
+    roots
+}
+
+fn collect_repo_roots(path: &PathBuf, depth: usize, roots: &mut Vec<PathBuf>) {
+    if !path.exists() {
+        return;
+    }
+    if let Ok(root) = git_root_for(path) {
+        roots.push(root);
+        return;
+    }
+    if depth == 0 || !path.is_dir() {
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir(path) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let child = entry.path();
+        if !child.is_dir() {
+            continue;
+        }
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if name == ".git" || name == "target" || name == "node_modules" {
+            continue;
+        }
+        collect_repo_roots(&child, depth - 1, roots);
+    }
 }

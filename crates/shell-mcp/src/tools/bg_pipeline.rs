@@ -1,16 +1,17 @@
 //! pipeline_run, pipeline_status, pipeline_cancel tool implementations.
 
-use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use serde_json::{json, Value};
 
 use crate::pipeline::{PipelineStore, StepDef};
 use crate::protocol::ToolResult;
+use crate::server::ServerState;
+use crate::tools::state::resolve_or_cwd;
 
 // ── pipeline_run ──────────────────────────────────────────────────────────────
 
-pub fn pipeline_run(args: &Value, pipelines: &Arc<PipelineStore>) -> Result<ToolResult, String> {
+pub fn pipeline_run(args: &Value, pipelines: &Arc<PipelineStore>, state: &Arc<Mutex<ServerState>>) -> Result<ToolResult, String> {
     let steps_raw = args["steps"].as_array()
         .ok_or("pipeline_run: 'steps' must be a non-empty array")?;
 
@@ -39,10 +40,7 @@ pub fn pipeline_run(args: &Value, pipelines: &Arc<PipelineStore>) -> Result<Tool
         })
     }).collect::<Result<Vec<_>, String>>()?;
 
-    let default_cwd = args["cwd"]
-        .as_str()
-        .map(PathBuf::from)
-        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/")));
+    let default_cwd = resolve_or_cwd(state, args["cwd"].as_str())?;
 
     let label           = args["label"].as_str();
     let stop_on_failure = args["stop_on_failure"].as_bool().unwrap_or(true);

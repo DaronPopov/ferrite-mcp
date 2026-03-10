@@ -12,8 +12,7 @@
 //! so the agent doesn't have to enumerate them every time.
 
 use std::io::Write;
-use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
@@ -21,6 +20,8 @@ use serde_json::{json, Value};
 use crate::job_store::{JobStatus, JobStore};
 use crate::permissions;
 use crate::protocol::ToolResult;
+use crate::server::ServerState;
+use crate::tools::state::resolve_or_cwd;
 
 // ── Default response table (default_yes mode) ─────────────────────────────────
 //
@@ -67,13 +68,10 @@ const DEFAULT_YES_RESPONSES: &[(&str, &str)] = &[
 
 // ── tty_exec ──────────────────────────────────────────────────────────────────
 
-pub fn tty_exec(args: &Value, store: &Arc<JobStore>) -> Result<ToolResult, String> {
+pub fn tty_exec(args: &Value, store: &Arc<JobStore>, state: &Arc<Mutex<ServerState>>) -> Result<ToolResult, String> {
     let cmd = args["cmd"].as_str().ok_or("tty_exec: 'cmd' is required")?;
 
-    let cwd = args["cwd"]
-        .as_str()
-        .map(PathBuf::from)
-        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/")));
+    let cwd = resolve_or_cwd(state, args["cwd"].as_str())?;
 
     let timeout_secs = args["timeout_secs"].as_u64().unwrap_or(120);
     let default_yes  = args["default_yes"].as_bool().unwrap_or(true);

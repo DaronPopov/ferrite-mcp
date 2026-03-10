@@ -5,26 +5,27 @@
 //!   git_diff   — uncommitted changes as structured file + hunk data
 //!   git_status — staged / unstaged / untracked + branch info
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use serde_json::{json, Value};
 use crate::protocol::ToolResult;
+use crate::server::ServerState;
+use crate::tools::project::expand_tilde;
 
 /// Default timeout for git subprocess calls.
 const GIT_TIMEOUT: Duration = Duration::from_secs(15);
 
 // ── git_log ───────────────────────────────────────────────────────────────────
 
-pub fn git_log(args: &Value) -> Result<ToolResult, String> {
-    let path   = args["path"].as_str().unwrap_or(".");
+pub fn git_log(args: &Value, state: &Arc<Mutex<ServerState>>) -> Result<ToolResult, String> {
+    let root = resolve_git_root(args, state)?;
     let limit  = args["limit"].as_u64().unwrap_or(20) as usize;
     let author = args["author"].as_str().unwrap_or("");
     let since  = args["since"].as_str().unwrap_or("");
     let branch = args["branch"].as_str().unwrap_or("HEAD");
     let file   = args["file"].as_str().unwrap_or("");
-
-    let root = git_root(path)?;
 
     // Format: hash|short|author|email|date(iso)|subject
     let fmt = "%H%x00%h%x00%an%x00%ae%x00%ai%x00%s";
@@ -75,13 +76,11 @@ pub fn git_log(args: &Value) -> Result<ToolResult, String> {
 
 // ── git_diff ──────────────────────────────────────────────────────────────────
 
-pub fn git_diff(args: &Value) -> Result<ToolResult, String> {
-    let path   = args["path"].as_str().unwrap_or(".");
+pub fn git_diff(args: &Value, state: &Arc<Mutex<ServerState>>) -> Result<ToolResult, String> {
     let staged = args["staged"].as_bool().unwrap_or(false);
     let file   = args["file"].as_str().unwrap_or("");
     let commit = args["commit"].as_str().unwrap_or("");
-
-    let root = git_root(path)?;
+    let root = resolve_git_root(args, state)?;
 
     let mut args: Vec<String> = vec!["diff".into()];
     if staged  { args.push("--staged".into()); }
@@ -209,9 +208,8 @@ fn parse_unified_diff(diff: &str) -> Vec<Value> {
 
 // ── git_status ────────────────────────────────────────────────────────────────
 
-pub fn git_status(args: &Value) -> Result<ToolResult, String> {
-    let path = args["path"].as_str().unwrap_or(".");
-    let root = git_root(path)?;
+pub fn git_status(args: &Value, state: &Arc<Mutex<ServerState>>) -> Result<ToolResult, String> {
+    let root = resolve_git_root(args, state)?;
 
     // --porcelain=v1 -b gives branch header + XY status lines
     let out = run_git_timeout(&root, &["status", "--porcelain=v1", "-b", "--untracked-files=all"], GIT_TIMEOUT)?;
@@ -287,10 +285,23 @@ pub fn git_status(args: &Value) -> Result<ToolResult, String> {
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
-fn git_root(from: &str) -> Result<PathBuf, String> {
+fn resolve_git_root(args: &Value, state: &Arc<Mutex<ServerState>>) -> Result<PathBuf, String> {
+    let from = if let Some(path) = args["path"].as_str() {
+        expand_tilde(path)
+    } else {
+        state.lock()
+            .map_err(|e| format!("state lock poisoned: {e}"))?
+            .cwd
+            .clone()
+    };
+    git_root_path(&from)
+}
+
+fn git_root_path(from: &Path) -> Result<PathBuf, String> {
+    let display = from.display().to_string();
     let out = run_git_timeout(from, &["rev-parse", "--show-toplevel"], Duration::from_secs(5))?;
     if !out.status.success() {
-        return Err(format!("git: '{from}' is not inside a git repository"));
+        return Err(format!("git: '{display}' is not inside a git repository"));
     }
     Ok(PathBuf::from(String::from_utf8_lossy(&out.stdout).trim()))
 }

@@ -7,21 +7,25 @@
 //!               inline context. Uses ripgrep if available, pure-Rust fallback.
 
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 use regex::Regex;
 use serde_json::{json, Value};
 
 use crate::protocol::ToolResult;
+use crate::server::ServerState;
+use crate::tools::state::{resolve_or_cwd, resolve_path};
 
 // ── read_context ──────────────────────────────────────────────────────────────
 
-pub fn read_context(args: &Value) -> Result<ToolResult, String> {
+pub fn read_context(args: &Value, state: &Arc<Mutex<ServerState>>) -> Result<ToolResult, String> {
     let file   = args["file"].as_str().ok_or("read_context: 'file' is required")?;
     let target = args["line"].as_u64().ok_or("read_context: 'line' is required")? as usize;
     let radius = args["radius"].as_u64().unwrap_or(10) as usize;
+    let file_path = resolve_path(state, file)?;
 
-    let content = std::fs::read_to_string(file)
-        .map_err(|e| format!("read_context: cannot read {file}: {e}"))?;
+    let content = std::fs::read_to_string(&file_path)
+        .map_err(|e| format!("read_context: cannot read {}: {e}", file_path.display()))?;
 
     let all_lines: Vec<&str> = content.lines().collect();
     let total = all_lines.len();
@@ -51,26 +55,26 @@ pub fn read_context(args: &Value) -> Result<ToolResult, String> {
 
 // ── grep_code ─────────────────────────────────────────────────────────────────
 
-pub fn grep_code(args: &Value) -> Result<ToolResult, String> {
+pub fn grep_code(args: &Value, state: &Arc<Mutex<ServerState>>) -> Result<ToolResult, String> {
     let pattern     = args["pattern"].as_str().ok_or("grep_code: 'pattern' is required")?;
-    let root        = args["path"].as_str().unwrap_or(".");
+    let root        = resolve_or_cwd(state, args["path"].as_str())?;
     let file_glob   = args["glob"].as_str().unwrap_or("**/*.{rs,cu,c,cpp,h,cuh,py,toml}");
     let max_results = args["max_results"].as_u64().unwrap_or(50) as usize;
     let ctx_lines   = args["context_lines"].as_u64().unwrap_or(2) as usize;
     let case_insensitive = args["case_insensitive"].as_bool().unwrap_or(false);
 
     // Try rg first — much faster on large trees
-    if let Some(result) = try_ripgrep(pattern, root, file_glob, max_results, ctx_lines, case_insensitive) {
+    if let Some(result) = try_ripgrep(pattern, &root, file_glob, max_results, ctx_lines, case_insensitive) {
         return Ok(result);
     }
 
     // Pure-Rust fallback
-    rust_grep(pattern, root, file_glob, max_results, ctx_lines, case_insensitive)
+    rust_grep(pattern, &root, file_glob, max_results, ctx_lines, case_insensitive)
 }
 
 fn try_ripgrep(
     pattern: &str,
-    root: &str,
+    root: &Path,
     file_glob: &str,
     max_results: usize,
     ctx_lines: usize,
@@ -132,7 +136,7 @@ fn try_ripgrep(
 
 fn rust_grep(
     pattern: &str,
-    root: &str,
+    root: &Path,
     file_glob: &str,
     max_results: usize,
     ctx_lines: usize,
@@ -158,17 +162,11 @@ fn rust_grep(
         .map(str::trim)
         .collect();
 
-    let search_root = if root.is_empty() || root == "." {
-        PathBuf::from(".")
-    } else {
-        PathBuf::from(root)
-    };
-
     let mut matches: Vec<Value> = Vec::new();
     let mut truncated = false;
     let mut files_searched = 0usize;
 
-    let paths: Vec<PathBuf> = collect_files(&search_root, &allowed_exts);
+    let paths: Vec<PathBuf> = collect_files(root, &allowed_exts);
 
     'outer: for path in &paths {
         files_searched += 1;

@@ -1,21 +1,23 @@
 //! Filesystem tools: glob, which, read_file, list_dir, move_file, mkdir, delete_file.
 
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 use std::time::UNIX_EPOCH;
 
 use serde_json::{json, Value};
 
 use crate::protocol::ToolResult;
-use crate::tools::project::expand_tilde;
+use crate::server::ServerState;
+use crate::tools::state::{resolve_or_cwd, resolve_path};
 
 // ── read_file ─────────────────────────────────────────────────────────────────
 
 /// Hard cap: never return more than this many lines in one call.
 const MAX_LINES: usize = 2_000;
 
-pub fn read_file(args: &Value) -> Result<ToolResult, String> {
+pub fn read_file(args: &Value, state: &Arc<Mutex<ServerState>>) -> Result<ToolResult, String> {
     let path_str = args["path"].as_str().ok_or("read_file: 'path' is required")?;
-    let path_buf = expand_tilde(path_str);
+    let path_buf = resolve_path(state, path_str)?;
     let path = path_buf.to_str().unwrap_or(path_str);
 
     let raw = std::fs::read_to_string(&path_buf)
@@ -52,20 +54,20 @@ pub fn read_file(args: &Value) -> Result<ToolResult, String> {
 
 // ── list_dir ──────────────────────────────────────────────────────────────────
 
-pub fn list_dir(args: &Value) -> Result<ToolResult, String> {
-    let path        = args["path"].as_str().unwrap_or(".");
+pub fn list_dir(args: &Value, state: &Arc<Mutex<ServerState>>) -> Result<ToolResult, String> {
+    let path        = args["path"].as_str();
     let depth       = (args["depth"].as_u64().unwrap_or(1) as usize).min(5);
     let show_hidden = args["show_hidden"].as_bool().unwrap_or(false);
     let max_cap: Option<usize> = args["max_entries"].as_u64().map(|n| n as usize);
     let limit = max_cap.unwrap_or(usize::MAX);
 
-    let root = PathBuf::from(path);
+    let root = resolve_or_cwd(state, path)?;
     if !root.exists() {
-        return Ok(ToolResult::error(format!("list_dir: {path}: no such directory")));
+        return Ok(ToolResult::error(format!("list_dir: {}: no such directory", root.display())));
     }
     let canonical = root.canonicalize()
         .map(|p| p.display().to_string())
-        .unwrap_or_else(|_| path.to_owned());
+        .unwrap_or_else(|_| root.display().to_string());
 
     let mut count = 0usize;
     let mut truncated = false;
@@ -163,17 +165,14 @@ fn count_entries(entries: &[Value]) -> usize {
 
 // ── glob ─────────────────────────────────────────────────────────────────────
 
-pub fn glob_files(args: &Value) -> Result<ToolResult, String> {
+pub fn glob_files(args: &Value, state: &Arc<Mutex<ServerState>>) -> Result<ToolResult, String> {
     let pattern = args["pattern"].as_str().ok_or("glob: 'pattern' is required")?;
     let max = args["max_results"].as_u64().unwrap_or(200) as usize;
 
     // If a cwd is provided and the pattern is relative, prepend it.
-    let resolved_pattern = if let Some(cwd) = args["cwd"].as_str() {
-        if !pattern.starts_with('/') {
-            format!("{cwd}/{pattern}")
-        } else {
-            pattern.to_owned()
-        }
+    let cwd = resolve_or_cwd(state, args["cwd"].as_str())?;
+    let resolved_pattern = if !pattern.starts_with('/') {
+        format!("{}/{pattern}", cwd.display())
     } else {
         pattern.to_owned()
     };
@@ -241,8 +240,8 @@ pub fn which_bin(args: &Value) -> Result<ToolResult, String> {
 
 /// Find files modified after a given timestamp.
 /// Provide either `since_secs` (Unix timestamp) or `since_relative` ("10m", "2h", "1d", "30s").
-pub fn changed_since(args: &Value) -> Result<ToolResult, String> {
-    let root = args["path"].as_str().unwrap_or(".");
+pub fn changed_since(args: &Value, state: &Arc<Mutex<ServerState>>) -> Result<ToolResult, String> {
+    let root = resolve_or_cwd(state, args["path"].as_str())?;
     let max  = args["max_results"].as_u64().unwrap_or(100) as usize;
 
     let now_secs = std::time::SystemTime::now()
@@ -259,15 +258,14 @@ pub fn changed_since(args: &Value) -> Result<ToolResult, String> {
         return Err("changed_since: provide 'since_secs' or 'since_relative'".into());
     };
 
-    let root_path = PathBuf::from(root);
-    if !root_path.exists() {
-        return Ok(ToolResult::error(format!("changed_since: path '{root}' not found")));
+    if !root.exists() {
+        return Ok(ToolResult::error(format!("changed_since: path '{}' not found", root.display())));
     }
 
     let mut changed: Vec<Value> = Vec::new();
     let mut truncated = false;
 
-    collect_changed(&root_path, since_secs, &mut changed, &mut truncated, max, 0);
+    collect_changed(&root, since_secs, &mut changed, &mut truncated, max, 0);
 
     // Sort newest-first
     changed.sort_by(|a, b| {
@@ -277,7 +275,7 @@ pub fn changed_since(args: &Value) -> Result<ToolResult, String> {
     });
 
     Ok(ToolResult::json(&json!({
-        "path":        root,
+        "path":        root.display().to_string(),
         "since_secs":  since_secs,
         "now_secs":    now_secs,
         "count":       changed.len(),

@@ -200,12 +200,12 @@ impl McpServer {
             "cpu_info"       => tools::hardware::cpu_info(args),
             "occupancy_calc" => tools::hardware::occupancy_calc(args),
             // Code navigation
-            "read_context"   => tools::code::read_context(args),
-            "grep_code"      => tools::code::grep_code(args),
+            "read_context"   => tools::code::read_context(args, &self.state),
+            "grep_code"      => tools::code::grep_code(args, &self.state),
             // Filesystem
-            "read_file"      => tools::filesystem::read_file(args),
-            "list_dir"       => tools::filesystem::list_dir(args),
-            "glob"           => tools::filesystem::glob_files(args),
+            "read_file"      => tools::filesystem::read_file(args, &self.state),
+            "list_dir"       => tools::filesystem::list_dir(args, &self.state),
+            "glob"           => tools::filesystem::glob_files(args, &self.state),
             "which"          => tools::filesystem::which_bin(args),
             // State
             "shell_state"    => tools::state::shell_state(args, &self.state),
@@ -233,7 +233,7 @@ impl McpServer {
             // Benchmark history
             "bench_history"  => tools::history::bench_history(args),
             // Incremental filesystem
-            "changed_since"  => tools::filesystem::changed_since(args),
+            "changed_since"  => tools::filesystem::changed_since(args, &self.state),
             // HTTP
             "http_request"   => tools::http::http_request(args),
             // CPU profiling
@@ -243,14 +243,14 @@ impl McpServer {
             "gdb_run"        => tools::debug::gdb_run(args),
             // ML
             "tensor_inspect"    => tools::ml::tensor_inspect(args),
-            "checkpoint_list"   => tools::ml::checkpoint_list(args),
+            "checkpoint_list"   => tools::ml::checkpoint_list(args, &self.state),
             // Git
-            "git_log"        => tools::git::git_log(args),
-            "git_diff"       => tools::git::git_diff(args),
-            "git_status"     => tools::git::git_status(args),
+            "git_log"        => tools::git::git_log(args, &self.state),
+            "git_diff"       => tools::git::git_diff(args, &self.state),
+            "git_status"     => tools::git::git_status(args, &self.state),
             // Symbols
-            "symbol_index"   => tools::symbols::symbol_index(args),
-            "find_symbol"    => tools::symbols::find_symbol(args),
+            "symbol_index"   => tools::symbols::symbol_index(args, &self.state),
+            "find_symbol"    => tools::symbols::find_symbol(args, &self.state),
             // System
             "process_tree"   => tools::system::process_tree(args),
             "port_list"      => tools::system::port_list(args),
@@ -276,7 +276,7 @@ impl McpServer {
             "fpga_tcfp_status"    => tools::eda::fpga_tcfp_status(args),
             "fpga_tcfp_tile_read" => tools::eda::fpga_tcfp_tile_read(args),
             // Background process orchestration
-            "bg_spawn"         => tools::bg_spawn::bg_spawn(args, &self.store),
+            "bg_spawn"         => tools::bg_spawn::bg_spawn(args, &self.store, &self.state),
             "bg_attach"        => tools::bg_spawn::bg_attach(args, &self.store),
             "bg_send"          => tools::bg_interact::bg_send(args, &self.store),
             "bg_status"        => tools::bg_query::bg_status(args, &self.store),
@@ -287,12 +287,12 @@ impl McpServer {
             "wait_for_idle"    => tools::bg_query::wait_for_idle(args, &self.store),
             "output_summary"   => tools::bg_query::output_summary(args, &self.store),
             "bg_kill"          => tools::bg_control::bg_kill(args, &self.store),
-            "pipeline_run"     => tools::bg_pipeline::pipeline_run(args, &self.pipelines),
+            "pipeline_run"     => tools::bg_pipeline::pipeline_run(args, &self.pipelines, &self.state),
             "pipeline_status"  => tools::bg_pipeline::pipeline_status(args, &self.pipelines),
             "pipeline_cancel"  => tools::bg_pipeline::pipeline_cancel(args, &self.pipelines),
             "live_window"      => tools::bg_window::live_window(args, &self.store),
             // Project / chip awareness (Tier 1)
-            "project_context"     => tools::project::project_context(args),
+            "project_context"     => tools::project::project_context(args, &self.state),
             "chip_status"         => tools::project::chip_status(args),
             "chip_build_pipeline" => tools::project::chip_build_pipeline(args, &self.store),
             "board_status"        => tools::project::board_status(args),
@@ -304,8 +304,8 @@ impl McpServer {
             // Project creation
             "project_new"  => tools::git_new::project_new(args),
             // Git write
-            "git_checkpoint" => tools::git_write::git_checkpoint(args),
-            "git_commit"   => tools::git_write::git_commit(args),
+            "git_checkpoint" => tools::git_write::git_checkpoint(args, &self.state),
+            "git_commit"   => tools::git_write::git_commit(args, &self.state),
             // Notifications
             "notify"            => tools::notify::notify(args),
             // tmux
@@ -317,13 +317,13 @@ impl McpServer {
             "session_restart"   => tools::session::session_restart(args),
             // GitHub SSH
             "gh_clone"  => tools::github::gh_clone(args),
-            "gh_sync"   => tools::github::gh_sync(args),
-            "gh_status" => tools::github::gh_status(args),
+            "gh_sync"   => tools::github::gh_sync(args, &self.state),
+            "gh_status" => tools::github::gh_status(args, &self.state),
             // Permissions / pre-validation
             "pre_validate"      => tools::permissions_tool::pre_validate(args),
             "permissions_setup" => tools::permissions_tool::permissions_setup(args),
             // PTY / interactive program driver
-            "tty_exec"          => tools::tty_exec::tty_exec(args, &self.store),
+            "tty_exec"          => tools::tty_exec::tty_exec(args, &self.store, &self.state),
             // Environment pre-flight
             "env_doctor"        => tools::env_doctor::env_doctor(args),
             _           => Err(format!("unknown tool: {name}")),
