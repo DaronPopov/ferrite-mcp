@@ -270,7 +270,8 @@ fn run_checkpoint(req: CheckpointRequest) -> Result<CheckpointOutcome, String> {
             .clone()
             .or_else(|| current_branch(&req.root))
             .unwrap_or_else(|| "main".to_owned());
-        let out = run_git(&req.root, &["push", req.remote.as_str(), branch.as_str()])?;
+        let push_target = resolve_push_target(&req.root, req.remote.as_str())?;
+        let out = run_git(&req.root, &["push", push_target.as_str(), branch.as_str()])?;
         push_ok = out.status.success();
         push_stdout = stdout_trimmed(&out);
         push_stderr = stderr_trimmed(&out);
@@ -498,6 +499,26 @@ fn current_branch(root: &Path) -> Option<String> {
     }
     let branch = stdout_trimmed(&out);
     if branch.is_empty() { None } else { Some(branch) }
+}
+
+fn resolve_push_target(root: &Path, remote: &str) -> Result<String, String> {
+    let out = run_git(root, &["remote", "get-url", remote])?;
+    if !out.status.success() {
+        return Ok(remote.to_owned());
+    }
+    Ok(github_https_to_ssh(&stdout_trimmed(&out)).unwrap_or_else(|| remote.to_owned()))
+}
+
+fn github_https_to_ssh(url: &str) -> Option<String> {
+    let rest = url.strip_prefix("https://github.com/")?;
+    let rest = rest.strip_suffix(".git").unwrap_or(rest);
+    let mut parts = rest.split('/');
+    let owner = parts.next()?;
+    let repo = parts.next()?;
+    if parts.next().is_some() || owner.is_empty() || repo.is_empty() {
+        return None;
+    }
+    Some(format!("git@github.com:{owner}/{repo}.git"))
 }
 
 fn summary_json(s: &StatusSummary) -> Value {

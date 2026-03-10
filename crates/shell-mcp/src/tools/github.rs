@@ -87,8 +87,14 @@ pub fn gh_sync(args: &Value, state: &Arc<Mutex<ServerState>>) -> Result<ToolResu
         detect_branch(&root).unwrap_or_else(|| "main".to_owned())
     };
 
+    let push_target = if op == "push" {
+        resolve_push_target(&root, remote)
+    } else {
+        remote.to_owned()
+    };
+
     let cmd = match op {
-        "push"  => format!("git push {remote} {actual_branch}"),
+        "push"  => format!("git push {push_target} {actual_branch}"),
         "fetch" => format!("git fetch {remote}"),
         _       => format!("git pull {remote} {actual_branch}"),
     };
@@ -207,6 +213,35 @@ fn detect_branch(root: &PathBuf) -> Option<String> {
     } else {
         None
     }
+}
+
+fn resolve_push_target(root: &PathBuf, remote: &str) -> String {
+    let out = std::process::Command::new("git")
+        .args(["remote", "get-url", remote])
+        .current_dir(root)
+        .output();
+
+    let Ok(out) = out else {
+        return remote.to_owned();
+    };
+    if !out.status.success() {
+        return remote.to_owned();
+    }
+
+    let url = String::from_utf8_lossy(&out.stdout).trim().to_owned();
+    github_https_to_ssh(&url).unwrap_or_else(|| remote.to_owned())
+}
+
+fn github_https_to_ssh(url: &str) -> Option<String> {
+    let rest = url.strip_prefix("https://github.com/")?;
+    let rest = rest.strip_suffix(".git").unwrap_or(rest);
+    let mut parts = rest.split('/');
+    let owner = parts.next()?;
+    let repo = parts.next()?;
+    if parts.next().is_some() || owner.is_empty() || repo.is_empty() {
+        return None;
+    }
+    Some(format!("git@github.com:{owner}/{repo}.git"))
 }
 
 fn detect_ahead_behind(root: &PathBuf, branch: &str) -> (i64, i64) {
