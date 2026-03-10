@@ -14,7 +14,6 @@ pub mod dynamic;
 pub mod eda;
 pub mod execution;
 pub mod filesystem;
-pub mod graphics;
 pub mod git;
 pub mod git_new;
 pub mod git_guard;
@@ -199,119 +198,6 @@ pub fn all_tool_definitions() -> Vec<ToolDef> {
                 "required": ["name"]
             }),
         },
-        ToolDef {
-            name: "graphics_write_runtime_bundle",
-            description: "Bridge into ferrite-graphics and write a generic runtime export bundle from an authored scene file.",
-            input_schema: json!({
-                "type": "object",
-                "properties": {
-                    "scene_path": { "type": "string", "description": "Path to the authored ferrite-graphics scene file." },
-                    "runtime_target": { "type": "string", "description": "Downstream runtime target id, e.g. web_threejs or godot." },
-                    "bundle_root": { "type": "string", "description": "Directory where the generic bundle should be written." },
-                    "benchmark_profile": { "type": "string", "description": "Optional benchmark profile id to record in the bundle manifest." }
-                },
-                "required": ["scene_path", "runtime_target", "bundle_root"]
-            }),
-        },
-        ToolDef {
-            name: "graphics_list_runtime_targets",
-            description: "Bridge into ferrite-graphics and list the generic downstream runtime targets available for export planning.",
-            input_schema: json!({
-                "type": "object",
-                "properties": {}
-            }),
-        },
-        ToolDef {
-            name: "graphics_plan_runtime_export",
-            description: "Bridge into ferrite-graphics and plan a generic runtime export package without writing the bundle yet.",
-            input_schema: json!({
-                "type": "object",
-                "properties": {
-                    "runtime_target": { "type": "string", "description": "Downstream runtime target id, e.g. web_threejs or godot." },
-                    "scene_path": { "type": "string", "description": "Optional scene path used to infer template, camera rig, and render profile." },
-                    "benchmark_profile": { "type": "string", "description": "Optional benchmark profile id to record in the export plan." }
-                },
-                "required": ["runtime_target"]
-            }),
-        },
-        ToolDef {
-            name: "graphics_scene_list_nodes",
-            description: "List semantic 3D UI nodes from a ferrite-graphics scene file, including node ids, roles, bindings, and positions.",
-            input_schema: json!({
-                "type": "object",
-                "properties": {
-                    "scene_path": { "type": "string", "description": "Path to the authored ferrite-graphics scene file." }
-                },
-                "required": ["scene_path"]
-            }),
-        },
-        ToolDef {
-            name: "graphics_scene_set_node_field",
-            description: "Set a single field on a semantic 3D UI node in a ferrite-graphics scene file.",
-            input_schema: json!({
-                "type": "object",
-                "properties": {
-                    "scene_path": { "type": "string", "description": "Path to the authored ferrite-graphics scene file." },
-                    "node_id": { "type": "string", "description": "Stable node id or node name." },
-                    "field": { "type": "string", "description": "Field name to set." },
-                    "value": { "type": "string", "description": "Field value to write." }
-                },
-                "required": ["scene_path", "node_id", "field", "value"]
-            }),
-        },
-        ToolDef {
-            name: "graphics_scene_patch_node",
-            description: "Patch multiple fields on a semantic 3D UI node using a JSON object string.",
-            input_schema: json!({
-                "type": "object",
-                "properties": {
-                    "scene_path": { "type": "string", "description": "Path to the authored ferrite-graphics scene file." },
-                    "node_id": { "type": "string", "description": "Stable node id or node name." },
-                    "patch_json": { "type": "string", "description": "JSON object string of field-value pairs." }
-                },
-                "required": ["scene_path", "node_id", "patch_json"]
-            }),
-        },
-        ToolDef {
-            name: "graphics_scene_add_node",
-            description: "Add a new semantic 3D UI node to a ferrite-graphics scene from a JSON object string.",
-            input_schema: json!({
-                "type": "object",
-                "properties": {
-                    "scene_path": { "type": "string", "description": "Path to the authored ferrite-graphics scene file." },
-                    "node_json": { "type": "string", "description": "JSON object string describing the node block to append." }
-                },
-                "required": ["scene_path", "node_json"]
-            }),
-        },
-        ToolDef {
-            name: "graphics_scene_remove_node",
-            description: "Remove a semantic 3D UI node from a ferrite-graphics scene by node id or name.",
-            input_schema: json!({
-                "type": "object",
-                "properties": {
-                    "scene_path": { "type": "string", "description": "Path to the authored ferrite-graphics scene file." },
-                    "node_id": { "type": "string", "description": "Stable node id or node name." }
-                },
-                "required": ["scene_path", "node_id"]
-            }),
-        },
-        ToolDef {
-            name: "graphics_scene_focus_node",
-            description: "Retarget the camera in a ferrite-graphics scene to focus on a semantic 3D UI node.",
-            input_schema: json!({
-                "type": "object",
-                "properties": {
-                    "scene_path": { "type": "string", "description": "Path to the authored ferrite-graphics scene file." },
-                    "node_id": { "type": "string", "description": "Stable node id or node name." },
-                    "distance": { "type": "number", "description": "Optional camera distance from the node." },
-                    "eye_y_offset": { "type": "number", "description": "Optional vertical offset for the camera eye." },
-                    "target_y_offset": { "type": "number", "description": "Optional vertical offset for the camera target." }
-                },
-                "required": ["scene_path", "node_id"]
-            }),
-        },
-
         // ── State ─────────────────────────────────────────────────────────────
         ToolDef {
             name: "shell_state",
