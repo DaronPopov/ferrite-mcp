@@ -20,6 +20,7 @@ pub mod git_guard;
 pub mod git_write;
 pub mod github;
 pub mod hardware;
+pub mod health;
 pub mod history;
 pub mod http;
 pub mod ml;
@@ -84,6 +85,11 @@ pub fn all_tool_definitions() -> Vec<ToolDef> {
         ToolDef {
             name: "cpu_info",
             description: "CPU topology: model, core count, frequency, SIMD (AVX2/AVX-512/NEON/SVE), cache sizes.",
+            input_schema: json!({ "type": "object", "properties": {} }),
+        },
+        ToolDef {
+            name: "health",
+            description: "Report ferrite MCP server health: uptime, RSS, tool-call count, note/job buffer pressure, and whether restart is recommended. Also exposes opt-in auto-recycle thresholds via FERRITE_MCP_MAX_CALLS / _UPTIME_SECS / _RSS_MB.",
             input_schema: json!({ "type": "object", "properties": {} }),
         },
         ToolDef {

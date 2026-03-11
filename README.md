@@ -54,7 +54,7 @@ args    = ["--mcp"]
 | **Filesystem** | `read_file`, `glob`, `grep_code`, `list_dir`, `move_file`, `mkdir`, `delete_file`, `changed_since` |
 | **Execution** | `exec`, `build_check`, `task_run`, `launch`, `tty_exec` |
 | **Background jobs** | `bg_spawn`, `bg_send`, `bg_status`, `bg_wait`, `bg_tail`, `bg_list`, `bg_kill`, `wait_for_pattern`, `wait_for_idle`, `output_summary`, `pipeline_run`, `pipeline_status`, `pipeline_cancel`, `live_window` |
-| **Hardware / GPU** | `gpu_info`, `gpu_live`, `cpu_info`, `occupancy_calc`, `ptx_inspect` |
+| **Hardware / GPU** | `gpu_info`, `gpu_live`, `cpu_info`, `health`, `occupancy_calc`, `ptx_inspect` |
 | **Profiling** | `ncu_profile`, `compute_sanitizer`, `perf_stat`, `flamegraph` |
 | **Git** | `git_log`, `git_diff`, `git_status`, `git_checkpoint`, `git_commit`, `gh_clone`, `gh_sync`, `gh_status` |
 | **EDA / FPGA** | `vivado_tcl`, `synth_report`, `fpga_program`, `fpga_boards`, `board_status`, `verilog_lint`, `verilog_sim`, `cocotb_run`, `waveform_query`, `fpga_serial`, `fpga_monitor` |
@@ -82,3 +82,13 @@ args    = ["--mcp"]
 | `git.before_build` | Enable checkpoint hook for build/test tools |
 | `git.before_deploy` | Enable checkpoint hook for deploy tools |
 | `git.add_mode` | Auto-checkpoint staging mode: `tracked` or `all` |
+
+## MCP recycle thresholds
+
+Set these env vars on the `ferrite --mcp` process to make the server exit cleanly after a response once a threshold is exceeded. The client can then spawn a fresh process.
+
+- `FERRITE_MCP_MAX_CALLS`
+- `FERRITE_MCP_MAX_UPTIME_SECS`
+- `FERRITE_MCP_MAX_RSS_MB`
+
+Use the `health` tool to inspect current uptime, RSS, call count, job-buffer pressure, and whether restart is recommended.

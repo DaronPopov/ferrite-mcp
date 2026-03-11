@@ -181,9 +181,25 @@ pub fn control_reconcile(args: &Value, state: &Arc<Mutex<ServerState>>) -> Resul
 mod tests {
     use super::*;
     use serde_json::json;
+    use std::sync::{Mutex, MutexGuard, OnceLock};
+
+    static TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
     fn state() -> Arc<Mutex<ServerState>> {
         Arc::new(Mutex::new(ServerState::default()))
+    }
+
+    fn lock_tests() -> MutexGuard<'static, ()> {
+        TEST_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .expect("test lock")
+    }
+
+    fn reset_store() {
+        let mut guard = store().lock().expect("control store lock");
+        guard.desired = None;
+        guard.last_tick_actions.clear();
     }
 
     fn parse_tool_json(tr: &ToolResult) -> Value {
@@ -193,6 +209,8 @@ mod tests {
 
     #[test]
     fn set_and_get_desired_roundtrip() {
+        let _guard = lock_tests();
+        reset_store();
         let desired = json!({
             "version": "v0",
             "fercuda": {
@@ -214,10 +232,13 @@ mod tests {
         let get_v = parse_tool_json(&get);
         assert_eq!(get_v["desired"]["version"], json!("v0"));
         assert_eq!(get_v["desired"]["fercuda"]["min_sessions"], json!(1));
+        reset_store();
     }
 
     #[test]
     fn tick_build_plan_deferred_when_runtime_apply_disabled() {
+        let _guard = lock_tests();
+        reset_store();
         let st = state();
         let tr = control_reconcile(&json!({
             "op": "tick",
@@ -240,10 +261,13 @@ mod tests {
         assert!(!applied.is_empty());
         assert_eq!(applied[0]["applied"], json!(false));
         assert_eq!(applied[0]["reason"], json!("enable_apply_runtime=false"));
+        reset_store();
     }
 
     #[test]
     fn tick_fercuda_range_noop_with_explicit_actual() {
+        let _guard = lock_tests();
+        reset_store();
         let st = state();
         let tr = control_reconcile(&json!({
             "op": "tick",
@@ -262,5 +286,6 @@ mod tests {
         let plan = v["plan"].as_array().cloned().unwrap_or_default();
         assert_eq!(plan.len(), 1);
         assert_eq!(plan[0]["status"], json!("noop"));
+        reset_store();
     }
 }

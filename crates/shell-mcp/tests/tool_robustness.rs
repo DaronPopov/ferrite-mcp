@@ -1,7 +1,7 @@
 //! Integration tests for MCP tool robustness: timeouts, non-repo paths, blocking binaries.
 
 use serde_json::json;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::thread;
 use std::time::Duration;
 
@@ -31,10 +31,20 @@ fn state_with_cwd(cwd: &std::path::Path) -> Arc<Mutex<ServerState>> {
     Arc::new(Mutex::new(server_state))
 }
 
+static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+fn lock_env() -> MutexGuard<'static, ()> {
+    ENV_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .expect("env lock")
+}
+
 // ── which ────────────────────────────────────────────────────────────────────
 
 #[test]
 fn which_finds_git() {
+    let _guard = lock_env();
     let result = which_bin(&json!({ "name": "git" })).unwrap();
     let v = result_json(&result);
     assert!(v["found"].as_bool().unwrap(), "git should be found on PATH");
@@ -43,6 +53,7 @@ fn which_finds_git() {
 
 #[test]
 fn which_not_found() {
+    let _guard = lock_env();
     let result = which_bin(&json!({ "name": "nonexistent_binary_xyz_123" })).unwrap();
     let v = result_json(&result);
     assert!(!v["found"].as_bool().unwrap());
@@ -50,6 +61,7 @@ fn which_not_found() {
 
 #[test]
 fn which_handles_blocking_binary() {
+    let _guard = lock_env();
     use std::io::Write;
     let dir = std::env::temp_dir().join("ferrite_test_which");
     let _ = std::fs::create_dir_all(&dir);
@@ -84,6 +96,7 @@ fn which_handles_blocking_binary() {
 
 #[test]
 fn which_handles_binary_that_leaks_stdio_fds() {
+    let _guard = lock_env();
     use std::io::Write;
     let dir = std::env::temp_dir().join("ferrite_test_which_leaked_stdio");
     let _ = std::fs::create_dir_all(&dir);

@@ -5,7 +5,9 @@
 
 use std::io::{BufRead, Write};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 use crate::config::FerriteConfig;
 use crate::job_store::JobStore;
@@ -74,10 +76,40 @@ impl Default for ServerState {
     }
 }
 
+#[derive(Debug)]
+pub struct ServerMetrics {
+    started_at: Instant,
+    total_tool_calls: AtomicU64,
+}
+
+impl Default for ServerMetrics {
+    fn default() -> Self {
+        Self {
+            started_at: Instant::now(),
+            total_tool_calls: AtomicU64::new(0),
+        }
+    }
+}
+
+impl ServerMetrics {
+    pub fn record_tool_call(&self) -> u64 {
+        self.total_tool_calls.fetch_add(1, Ordering::Relaxed) + 1
+    }
+
+    pub fn total_tool_calls(&self) -> u64 {
+        self.total_tool_calls.load(Ordering::Relaxed)
+    }
+
+    pub fn uptime_secs(&self) -> u64 {
+        self.started_at.elapsed().as_secs()
+    }
+}
+
 pub struct McpServer {
     pub state:     Arc<Mutex<ServerState>>,
     pub store:     Arc<JobStore>,
     pub pipelines: Arc<PipelineStore>,
+    pub metrics:   Arc<ServerMetrics>,
 }
 
 impl McpServer {
@@ -89,6 +121,7 @@ impl McpServer {
             state:     Arc::new(Mutex::new(ServerState::default())),
             store,
             pipelines,
+            metrics:   Arc::new(ServerMetrics::default()),
         }
     }
 
@@ -108,6 +141,10 @@ impl McpServer {
                     .unwrap_or_else(|e| format!(r#"{{"jsonrpc":"2.0","error":{{"code":-32603,"message":"{e}"}}}}"#));
                 writeln!(out, "{s}")?;
                 out.flush()?;
+            }
+
+            if self.should_recycle() {
+                break;
             }
         }
 
@@ -174,6 +211,8 @@ impl McpServer {
             .map(|v| v as usize)
             .unwrap_or(DEFAULT_MAX_CHARS);
 
+        self.metrics.record_tool_call();
+
         let decision = crate::authz::authorize(name, args);
         crate::authz::audit(&decision, name, args);
         if !decision.allowed {
@@ -234,6 +273,16 @@ impl McpServer {
         let result = self.call_tool(name, args)?;
         let result = cap_and_filter(result, filter, max_chars);
         serde_json::to_value(&result).map_err(|e| e.to_string())
+    }
+
+    fn should_recycle(&self) -> bool {
+        let policy = RecyclePolicy::from_env();
+        if policy.is_disabled() {
+            return false;
+        }
+
+        let snapshot = HealthSnapshot::collect(&self.metrics, &self.state, &self.store);
+        policy.should_recycle(&snapshot)
     }
 
     fn call_tool(&self, name: &str, args: &Value) -> Result<ToolResult, String> {
@@ -371,6 +420,8 @@ impl McpServer {
             "permissions_setup" => tools::permissions_tool::permissions_setup(args),
             // PTY / interactive program driver
             "tty_exec"          => tools::tty_exec::tty_exec(args, &self.store, &self.state),
+            // Server health
+            "health"            => tools::health::health(args, &self.metrics, &self.state, &self.store),
             // Environment pre-flight
             "env_doctor"        => tools::env_doctor::env_doctor(args),
             _           => Err(format!("unknown tool: {name}")),
@@ -380,4 +431,141 @@ impl McpServer {
 
 impl Default for McpServer {
     fn default() -> Self { Self::new() }
+}
+
+#[derive(Debug, Clone)]
+pub struct HealthSnapshot {
+    pub uptime_secs: u64,
+    pub total_tool_calls: u64,
+    pub note_count: usize,
+    pub note_bytes: usize,
+    pub rss_bytes: Option<u64>,
+    pub job_stats: crate::job_store::JobStoreStats,
+}
+
+impl HealthSnapshot {
+    pub fn collect(
+        metrics: &Arc<ServerMetrics>,
+        state: &Arc<Mutex<ServerState>>,
+        store: &Arc<JobStore>,
+    ) -> Self {
+        let (note_count, note_bytes) = {
+            let guard = state.lock().unwrap();
+            let bytes = guard.notes.iter().map(|n| n.len()).sum();
+            (guard.notes.len(), bytes)
+        };
+
+        Self {
+            uptime_secs: metrics.uptime_secs(),
+            total_tool_calls: metrics.total_tool_calls(),
+            note_count,
+            note_bytes,
+            rss_bytes: current_rss_bytes(),
+            job_stats: store.stats(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct RecyclePolicy {
+    pub max_calls: Option<u64>,
+    pub max_uptime_secs: Option<u64>,
+    pub max_rss_bytes: Option<u64>,
+}
+
+impl RecyclePolicy {
+    pub fn from_env() -> Self {
+        Self {
+            max_calls: std::env::var("FERRITE_MCP_MAX_CALLS").ok().and_then(|v| v.parse().ok()),
+            max_uptime_secs: std::env::var("FERRITE_MCP_MAX_UPTIME_SECS").ok().and_then(|v| v.parse().ok()),
+            max_rss_bytes: std::env::var("FERRITE_MCP_MAX_RSS_MB")
+                .ok()
+                .and_then(|v| v.parse::<u64>().ok())
+                .map(|mb| mb.saturating_mul(1024 * 1024)),
+        }
+    }
+
+    pub fn is_disabled(&self) -> bool {
+        self.max_calls.is_none() && self.max_uptime_secs.is_none() && self.max_rss_bytes.is_none()
+    }
+
+    pub fn should_recycle(&self, snapshot: &HealthSnapshot) -> bool {
+        self.max_calls.map(|v| snapshot.total_tool_calls >= v).unwrap_or(false)
+            || self.max_uptime_secs.map(|v| snapshot.uptime_secs >= v).unwrap_or(false)
+            || self.max_rss_bytes
+                .map(|v| snapshot.rss_bytes.map(|rss| rss >= v).unwrap_or(false))
+                .unwrap_or(false)
+    }
+}
+
+fn current_rss_bytes() -> Option<u64> {
+    #[cfg(target_os = "linux")]
+    {
+        let text = std::fs::read_to_string("/proc/self/status").ok()?;
+        for line in text.lines() {
+            if let Some(rest) = line.strip_prefix("VmRSS:") {
+                let kb = rest.split_whitespace().next()?.parse::<u64>().ok()?;
+                return Some(kb.saturating_mul(1024));
+            }
+        }
+        None
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    {
+        let pid = std::process::id().to_string();
+        let out = std::process::Command::new("ps")
+            .args(["-o", "rss=", "-p", &pid])
+            .output()
+            .ok()?;
+        let kb = String::from_utf8_lossy(&out.stdout).trim().parse::<u64>().ok()?;
+        Some(kb.saturating_mul(1024))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{HealthSnapshot, RecyclePolicy};
+    use crate::job_store::JobStoreStats;
+
+    fn snapshot() -> HealthSnapshot {
+        HealthSnapshot {
+            uptime_secs: 10,
+            total_tool_calls: 5,
+            note_count: 0,
+            note_bytes: 0,
+            rss_bytes: Some(32 * 1024 * 1024),
+            job_stats: JobStoreStats {
+                total_jobs: 0,
+                running_jobs: 0,
+                attached_jobs: 0,
+                done_jobs: 0,
+                killed_jobs: 0,
+                stdout_bytes: 0,
+                stderr_bytes: 0,
+                buffered_bytes: 0,
+            },
+        }
+    }
+
+    #[test]
+    fn recycle_policy_disabled_when_no_thresholds() {
+        let policy = RecyclePolicy {
+            max_calls: None,
+            max_uptime_secs: None,
+            max_rss_bytes: None,
+        };
+        assert!(policy.is_disabled());
+        assert!(!policy.should_recycle(&snapshot()));
+    }
+
+    #[test]
+    fn recycle_policy_triggers_on_call_threshold() {
+        let policy = RecyclePolicy {
+            max_calls: Some(5),
+            max_uptime_secs: None,
+            max_rss_bytes: None,
+        };
+        assert!(policy.should_recycle(&snapshot()));
+    }
 }

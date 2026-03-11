@@ -631,12 +631,56 @@ impl JobStore {
         jobs
     }
 
+    pub fn stats(&self) -> JobStoreStats {
+        let jobs: Vec<Arc<Job>> = self.jobs.lock().unwrap().values().cloned().collect();
+        let mut running = 0usize;
+        let mut attached = 0usize;
+        let mut done = 0usize;
+        let mut killed = 0usize;
+        let mut stdout_bytes = 0usize;
+        let mut stderr_bytes = 0usize;
+
+        for job in &jobs {
+            match job.current_status() {
+                JobStatus::Running => running += 1,
+                JobStatus::Attached => attached += 1,
+                JobStatus::Done(_) => done += 1,
+                JobStatus::Killed => killed += 1,
+            }
+            stdout_bytes += job.stdout_bytes();
+            stderr_bytes += job.stderr_bytes();
+        }
+
+        JobStoreStats {
+            total_jobs: jobs.len(),
+            running_jobs: running,
+            attached_jobs: attached,
+            done_jobs: done,
+            killed_jobs: killed,
+            stdout_bytes,
+            stderr_bytes,
+            buffered_bytes: stdout_bytes + stderr_bytes,
+        }
+    }
+
     #[allow(dead_code)]
     pub fn remove_job(&self, job_id: &str) -> bool {
         let removed = self.jobs.lock().unwrap().remove(job_id).is_some();
         if removed { self.persist_all(); }
         removed
     }
+}
+
+#[derive(Debug, Clone)]
+pub struct JobStoreStats {
+    pub total_jobs: usize,
+    pub running_jobs: usize,
+    pub attached_jobs: usize,
+    pub done_jobs: usize,
+    pub killed_jobs: usize,
+    pub stdout_bytes: usize,
+    pub stderr_bytes: usize,
+    pub buffered_bytes: usize,
 }
 
 // ── Process alive check ───────────────────────────────────────────────────────

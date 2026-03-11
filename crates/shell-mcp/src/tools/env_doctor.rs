@@ -147,7 +147,7 @@ pub fn env_doctor(args: &Value) -> Result<ToolResult, String> {
         .copied()
         .collect();
 
-    let disk_ok = check_disk && {
+    let disk_ok = !check_disk || {
         disk["root_ok"].as_bool().unwrap_or(true)
             && disk["home_ok"].as_bool().unwrap_or(true)
     };
