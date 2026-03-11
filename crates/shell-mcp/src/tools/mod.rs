@@ -36,6 +36,7 @@ pub mod state;
 pub mod symbols;
 pub mod system;
 pub mod env_doctor;
+pub mod fercuda;
 pub mod permissions_tool;
 pub mod tmux;
 pub mod tty_exec;
@@ -267,6 +268,29 @@ pub fn all_tool_definitions() -> Vec<ToolDef> {
                     "value":      { "description": "Answer value when op=answer (string or integer)" }
                 },
                 "required": ["op"]
+            }),
+        },
+        ToolDef {
+            name: "fercuda_runtime",
+            description: "Operate feRcuda through MCP. Preferred contract shape is {action, input, agent_api_version}; legacy {op,...} is still accepted. Supports runtime inspect, session lifecycle, tensor IO, JIT compile/bind/launch, fixed ops, and job control.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "agent_api_version": { "type": "string", "description": "Preferred value: v1alpha1" },
+                    "action": { "type": "string", "description": "Canonical action name, e.g. session.create, tensor.upload, jit.kernel.launch" },
+                    "input": {
+                        "type": "object",
+                        "description": "Structured payload for the selected action."
+                    },
+                    "op": {
+                        "type": "string",
+                        "description": "Legacy compatibility field. Prefer 'action' + 'input'."
+                    }
+                },
+                "anyOf": [
+                    { "required": ["action"] },
+                    { "required": ["op"] }
+                ]
             }),
         },
 

@@ -207,7 +207,12 @@ fn load_policy() -> Result<Option<AuthzPolicy>, String> {
 }
 
 fn action_for(tool: &str, args: &Value) -> String {
+    if let Some(action) = args["action"].as_str() {
+        return format!("{tool}.{action}");
+    }
     if let Some(op) = args["op"].as_str() {
+        format!("{tool}.{op}")
+    } else if let Some(op) = args["input"]["op"].as_str() {
         format!("{tool}.{op}")
     } else {
         tool.to_owned()

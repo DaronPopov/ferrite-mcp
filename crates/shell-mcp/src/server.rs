@@ -177,6 +177,52 @@ impl McpServer {
         let decision = crate::authz::authorize(name, args);
         crate::authz::audit(&decision, name, args);
         if !decision.allowed {
+            if name == "fercuda_runtime" {
+                let action = args["action"].as_str()
+                    .map(ToOwned::to_owned)
+                    .or_else(|| args["op"].as_str().map(|op| match op {
+                        "status" => "runtime.inspect".to_owned(),
+                        "guide" => "runtime.guide".to_owned(),
+                        "session_create" => "session.create".to_owned(),
+                        "session_destroy" => "session.destroy".to_owned(),
+                        "buffer_alloc" => "tensor.create".to_owned(),
+                        "buffer_free" => "tensor.destroy".to_owned(),
+                        "upload_f32" => "tensor.upload".to_owned(),
+                        "download_f32" => "tensor.download".to_owned(),
+                        "jit_compile" => "jit.program.compile".to_owned(),
+                        "jit_release_program" => "jit.program.release".to_owned(),
+                        "jit_get_kernel" => "jit.kernel.bind".to_owned(),
+                        "jit_launch" => "jit.kernel.launch".to_owned(),
+                        "jit_release_kernel" => "jit.kernel.release".to_owned(),
+                        "jit_stats" => "jit.stats.get".to_owned(),
+                        "submit_matmul" => "op.matmul.submit".to_owned(),
+                        "submit_layer_norm" => "op.layer_norm.submit".to_owned(),
+                        "job_status" => "job.status".to_owned(),
+                        "job_wait" => "job.wait".to_owned(),
+                        _ => "runtime.unknown".to_owned(),
+                    }))
+                    .unwrap_or_else(|| "runtime.unknown".to_owned());
+                let result = ToolResult::json(&json!({
+                    "ok": false,
+                    "agent_api_version": "v1alpha1",
+                    "action": action,
+                    "op": args["op"].as_str().unwrap_or("unknown"),
+                    "error": {
+                        "code": "POLICY_DENIED",
+                        "message": format!(
+                            "authorization denied for {} as principal={} role={} reason={}",
+                            decision.action, decision.principal, decision.role, decision.reason
+                        ),
+                        "details": {
+                            "principal": decision.principal,
+                            "role": decision.role,
+                            "reason": decision.reason
+                        }
+                    }
+                }));
+                let result = cap_and_filter(result, filter, max_chars);
+                return serde_json::to_value(&result).map_err(|e| e.to_string());
+            }
             return Err(format!(
                 "authorization denied for {} as principal={} role={} reason={}",
                 decision.action, decision.principal, decision.role, decision.reason
@@ -213,6 +259,7 @@ impl McpServer {
             "control_reconcile" => tools::control::control_reconcile(args, &self.state),
             "config_ux"      => tools::config_ux::config_ux(args),
             "ux_wizard"      => tools::ux_wizard::ux_wizard(args),
+            "fercuda_runtime" => tools::fercuda::runtime(args),
             // Execution
             "exec"           => tools::execution::exec_cmd(args, &self.state),
             "build_check"    => tools::execution::build_check(args, &self.state),
