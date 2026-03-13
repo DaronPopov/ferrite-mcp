@@ -1,5 +1,9 @@
 # ferrite-mcp
 
+> **Copyright Daron Popov. All rights reserved.**  \
+> This source is viewable for reference only.  \
+> No license is granted for use, copying, modification, redistribution, sublicensing, or commercial use without prior written permission.
+
 An MCP server that gives Claude Code and OpenAI Codex deep access to your local machine — hardware, builds, EDA tools, GPU profiling, and background job orchestration.
 
 Works on **macOS** and **Linux**.
