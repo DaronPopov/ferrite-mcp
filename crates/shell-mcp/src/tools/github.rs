@@ -127,23 +127,27 @@ pub fn gh_status(args: &Value, state: &Arc<Mutex<ServerState>>) -> Result<ToolRe
     let default_paths = [
         "~/processor_lab",
         "~/verilogchill",
+        "~/ferrite",
         "~/ferrite-os-clean",
         "~/cpp_importable_test",
         "~/rust_shell",
         "~/aws_tool",
     ];
 
-    let mut paths: Vec<PathBuf> = if let Some(arr) = args["paths"].as_array() {
+    // Explicit paths array → use those only.
+    // Single path override → use that only.
+    // No args → use well-known defaults (not CWD — that was a bug).
+    let paths: Vec<PathBuf> = if let Some(arr) = args["paths"].as_array() {
         arr.iter()
             .filter_map(|v| v.as_str())
             .map(expand_tilde)
             .collect()
+    } else if let Some(p) = args["path"].as_str() {
+        vec![expand_tilde(p)]
     } else {
-        vec![resolve_work_path(args, state)?]
+        default_paths.iter().map(|p| expand_tilde(p)).collect()
     };
-    if args["paths"].as_array().is_none() {
-        paths.extend(default_paths.iter().map(|p| expand_tilde(p)));
-    }
+    let _ = state; // kept for API compatibility
 
     let mut results = Vec::new();
     let mut seen = BTreeSet::new();
@@ -245,27 +249,36 @@ fn github_https_to_ssh(url: &str) -> Option<String> {
 }
 
 fn detect_ahead_behind(root: &PathBuf, branch: &str) -> (i64, i64) {
-    // Fetch remote info first (quiet)
-    let _ = std::process::Command::new("git")
-        .args(["fetch", "--quiet", "--no-tags"])
-        .current_dir(root)
-        .output();
+    // Detached HEAD → no meaningful upstream comparison
+    if branch == "HEAD" || branch.is_empty() {
+        return (0, 0);
+    }
 
-    let out = std::process::Command::new("git")
-        .args(["rev-list", "--left-right", "--count",
-               &format!("origin/{branch}...HEAD")])
-        .current_dir(root)
-        .output();
+    // Refresh remote tracking refs with a tight timeout (no hanging on bad SSH)
+    let fetch = run("git fetch --quiet --no-tags", root, &[], "", Duration::from_secs(8));
+    // Ignore fetch failure — stale tracking refs are still useful
 
-    if let Ok(o) = out {
-        if o.status.success() {
-            let s = String::from_utf8_lossy(&o.stdout);
-            let parts: Vec<&str> = s.trim().split_whitespace().collect();
-            if parts.len() == 2 {
-                let behind = parts[0].parse::<i64>().unwrap_or(0);
-                let ahead  = parts[1].parse::<i64>().unwrap_or(0);
-                return (ahead, behind);
-            }
+    // Check that origin/<branch> tracking ref exists before comparing
+    let ref_check = run(
+        &format!("git rev-parse --verify origin/{branch}"),
+        root, &[], "", Duration::from_secs(4),
+    );
+    if !ref_check["success"].as_bool().unwrap_or(false) {
+        return (0, 0);
+    }
+
+    let rev_list = run(
+        &format!("git rev-list --left-right --count origin/{branch}...HEAD"),
+        root, &[], "", Duration::from_secs(8),
+    );
+
+    if rev_list["success"].as_bool().unwrap_or(false) {
+        let s = rev_list["stdout"].as_str().unwrap_or("").trim().to_owned();
+        let parts: Vec<&str> = s.split_whitespace().collect();
+        if parts.len() == 2 {
+            let behind = parts[0].parse::<i64>().unwrap_or(0);
+            let ahead  = parts[1].parse::<i64>().unwrap_or(0);
+            return (ahead, behind);
         }
     }
     (0, 0)

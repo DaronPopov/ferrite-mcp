@@ -16,6 +16,7 @@ members = [
 version     = "0.1.0"
 edition     = "2021"
 authors     = []
+license     = "LicenseRef-Proprietary"
 repository  = ""
 
 # Shared dependency versions — crates reference these via workspace = true
