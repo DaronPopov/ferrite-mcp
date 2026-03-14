@@ -10,6 +10,7 @@
 //!   ferrite install      → register MCP server in ~/.claude.json
 //!   ferrite uninstall    → remove MCP server from ~/.claude.json
 //!   ferrite status       → show config + MCP registration status
+//!   ferrite up           → one-shot remote bootstrap for SSH/tmux access
 //!   ferrite remote ...   → remote bootstrap helpers for SSH/tmux/MCP flows
 
 mod remote;
@@ -29,6 +30,7 @@ fn main() -> anyhow::Result<()> {
         Some("install")   => run_install(),
         Some("uninstall") => run_uninstall(),
         Some("status")    => run_status(),
+        Some("up")        => remote::run_enable(None),
         Some("remote")    => remote::run_remote(&args[1..]),
         _                 => run_repl(),
     }
