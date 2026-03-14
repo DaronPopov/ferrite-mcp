@@ -4,7 +4,7 @@
 > This source is viewable for reference only.  \
 > No license is granted for use, copying, modification, redistribution, sublicensing, or commercial use without prior written permission.
 
-An MCP server that gives Claude Code and OpenAI Codex deep access to your local machine — hardware, builds, EDA tools, GPU profiling, and background job orchestration.
+An MCP server that gives Claude Code, OpenAI Codex, and other MCP clients deep access to your local machine — hardware, builds, EDA tools, GPU profiling, and background job orchestration.
 
 Works on **macOS** and **Linux**.
 
@@ -58,10 +58,10 @@ args    = ["--mcp"]
 | **Filesystem** | `read_file`, `glob`, `grep_code`, `list_dir`, `move_file`, `mkdir`, `delete_file`, `changed_since` |
 | **Execution** | `exec`, `build_check`, `task_run`, `launch`, `tty_exec` |
 | **Background jobs** | `bg_spawn`, `bg_send`, `bg_status`, `bg_wait`, `bg_tail`, `bg_list`, `bg_kill`, `wait_for_pattern`, `wait_for_idle`, `output_summary`, `pipeline_run`, `pipeline_status`, `pipeline_cancel`, `live_window` |
-| **Hardware / GPU** | `gpu_info`, `gpu_live`, `cpu_info`, `health`, `occupancy_calc`, `ptx_inspect` |
+| **Hardware / GPU** | `gpu_info`, `gpu_live`, `cpu_info`, `health`, `occupancy_calc`, `ptx_inspect`, `cuda_env_doctor`, `cuda_artifacts`, `cuda_triage`, `cuda_regression_run`, `cuda_regression_report` |
 | **Profiling** | `ncu_profile`, `compute_sanitizer`, `perf_stat`, `flamegraph` |
 | **Git** | `git_log`, `git_diff`, `git_status`, `git_checkpoint`, `git_commit`, `gh_clone`, `gh_sync`, `gh_status` |
-| **EDA / FPGA** | `vivado_tcl`, `synth_report`, `fpga_program`, `fpga_boards`, `board_status`, `verilog_lint`, `verilog_sim`, `cocotb_run`, `waveform_query`, `fpga_serial`, `fpga_monitor` |
+| **EDA / FPGA** | `vivado_tcl`, `synth_report`, `fpga_program`, `fpga_boards`, `board_status`, `verilog_lint`, `verilog_sim`, `cocotb_run`, `rtl_regression_run`, `rtl_regression_report`, `fpga_triage`, `fpga_artifacts`, `waveform_query`, `fpga_serial`, `fpga_monitor` |
 | **ML** | `tensor_inspect`, `checkpoint_list` |
 | **Project** | `orient`, `project_context`, `chip_status`, `chip_build_pipeline`, `find_lib`, `discover` |
 | **System** | `process_tree`, `port_list`, `tmux_ctl`, `session_status`, `session_restart` |
@@ -118,5 +118,65 @@ ferrite remote mcp-config <host> [user]
 - `remote up` prepares a tmux-backed session and prints the exact SSH attach command.
 - `remote login-shell` is intended for password-based SSH logins: it creates or reuses the tmux session and attaches immediately.
 - `remote mcp-config` prints the Mac-side Codex MCP stanza for `ssh ... ferrite --mcp`.
+
+## Agent Compatibility
+
+`ferrite` is a plain stdio MCP server. The contract is agent-agnostic:
+
+- no Claude-specific protocol extensions
+- no Codex-specific protocol extensions
+- workflow discovery happens through `tools/list`
+- high-level FPGA flows should be callable through explicit JSON arguments, not prompt-only conventions
+
+For FPGA projects, prefer manifest-backed flows so every MCP client can discover the same targets:
+
+```toml
+[project]
+name = "attn"
+board = "basys3"
+
+[[cocotb]]
+name = "softmax"
+dir = "ip/softmax/sim"
+mode = "makefile"
+module = "test_softmax_lut"
+sim = "icarus"
+
+[[synth]]
+name = "basys3_n6"
+tcl = "top/basys3/tcl/build_n6_attn.tcl"
+bitstream = "build/basys3_n6/attn_basys3_top_n6.bit"
+```
+
+Example MCP call:
+
+```json
+{
+  "name": "rtl_regression_run",
+  "arguments": {
+    "chip": "attn",
+    "sim_target": "softmax",
+    "steps": ["lint", "sim"]
+  }
+}
+```
+
+For compact agent-facing analysis, use `rtl_regression_report`. It returns summary fields, failure classification, and artifact paths by default, with `include_logs=true` available when a client wants full stdout/stderr.
+
+For policy-oriented next steps, use `fpga_triage`. It returns:
+
+- severity
+- root-cause class
+- confidence
+- recommended next action
+- recommended next tool
+
+For read-only artifact discovery, use `fpga_artifacts`. It returns manifest-aware sim and synth assets including:
+
+- sim directories
+- `results.xml` paths and existence
+- discovered `.vcd` files
+- selected synth Tcl path
+- selected bitstream path and existence
 
 For password-based access from outside your home network, prefer Tailscale plus SSH password auth over exposing port `22` directly to the public internet.

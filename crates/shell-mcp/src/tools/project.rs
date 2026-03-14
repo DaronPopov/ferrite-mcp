@@ -313,8 +313,10 @@ pub fn chip_build_pipeline(args: &Value, store: &Arc<JobStore>) -> Result<ToolRe
     let lab_path = args["lab_path"].as_str()
         .map(expand_tilde)
         .unwrap_or_else(|| expand_tilde("~/processor_lab"));
-    let board = args["board"].as_str().unwrap_or("basys3");
+    let requested_board = args["board"].as_str().unwrap_or("basys3");
     let dry_run = args["dry_run"].as_bool().unwrap_or(false);
+    let sim_target = args["sim_target"].as_str();
+    let synth_target = args["synth_target"].as_str();
 
     let steps: Vec<&str> = args["steps"].as_array()
         .map(|a| a.iter().filter_map(|v| v.as_str()).collect())
@@ -324,10 +326,12 @@ pub fn chip_build_pipeline(args: &Value, store: &Arc<JobStore>) -> Result<ToolRe
     if !chip_path.exists() {
         return Err(format!("chip_build_pipeline: chip '{}' not found at {}", chip, chip_path.display()));
     }
+    let manifest = load_fpga_manifest_with_override(&chip_path, args["manifest_path"].as_str());
+    let board = manifest_board_or_default(manifest.as_ref(), requested_board);
 
     if dry_run {
         let plan: Vec<Value> = steps.iter().map(|s| {
-            json!({ "step": s, "cmd": build_step_cmd_resolved(chip, &chip_path, board, s) })
+            json!({ "step": s, "cmd": build_step_cmd_resolved(chip, &chip_path, &board, s, manifest.as_ref(), sim_target, synth_target) })
         }).collect();
         return Ok(ToolResult::json(&json!({
             "chip": chip,
@@ -341,7 +345,7 @@ pub fn chip_build_pipeline(args: &Value, store: &Arc<JobStore>) -> Result<ToolRe
     let mut overall_success = true;
 
     for step in &steps {
-        let cmd = build_step_cmd_resolved(chip, &chip_path, board, step);
+        let cmd = build_step_cmd_resolved(chip, &chip_path, &board, step, manifest.as_ref(), sim_target, synth_target);
         if cmd.is_empty() {
             step_results.push(json!({ "step": step, "skipped": true, "reason": "unsupported step" }));
             continue;
@@ -360,15 +364,17 @@ pub fn chip_build_pipeline(args: &Value, store: &Arc<JobStore>) -> Result<ToolRe
         } else {
             let cwd = chip_path.clone();
             let raw = run(&cmd, &cwd, &[], "", Duration::from_secs(300));
-            let success = raw["success"].as_bool().unwrap_or(false);
+            let exec = normalize_exec_result(&raw);
+            let success = exec.success;
             if !success { overall_success = false; }
             json!({
                 "step": step,
                 "success": success,
                 "cmd": cmd,
-                "stdout": raw["stdout"],
-                "stderr": raw["stderr"],
-                "duration_ms": raw["duration_ms"],
+                "stdout": exec.stdout,
+                "stderr": exec.stderr,
+                "duration_ms": exec.duration_ms,
+                "exit_code": exec.exit_code,
             })
         };
 
@@ -394,9 +400,11 @@ pub fn rtl_regression_run(args: &Value) -> Result<ToolResult, String> {
     let lab_path = args["lab_path"].as_str()
         .map(expand_tilde)
         .unwrap_or_else(|| expand_tilde("~/processor_lab"));
-    let board = args["board"].as_str().unwrap_or("basys3");
+    let requested_board = args["board"].as_str().unwrap_or("basys3");
     let dry_run = args["dry_run"].as_bool().unwrap_or(false);
     let timeout_secs = args["timeout_secs"].as_u64().unwrap_or(300);
+    let sim_target = args["sim_target"].as_str();
+    let synth_target = args["synth_target"].as_str();
     let steps: Vec<&str> = args["steps"].as_array()
         .map(|a| a.iter().filter_map(|v| v.as_str()).collect())
         .unwrap_or_else(|| vec!["lint", "sim"]);
@@ -405,10 +413,12 @@ pub fn rtl_regression_run(args: &Value) -> Result<ToolResult, String> {
     if !chip_path.exists() {
         return Err(format!("rtl_regression_run: chip '{}' not found at {}", chip, chip_path.display()));
     }
+    let manifest = load_fpga_manifest_with_override(&chip_path, args["manifest_path"].as_str());
+    let board = manifest_board_or_default(manifest.as_ref(), requested_board);
 
     if dry_run {
         let plan: Vec<Value> = steps.iter().map(|s| {
-            json!({ "step": s, "cmd": build_step_cmd_resolved(chip, &chip_path, board, s) })
+            json!({ "step": s, "cmd": build_step_cmd_resolved(chip, &chip_path, &board, s, manifest.as_ref(), sim_target, synth_target) })
         }).collect();
         return Ok(ToolResult::json(&json!({
             "chip": chip,
@@ -418,38 +428,137 @@ pub fn rtl_regression_run(args: &Value) -> Result<ToolResult, String> {
         })));
     }
 
-    let mut step_results = Vec::new();
-    let mut overall_success = true;
-    for step in &steps {
-        let cmd = build_step_cmd_resolved(chip, &chip_path, board, step);
-        if cmd.is_empty() {
-            step_results.push(json!({ "step": step, "skipped": true, "reason": "unsupported or unresolved step" }));
-            continue;
-        }
-
-        let raw = run(&cmd, &chip_path, &[], "", Duration::from_secs(timeout_secs));
-        let success = raw["success"].as_bool().unwrap_or(false);
-        if !success {
-            overall_success = false;
-        }
-        step_results.push(json!({
-            "step": step,
-            "success": success,
-            "cmd": cmd,
-            "stdout": raw["stdout"],
-            "stderr": raw["stderr"],
-            "duration_ms": raw["duration_ms"],
-        }));
-        if !success {
-            break;
-        }
-    }
+    let (step_results, overall_success) = execute_regression_steps(
+        chip,
+        &chip_path,
+        &board,
+        manifest.as_ref(),
+        sim_target,
+        synth_target,
+        &steps,
+        timeout_secs,
+    );
 
     Ok(ToolResult::json(&json!({
         "chip": chip,
         "board": board,
         "overall_success": overall_success,
         "steps": step_results,
+    })))
+}
+
+pub fn rtl_regression_report(args: &Value) -> Result<ToolResult, String> {
+    let chip = args["chip"].as_str().ok_or("rtl_regression_report: 'chip' is required")?;
+    let lab_path = args["lab_path"].as_str()
+        .map(expand_tilde)
+        .unwrap_or_else(|| expand_tilde("~/processor_lab"));
+    let requested_board = args["board"].as_str().unwrap_or("basys3");
+    let timeout_secs = args["timeout_secs"].as_u64().unwrap_or(300);
+    let include_logs = args["include_logs"].as_bool().unwrap_or(false);
+    let sim_target = args["sim_target"].as_str();
+    let synth_target = args["synth_target"].as_str();
+    let steps: Vec<&str> = args["steps"].as_array()
+        .map(|a| a.iter().filter_map(|v| v.as_str()).collect())
+        .unwrap_or_else(|| vec!["lint", "sim"]);
+
+    let chip_path = lab_path.join("chips").join(chip);
+    if !chip_path.exists() {
+        return Err(format!("rtl_regression_report: chip '{}' not found at {}", chip, chip_path.display()));
+    }
+    let manifest = load_fpga_manifest_with_override(&chip_path, args["manifest_path"].as_str());
+    let board = manifest_board_or_default(manifest.as_ref(), requested_board);
+
+    let (step_results, overall_success) = execute_regression_steps(
+        chip,
+        &chip_path,
+        &board,
+        manifest.as_ref(),
+        sim_target,
+        synth_target,
+        &steps,
+        timeout_secs,
+    );
+    let step_results = if include_logs {
+        step_results
+    } else {
+        step_results.into_iter().map(compact_step_result).collect()
+    };
+    let summary = summarize_regression(&step_results);
+    let artifacts = regression_artifacts(&chip_path, manifest.as_ref(), sim_target, synth_target);
+
+    Ok(ToolResult::json(&json!({
+        "chip": chip,
+        "board": board,
+        "overall_success": overall_success,
+        "summary": summary,
+        "artifacts": artifacts,
+        "steps": step_results,
+    })))
+}
+
+pub fn fpga_triage(args: &Value) -> Result<ToolResult, String> {
+    let chip = args["chip"].as_str().ok_or("fpga_triage: 'chip' is required")?;
+    let lab_path = args["lab_path"].as_str()
+        .map(expand_tilde)
+        .unwrap_or_else(|| expand_tilde("~/processor_lab"));
+    let requested_board = args["board"].as_str().unwrap_or("basys3");
+    let timeout_secs = args["timeout_secs"].as_u64().unwrap_or(300);
+    let sim_target = args["sim_target"].as_str();
+    let synth_target = args["synth_target"].as_str();
+    let steps: Vec<&str> = args["steps"].as_array()
+        .map(|a| a.iter().filter_map(|v| v.as_str()).collect())
+        .unwrap_or_else(|| vec!["lint", "sim"]);
+
+    let chip_path = lab_path.join("chips").join(chip);
+    if !chip_path.exists() {
+        return Err(format!("fpga_triage: chip '{}' not found at {}", chip, chip_path.display()));
+    }
+    let manifest = load_fpga_manifest_with_override(&chip_path, args["manifest_path"].as_str());
+    let board = manifest_board_or_default(manifest.as_ref(), requested_board);
+
+    let (step_results, overall_success) = execute_regression_steps(
+        chip,
+        &chip_path,
+        &board,
+        manifest.as_ref(),
+        sim_target,
+        synth_target,
+        &steps,
+        timeout_secs,
+    );
+    let summary = summarize_regression(&step_results);
+    let triage = build_triage(&step_results, manifest.as_ref(), sim_target, synth_target);
+    let artifacts = regression_artifacts(&chip_path, manifest.as_ref(), sim_target, synth_target);
+
+    Ok(ToolResult::json(&json!({
+        "chip": chip,
+        "board": board,
+        "overall_success": overall_success,
+        "summary": summary,
+        "triage": triage,
+        "artifacts": artifacts,
+    })))
+}
+
+pub fn fpga_artifacts(args: &Value) -> Result<ToolResult, String> {
+    let chip = args["chip"].as_str().ok_or("fpga_artifacts: 'chip' is required")?;
+    let lab_path = args["lab_path"].as_str()
+        .map(expand_tilde)
+        .unwrap_or_else(|| expand_tilde("~/processor_lab"));
+    let sim_target = args["sim_target"].as_str();
+    let synth_target = args["synth_target"].as_str();
+
+    let chip_path = lab_path.join("chips").join(chip);
+    if !chip_path.exists() {
+        return Err(format!("fpga_artifacts: chip '{}' not found at {}", chip, chip_path.display()));
+    }
+    let manifest = load_fpga_manifest_with_override(&chip_path, args["manifest_path"].as_str());
+    let artifacts = regression_artifacts(&chip_path, manifest.as_ref(), sim_target, synth_target);
+
+    Ok(ToolResult::json(&json!({
+        "chip": chip,
+        "artifact_count": count_artifacts(&artifacts),
+        "artifacts": artifacts,
     })))
 }
 
@@ -502,20 +611,28 @@ fn build_step_cmd(chip: &str, chip_path: &Path, board: &str, step: &str) -> Stri
     }
 }
 
-fn build_step_cmd_resolved(chip: &str, chip_path: &Path, board: &str, step: &str) -> String {
-    let manifest = load_fpga_manifest(chip_path);
+fn build_step_cmd_resolved(
+    chip: &str,
+    chip_path: &Path,
+    board: &str,
+    step: &str,
+    manifest: Option<&FpgaManifest>,
+    sim_target: Option<&str>,
+    synth_target: Option<&str>,
+) -> String {
     match step {
         "lint" => build_step_cmd(chip, chip_path, board, step),
-        "sim" => build_sim_cmd(chip_path, manifest.as_ref()),
-        "synth" => build_synth_cmd(chip, chip_path, board, manifest.as_ref()),
-        "program" => build_program_cmd(chip, chip_path, manifest.as_ref()),
-        "validate" => build_sim_cmd(chip_path, manifest.as_ref()),
+        "sim" => build_sim_cmd(chip_path, manifest, sim_target),
+        "synth" => build_synth_cmd(chip, chip_path, board, manifest, synth_target),
+        "program" => build_program_cmd(chip, chip_path, manifest, synth_target),
+        "validate" => build_sim_cmd(chip_path, manifest, sim_target),
         _ => String::new(),
     }
 }
 
 #[derive(Debug, Deserialize)]
 struct FpgaManifest {
+    project: Option<ProjectEntry>,
     #[serde(default)]
     cocotb: Vec<CocotbEntry>,
     #[serde(default)]
@@ -523,12 +640,22 @@ struct FpgaManifest {
 }
 
 #[derive(Debug, Deserialize)]
+struct ProjectEntry {
+    board: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
 struct CocotbEntry {
+    name: Option<String>,
     dir: String,
+    mode: Option<String>,
+    module: Option<String>,
+    sim: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
 struct SynthEntry {
+    name: Option<String>,
     tcl: String,
     bitstream: Option<String>,
 }
@@ -538,47 +665,142 @@ fn load_fpga_manifest(chip_path: &Path) -> Option<FpgaManifest> {
     toml::from_str(&text).ok()
 }
 
-fn build_sim_cmd(chip_path: &Path, manifest: Option<&FpgaManifest>) -> String {
-    let sim_dirs = manifest
-        .map(|m| {
-            m.cocotb.iter()
-                .map(|entry| chip_path.join(&entry.dir))
-                .filter(|dir| dir.is_dir())
-                .collect::<Vec<_>>()
-        })
-        .filter(|dirs| !dirs.is_empty())
-        .unwrap_or_else(|| discover_sim_dirs(chip_path));
+fn load_fpga_manifest_with_override(chip_path: &Path, manifest_path: Option<&str>) -> Option<FpgaManifest> {
+    if let Some(path) = manifest_path {
+        let text = std::fs::read_to_string(expand_tilde(path)).ok()?;
+        return toml::from_str(&text).ok();
+    }
+    load_fpga_manifest(chip_path)
+}
 
-    if sim_dirs.is_empty() {
+fn manifest_board_or_default(manifest: Option<&FpgaManifest>, board: &str) -> String {
+    manifest
+        .and_then(|m| m.project.as_ref())
+        .and_then(|p| p.board.clone())
+        .unwrap_or_else(|| board.to_owned())
+}
+
+fn selected_cocotb_entries<'a>(
+    manifest: Option<&'a FpgaManifest>,
+    sim_target: Option<&str>,
+) -> Vec<&'a CocotbEntry> {
+    let Some(manifest) = manifest else { return Vec::new(); };
+    let mut entries: Vec<&CocotbEntry> = manifest.cocotb.iter().collect();
+    if let Some(target) = sim_target {
+        entries.retain(|entry| entry.name.as_deref() == Some(target));
+    }
+    entries
+}
+
+fn selected_synth_entry<'a>(
+    manifest: Option<&'a FpgaManifest>,
+    synth_target: Option<&str>,
+) -> Option<&'a SynthEntry> {
+    let manifest = manifest?;
+    if let Some(target) = synth_target {
+        manifest.synth.iter().find(|entry| entry.name.as_deref() == Some(target))
+    } else {
+        manifest.synth.first()
+    }
+}
+
+fn cocotb_entry_cmd(chip_path: &Path, entry: &CocotbEntry) -> Option<String> {
+    let dir = chip_path.join(&entry.dir);
+    if !dir.is_dir() {
+        return None;
+    }
+    let sim_dir = shell_single_quote(&dir.display().to_string());
+    let sim = entry.sim.as_deref().unwrap_or("icarus");
+    let mode = entry.mode.as_deref().unwrap_or("auto");
+    let module_env = entry
+        .module
+        .as_ref()
+        .map(|module| format!(" MODULE={}", shell_single_quote(module)))
+        .unwrap_or_default();
+    let cmd = match mode {
+        "makefile" => format!(
+            "(cd {sim_dir} && SIM={}{} make 2>&1)",
+            shell_single_quote(sim),
+            module_env
+        ),
+        "pytest" => {
+            if let Some(module) = entry.module.as_ref() {
+                format!(
+                    "(cd {sim_dir} && SIM={} python3 -m pytest -x -q {} 2>&1)",
+                    shell_single_quote(sim),
+                    shell_single_quote(module)
+                )
+            } else {
+                format!(
+                    "(cd {sim_dir} && SIM={} python3 -m pytest -x -q 2>&1)",
+                    shell_single_quote(sim)
+                )
+            }
+        }
+        _ => format!(
+            "if [ -f {sim_dir}/Makefile ]; then (cd {sim_dir} && SIM={}{} make 2>&1); else (cd {sim_dir} && SIM={} python3 -m pytest -x -q{} 2>&1); fi",
+            shell_single_quote(sim),
+            module_env,
+            shell_single_quote(sim),
+            entry.module.as_ref().map(|module| format!(" {}", shell_single_quote(module))).unwrap_or_default()
+        ),
+    };
+    Some(cmd)
+}
+
+fn build_sim_cmd(chip_path: &Path, manifest: Option<&FpgaManifest>, sim_target: Option<&str>) -> String {
+    let manifest_entries = selected_cocotb_entries(manifest, sim_target);
+    let sim_cmds = if !manifest_entries.is_empty() {
+        manifest_entries
+            .into_iter()
+            .filter_map(|entry| cocotb_entry_cmd(chip_path, entry))
+            .collect::<Vec<_>>()
+    } else {
+        let sim_dirs = discover_sim_dirs(chip_path);
+        sim_dirs
+            .iter()
+            .map(|dir| {
+                let quoted = shell_single_quote(&dir.display().to_string());
+                format!(
+                    "if [ -f {quoted}/Makefile ]; then (cd {quoted} && make SIM=icarus 2>&1); else (cd {quoted} && python3 -m pytest -x -q 2>&1); fi"
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+
+    if sim_cmds.is_empty() {
         return String::new();
     }
 
-    let joined = sim_dirs
-        .iter()
-        .map(|dir| shell_single_quote(&dir.display().to_string()))
-        .collect::<Vec<_>>()
-        .join(" ");
-    format!(
-        "for sim_dir in {joined}; do if [ -f \"$sim_dir/Makefile\" ]; then (cd \"$sim_dir\" && make SIM=icarus 2>&1); else (cd \"$sim_dir\" && python3 -m pytest -x -q 2>&1); fi; done"
-    )
+    sim_cmds.join(" && ")
 }
 
-fn build_synth_cmd(chip: &str, chip_path: &Path, board: &str, manifest: Option<&FpgaManifest>) -> String {
+fn build_synth_cmd(
+    chip: &str,
+    chip_path: &Path,
+    board: &str,
+    manifest: Option<&FpgaManifest>,
+    synth_target: Option<&str>,
+) -> String {
     let vivado = "/opt/2025.2/Vivado/bin/vivado";
-    let tcl = manifest
-        .and_then(|m| m.synth.first())
+    let board_name = manifest_board_or_default(manifest, board);
+    let tcl = selected_synth_entry(manifest, synth_target)
         .map(|entry| chip_path.join(&entry.tcl))
         .filter(|path| path.exists())
-        .or_else(|| discover_synth_tcl(chip, chip_path, board));
+        .or_else(|| discover_synth_tcl(chip, chip_path, &board_name));
     match tcl {
         Some(tcl) => format!("{vivado} -mode batch -source {}", tcl.display()),
         None => String::new(),
     }
 }
 
-fn build_program_cmd(chip: &str, chip_path: &Path, manifest: Option<&FpgaManifest>) -> String {
-    let bit = manifest
-        .and_then(|m| m.synth.first())
+fn build_program_cmd(
+    chip: &str,
+    chip_path: &Path,
+    manifest: Option<&FpgaManifest>,
+    synth_target: Option<&str>,
+) -> String {
+    let bit = selected_synth_entry(manifest, synth_target)
         .and_then(|entry| entry.bitstream.as_ref())
         .map(|bit| chip_path.join(bit))
         .filter(|path| path.exists())
@@ -651,6 +873,354 @@ fn discover_bitstream(chip: &str, chip_path: &Path) -> Option<PathBuf> {
 
 fn shell_single_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\"'\"'"))
+}
+
+fn execute_regression_steps(
+    chip: &str,
+    chip_path: &Path,
+    board: &str,
+    manifest: Option<&FpgaManifest>,
+    sim_target: Option<&str>,
+    synth_target: Option<&str>,
+    steps: &[&str],
+    timeout_secs: u64,
+) -> (Vec<Value>, bool) {
+    let mut step_results = Vec::new();
+    let mut overall_success = true;
+    for step in steps {
+        let cmd = build_step_cmd_resolved(chip, chip_path, board, step, manifest, sim_target, synth_target);
+        if cmd.is_empty() {
+            step_results.push(json!({ "step": step, "skipped": true, "reason": "unsupported or unresolved step" }));
+            continue;
+        }
+
+        let raw = run(&cmd, chip_path, &[], "", Duration::from_secs(timeout_secs));
+        let exec = normalize_exec_result(&raw);
+        let success = exec.success;
+        if !success {
+            overall_success = false;
+        }
+        step_results.push(json!({
+            "step": step,
+            "success": success,
+            "cmd": cmd,
+            "stdout": exec.stdout,
+            "stderr": exec.stderr,
+            "duration_ms": exec.duration_ms,
+            "exit_code": exec.exit_code,
+            "failure_kind": classify_regression_failure(step, &exec),
+        }));
+        if !success {
+            break;
+        }
+    }
+    (step_results, overall_success)
+}
+
+struct ExecResult {
+    success: bool,
+    stdout: Value,
+    stderr: Value,
+    duration_ms: Value,
+    exit_code: Value,
+}
+
+fn normalize_exec_result(raw: &Value) -> ExecResult {
+    let success = raw["success"]
+        .as_bool()
+        .or_else(|| raw["ok"].as_bool())
+        .unwrap_or(false);
+    let stdout = if raw.get("stdout").is_some() {
+        raw["stdout"].clone()
+    } else {
+        raw["out"].clone()
+    };
+    let stderr = raw.get("stderr").cloned().unwrap_or(Value::String(String::new()));
+    let duration_ms = if raw.get("duration_ms").is_some() {
+        raw["duration_ms"].clone()
+    } else {
+        raw["ms"].clone()
+    };
+    let exit_code = raw.get("exit_code").cloned().unwrap_or_else(|| {
+        if success {
+            json!(0)
+        } else {
+            Value::Null
+        }
+    });
+    ExecResult {
+        success,
+        stdout,
+        stderr,
+        duration_ms,
+        exit_code,
+    }
+}
+
+fn classify_regression_failure(step: &str, exec: &ExecResult) -> &'static str {
+    if exec.success {
+        return "none";
+    }
+    let stdout = exec.stdout.as_str().unwrap_or("");
+    let stderr = exec.stderr.as_str().unwrap_or("");
+    let combined = format!("{stdout}\n{stderr}").to_lowercase();
+    match step {
+        "lint" => {
+            if combined.contains("syntax error") {
+                "lint_syntax"
+            } else {
+                "lint_error"
+            }
+        }
+        "sim" | "validate" => {
+            if combined.contains("timed out") {
+                "sim_timeout"
+            } else if combined.contains("failed") || combined.contains("assert") {
+                "sim_failure"
+            } else {
+                "sim_error"
+            }
+        }
+        "synth" => "synth_error",
+        "program" => "program_error",
+        _ => "unknown",
+    }
+}
+
+fn summarize_regression(step_results: &[Value]) -> Value {
+    let total_steps = step_results.len();
+    let passed_steps = step_results.iter().filter(|s| s["success"].as_bool() == Some(true)).count();
+    let skipped_steps = step_results.iter().filter(|s| s["skipped"].as_bool() == Some(true)).count();
+    let first_failure = step_results.iter()
+        .find(|s| s["success"].as_bool() == Some(false))
+        .map(|s| json!({
+            "step": s["step"],
+            "failure_kind": s["failure_kind"],
+            "exit_code": s["exit_code"],
+        }));
+    json!({
+        "total_steps": total_steps,
+        "passed_steps": passed_steps,
+        "skipped_steps": skipped_steps,
+        "failed_steps": total_steps.saturating_sub(passed_steps + skipped_steps),
+        "first_failure": first_failure,
+    })
+}
+
+fn compact_step_result(step: Value) -> Value {
+    let stdout = step["stdout"].as_str().unwrap_or("");
+    let stderr = step["stderr"].as_str().unwrap_or("");
+    let mut compact = step.clone();
+    if let Some(obj) = compact.as_object_mut() {
+        obj.remove("stdout");
+        obj.remove("stderr");
+        obj.insert("stdout_preview".to_owned(), json!(truncate_preview(stdout, 280)));
+        obj.insert("stderr_preview".to_owned(), json!(truncate_preview(stderr, 280)));
+    }
+    compact
+}
+
+fn truncate_preview(s: &str, max_chars: usize) -> String {
+    if s.chars().count() <= max_chars {
+        return s.to_owned();
+    }
+    let trimmed: String = s.chars().take(max_chars).collect();
+    format!("{trimmed}...")
+}
+
+fn regression_artifacts(
+    chip_path: &Path,
+    manifest: Option<&FpgaManifest>,
+    sim_target: Option<&str>,
+    synth_target: Option<&str>,
+) -> Value {
+    let sim_artifacts: Vec<Value> = if !selected_cocotb_entries(manifest, sim_target).is_empty() {
+        selected_cocotb_entries(manifest, sim_target).into_iter().map(|entry| {
+            let dir = chip_path.join(&entry.dir);
+            json!({
+                "kind": "sim_dir",
+                "name": entry.name.clone().unwrap_or_else(|| entry.dir.clone()),
+                "path": dir.display().to_string(),
+                "results_xml": dir.join("results.xml").display().to_string(),
+                "results_xml_exists": dir.join("results.xml").exists(),
+                "vcd_files": discover_vcd_files(&dir),
+            })
+        }).collect()
+    } else {
+        discover_sim_dirs(chip_path).into_iter().map(|dir| {
+            json!({
+                "kind": "sim_dir",
+                "name": dir.file_name().and_then(|n| n.to_str()).unwrap_or("sim"),
+                "path": dir.display().to_string(),
+                "results_xml": dir.join("results.xml").display().to_string(),
+                "results_xml_exists": dir.join("results.xml").exists(),
+                "vcd_files": discover_vcd_files(&dir),
+            })
+        }).collect()
+    };
+
+    let synth_artifact = selected_synth_entry(manifest, synth_target)
+        .map(|entry| {
+            let tcl = chip_path.join(&entry.tcl);
+            let bitstream = entry.bitstream.as_ref().map(|b| chip_path.join(b));
+            json!({
+                "kind": "synth_target",
+                "name": entry.name.clone().unwrap_or_else(|| "default".to_owned()),
+                "tcl": tcl.display().to_string(),
+                "tcl_exists": tcl.exists(),
+                "bitstream": bitstream.as_ref().map(|b| b.display().to_string()),
+                "bitstream_exists": bitstream.as_ref().map(|b| b.exists()).unwrap_or(false),
+            })
+        });
+
+    json!({
+        "sim": sim_artifacts,
+        "synth": synth_artifact,
+    })
+}
+
+fn discover_vcd_files(dir: &Path) -> Vec<String> {
+    let Ok(entries) = std::fs::read_dir(dir) else { return Vec::new(); };
+    let mut files = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|v| v.to_str()) == Some("vcd") {
+            files.push(path.display().to_string());
+        }
+    }
+    files.sort();
+    files
+}
+
+fn count_artifacts(artifacts: &Value) -> usize {
+    let sim_count = artifacts["sim"].as_array().map(|a| a.len()).unwrap_or(0);
+    let synth_count = usize::from(!artifacts["synth"].is_null());
+    sim_count + synth_count
+}
+
+fn build_triage(
+    step_results: &[Value],
+    manifest: Option<&FpgaManifest>,
+    sim_target: Option<&str>,
+    synth_target: Option<&str>,
+) -> Value {
+    let Some(failure) = step_results.iter().find(|s| s["success"].as_bool() == Some(false)) else {
+        return json!({
+            "status": "green",
+            "severity": "info",
+            "root_cause": "none",
+            "confidence": "high",
+            "recommended_next_action": "advance_to_next_stage",
+            "recommended_tool": "chip_build_pipeline",
+            "notes": ["Regression passed for all executed steps."],
+        });
+    };
+
+    let step = failure["step"].as_str().unwrap_or("unknown");
+    let kind = failure["failure_kind"].as_str().unwrap_or("unknown");
+    let stdout = failure["stdout"].as_str().unwrap_or("");
+    let stderr = failure["stderr"].as_str().unwrap_or("");
+    let combined = format!("{stdout}\n{stderr}");
+
+    let (severity, root_cause, confidence, next_action, tool, notes): (&str, &str, &str, &str, &str, Vec<String>) =
+        match kind {
+            "lint_syntax" => (
+                "high",
+                "rtl_syntax_error",
+                "high",
+                "open_reported_file_and_fix_syntax",
+                "read_context",
+                extract_location_notes(&combined),
+            ),
+            "lint_error" => (
+                "high",
+                "rtl_lint_error",
+                "medium",
+                "inspect_lint_output_and_fix_rtl",
+                "read_context",
+                extract_location_notes(&combined),
+            ),
+            "sim_failure" => (
+                "high",
+                "simulation_failure",
+                "medium",
+                "inspect_test_output_then_query_waveform_or_testbench",
+                "waveform_query",
+                vec![format!("Simulation stage '{step}' reported a failing test or assertion.")],
+            ),
+            "sim_timeout" => (
+                "medium",
+                "simulation_timeout",
+                "medium",
+                "inspect_testbench_for_deadlock_or_increase_timeout",
+                "cocotb_run",
+                vec![format!("Simulation stage '{step}' timed out before completion.")],
+            ),
+            "synth_error" => (
+                "high",
+                "synthesis_failure",
+                "medium",
+                "inspect_vivado_output_and_tcl_entrypoint",
+                "vivado_tcl",
+                vec![manifest_synth_note(manifest, synth_target)],
+            ),
+            "program_error" => (
+                "high",
+                "board_programming_failure",
+                "medium",
+                "check_board_status_and_programming_target",
+                "board_status",
+                vec![manifest_synth_note(manifest, synth_target)],
+            ),
+            _ => (
+                "medium",
+                "unknown_failure",
+                "low",
+                "inspect_step_output",
+                "rtl_regression_report",
+                vec![format!("Unhandled failure kind '{kind}' in step '{step}'.")],
+            ),
+        };
+
+    json!({
+        "status": "red",
+        "severity": severity,
+        "root_cause": root_cause,
+        "confidence": confidence,
+        "failed_step": step,
+        "failed_kind": kind,
+        "recommended_next_action": next_action,
+        "recommended_tool": tool,
+        "selected_targets": {
+            "sim_target": sim_target,
+            "synth_target": synth_target,
+        },
+        "notes": notes,
+    })
+}
+
+fn extract_location_notes(output: &str) -> Vec<String> {
+    let mut notes = Vec::new();
+    for line in output.lines().take(4) {
+        if line.contains(':') {
+            notes.push(line.to_owned());
+        }
+    }
+    if notes.is_empty() {
+        notes.push("No explicit file:line location found in tool output.".to_owned());
+    }
+    notes
+}
+
+fn manifest_synth_note(manifest: Option<&FpgaManifest>, synth_target: Option<&str>) -> String {
+    if let Some(entry) = selected_synth_entry(manifest, synth_target) {
+        return format!(
+            "Selected synth target '{}' with Tcl '{}'.",
+            entry.name.as_deref().unwrap_or("default"),
+            entry.tcl
+        );
+    }
+    "No explicit synth target selected; using discovered project layout.".to_owned()
 }
 
 // ── board_status ──────────────────────────────────────────────────────────────
@@ -817,5 +1387,82 @@ pub fn expand_tilde(path: &str) -> PathBuf {
         PathBuf::from(path.replacen('~', &home, 1))
     } else {
         PathBuf::from(path)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{build_sim_cmd, count_artifacts, normalize_exec_result, CocotbEntry, FpgaManifest, ProjectEntry, SynthEntry};
+    use serde_json::json;
+    use std::fs;
+
+    #[test]
+    fn normalize_exec_result_handles_compact_success_shape() {
+        let exec = normalize_exec_result(&json!({
+            "ok": true,
+            "ms": 12,
+            "out": "clean success"
+        }));
+        assert!(exec.success);
+        assert_eq!(exec.stdout, json!("clean success"));
+        assert_eq!(exec.stderr, json!(""));
+        assert_eq!(exec.duration_ms, json!(12));
+        assert_eq!(exec.exit_code, json!(0));
+    }
+
+    #[test]
+    fn normalize_exec_result_handles_verbose_failure_shape() {
+        let exec = normalize_exec_result(&json!({
+            "success": false,
+            "exit_code": 2,
+            "duration_ms": 34,
+            "stdout": "",
+            "stderr": "failed"
+        }));
+        assert!(!exec.success);
+        assert_eq!(exec.stdout, json!(""));
+        assert_eq!(exec.stderr, json!("failed"));
+        assert_eq!(exec.duration_ms, json!(34));
+        assert_eq!(exec.exit_code, json!(2));
+    }
+
+    #[test]
+    fn build_sim_cmd_honors_manifest_mode_and_module() {
+        let root = std::env::temp_dir().join(format!("ferrite_project_test_{}", std::process::id()));
+        let sim_dir = root.join("ip/softmax/sim");
+        fs::create_dir_all(&sim_dir).unwrap();
+        fs::write(sim_dir.join("Makefile"), "all:\n\t@true\n").unwrap();
+
+        let manifest = FpgaManifest {
+            project: Some(ProjectEntry { board: Some("basys3".to_owned()) }),
+            cocotb: vec![CocotbEntry {
+                name: Some("softmax".to_owned()),
+                dir: "ip/softmax/sim".to_owned(),
+                mode: Some("makefile".to_owned()),
+                module: Some("test_softmax_lut".to_owned()),
+                sim: Some("icarus".to_owned()),
+            }],
+            synth: vec![SynthEntry {
+                name: Some("basys3_n6".to_owned()),
+                tcl: "top/basys3/tcl/build_n6_attn.tcl".to_owned(),
+                bitstream: Some("build/basys3_n6/attn_basys3_top_n6.bit".to_owned()),
+            }],
+        };
+
+        let cmd = build_sim_cmd(&root, Some(&manifest), Some("softmax"));
+        assert!(cmd.contains("make 2>&1"));
+        assert!(cmd.contains("MODULE='test_softmax_lut'"));
+        assert!(cmd.contains("SIM='icarus'"));
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn count_artifacts_counts_sim_and_synth_entries() {
+        let artifacts = json!({
+            "sim": [{ "kind": "sim_dir" }, { "kind": "sim_dir" }],
+            "synth": { "kind": "synth_target" }
+        });
+        assert_eq!(count_artifacts(&artifacts), 3);
     }
 }

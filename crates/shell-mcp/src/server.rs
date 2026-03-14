@@ -294,6 +294,11 @@ impl McpServer {
             "gpu_info"       => tools::hardware::gpu_info(args),
             "cpu_info"       => tools::hardware::cpu_info(args),
             "occupancy_calc" => tools::hardware::occupancy_calc(args),
+            "cuda_env_doctor" => tools::cuda::cuda_env_doctor(args, &self.state),
+            "cuda_artifacts"  => tools::cuda::cuda_artifacts(args, &self.state),
+            "cuda_triage"     => tools::cuda::cuda_triage(args, &self.state),
+            "cuda_regression_run" => tools::cuda::cuda_regression_run(args, &self.state),
+            "cuda_regression_report" => tools::cuda::cuda_regression_report(args, &self.state),
             // Code navigation
             "read_context"   => tools::code::read_context(args, &self.state),
             "grep_code"      => tools::code::grep_code(args, &self.state),
@@ -392,6 +397,9 @@ impl McpServer {
             "chip_status"         => tools::project::chip_status(args),
             "chip_build_pipeline" => tools::project::chip_build_pipeline(args, &self.store),
             "rtl_regression_run"  => tools::project::rtl_regression_run(args),
+            "rtl_regression_report" => tools::project::rtl_regression_report(args),
+            "fpga_triage" => tools::project::fpga_triage(args),
+            "fpga_artifacts" => tools::project::fpga_artifacts(args),
             "board_status"        => tools::project::board_status(args),
             "fpga_monitor"        => tools::project::fpga_monitor(args, &self.store),
             // Remote SSH (Tier 2)

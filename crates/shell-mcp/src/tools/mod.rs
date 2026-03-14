@@ -8,6 +8,7 @@ pub mod binary;
 pub mod code;
 pub mod control;
 pub mod config_ux;
+pub mod cuda;
 pub mod debug;
 pub mod discovery;
 pub mod dynamic;
@@ -108,6 +109,73 @@ pub fn all_tool_definitions() -> Vec<ToolDef> {
                     "compute_minor":        { "type": "integer", "description": "Override compute capability minor (e.g. 6)" }
                 },
                 "required": ["threads_per_block"]
+            }),
+        },
+        ToolDef {
+            name: "cuda_env_doctor",
+            description: "Check CUDA toolchain and GPU readiness. Returns tool presence/versions for nvcc, nvidia-smi, ncu, compute-sanitizer, and cuobjdump.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "description": "Optional project path for context (default: cwd)" }
+                }
+            }),
+        },
+        ToolDef {
+            name: "cuda_artifacts",
+            description: "Inventory CUDA project artifacts including .cu sources, PTX/profile outputs, built libraries, and executables.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "description": "Project root to scan (default: cwd)" },
+                    "max_results": { "type": "integer", "description": "Per-category result cap (default 20)" }
+                }
+            }),
+        },
+        ToolDef {
+            name: "cuda_triage",
+            description: "Classify CUDA command failures and recommend the next tool/action. Accepts either cmd+cwd to execute or stdout/stderr/exit_code directly.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "phase": { "type": "string", "description": "Phase label such as build, profile, or runtime" },
+                    "cmd": { "type": "string", "description": "Optional command to execute and classify" },
+                    "cwd": { "type": "string", "description": "Working directory for cmd (default: cwd)" },
+                    "timeout_secs": { "type": "integer", "description": "Timeout for cmd execution (default 120)" },
+                    "stdout": { "type": "string", "description": "Raw stdout to classify when cmd is not supplied" },
+                    "stderr": { "type": "string", "description": "Raw stderr to classify when cmd is not supplied" },
+                    "exit_code": { "type": "integer", "description": "Exit code to classify when cmd is not supplied" }
+                }
+            }),
+        },
+        ToolDef {
+            name: "cuda_regression_run",
+            description: "Run a compact CUDA validation flow using a project path, CTest targets, and optional benchmark command.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "description": "CUDA project root (default: cwd)" },
+                    "steps": { "type": "array", "items": { "type": "string" }, "description": "Steps to run (default: [env, test])" },
+                    "test_target": { "type": "string", "description": "Optional exact CTest target name to run" },
+                    "benchmark_cmd": { "type": "string", "description": "Optional benchmark command for the benchmark step" },
+                    "timeout_secs": { "type": "integer", "description": "Per-step timeout in seconds (default 120)" },
+                    "dry_run": { "type": "boolean", "description": "Show resolved commands without running them" }
+                }
+            }),
+        },
+        ToolDef {
+            name: "cuda_regression_report",
+            description: "Run a compact CUDA validation flow and return a hardened report with artifacts, triage, and summarized steps.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "description": "CUDA project root (default: cwd)" },
+                    "steps": { "type": "array", "items": { "type": "string" }, "description": "Steps to run (default: [env, test])" },
+                    "test_target": { "type": "string", "description": "Optional exact CTest target name to run" },
+                    "benchmark_cmd": { "type": "string", "description": "Optional benchmark command for the benchmark step" },
+                    "timeout_secs": { "type": "integer", "description": "Per-step timeout in seconds (default 120)" },
+                    "include_logs": { "type": "boolean", "description": "Include full stdout/stderr instead of previews (default false)" }
+                }
             }),
         },
 
@@ -593,17 +661,75 @@ pub fn all_tool_definitions() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "rtl_regression_run",
-            description: "Run a chip-level RTL regression flow using ferrite's path resolution. \
-                           Defaults to lint + sim and returns per-step results.",
+            description: "Run a chip-level RTL regression flow using ferrite's manifest-aware path resolution. \
+                           Agent-agnostic MCP tool; defaults to lint + sim and returns per-step results.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
                     "chip":         { "type": "string",  "description": "Chip name under processor_lab/chips" },
                     "lab_path":     { "type": "string",  "description": "Path to processor_lab (default ~/processor_lab)" },
+                    "manifest_path": { "type": "string",  "description": "Optional explicit path to ferrite_fpga.toml" },
                     "board":        { "type": "string",  "description": "Board target (default basys3)" },
+                    "sim_target":   { "type": "string",  "description": "Optional named cocotb entry from ferrite_fpga.toml" },
+                    "synth_target": { "type": "string",  "description": "Optional named synth entry from ferrite_fpga.toml" },
                     "steps":        { "type": "array",   "items": { "type": "string" }, "description": "Regression steps (default: [lint, sim])" },
                     "timeout_secs": { "type": "integer", "description": "Per-step timeout in seconds (default 300)" },
                     "dry_run":      { "type": "boolean", "description": "Show resolved commands without running them" }
+                },
+                "required": ["chip"]
+            }),
+        },
+        ToolDef {
+            name: "rtl_regression_report",
+            description: "Run a manifest-aware RTL regression and return a hardened summary with failure classification and artifact paths. \
+                           Intended as the stable FPGA analysis surface for any MCP client.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "chip":         { "type": "string",  "description": "Chip name under processor_lab/chips" },
+                    "lab_path":     { "type": "string",  "description": "Path to processor_lab (default ~/processor_lab)" },
+                    "manifest_path": { "type": "string",  "description": "Optional explicit path to ferrite_fpga.toml" },
+                    "board":        { "type": "string",  "description": "Board target (default basys3)" },
+                    "sim_target":   { "type": "string",  "description": "Optional named cocotb entry from ferrite_fpga.toml" },
+                    "synth_target": { "type": "string",  "description": "Optional named synth entry from ferrite_fpga.toml" },
+                    "steps":        { "type": "array",   "items": { "type": "string" }, "description": "Regression steps (default: [lint, sim])" },
+                    "timeout_secs": { "type": "integer", "description": "Per-step timeout in seconds (default 300)" },
+                    "include_logs": { "type": "boolean", "description": "Include full stdout/stderr in each step (default false)" }
+                },
+                "required": ["chip"]
+            }),
+        },
+        ToolDef {
+            name: "fpga_triage",
+            description: "Run FPGA regression triage and return root-cause classification plus the recommended next tool/action. \
+                           Hardened for agent use: compact, policy-oriented, and manifest-aware.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "chip":         { "type": "string",  "description": "Chip name under processor_lab/chips" },
+                    "lab_path":     { "type": "string",  "description": "Path to processor_lab (default ~/processor_lab)" },
+                    "manifest_path": { "type": "string",  "description": "Optional explicit path to ferrite_fpga.toml" },
+                    "board":        { "type": "string",  "description": "Board target (default basys3)" },
+                    "sim_target":   { "type": "string",  "description": "Optional named cocotb entry from ferrite_fpga.toml" },
+                    "synth_target": { "type": "string",  "description": "Optional named synth entry from ferrite_fpga.toml" },
+                    "steps":        { "type": "array",   "items": { "type": "string" }, "description": "Regression steps to evaluate (default: [lint, sim])" },
+                    "timeout_secs": { "type": "integer", "description": "Per-step timeout in seconds (default 300)" }
+                },
+                "required": ["chip"]
+            }),
+        },
+        ToolDef {
+            name: "fpga_artifacts",
+            description: "Return a manifest-aware inventory of FPGA verification and build artifacts for a chip. \
+                           Stable read-only surface for any MCP client.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "chip":         { "type": "string",  "description": "Chip name under processor_lab/chips" },
+                    "lab_path":     { "type": "string",  "description": "Path to processor_lab (default ~/processor_lab)" },
+                    "manifest_path": { "type": "string",  "description": "Optional explicit path to ferrite_fpga.toml" },
+                    "sim_target":   { "type": "string",  "description": "Optional named cocotb entry from ferrite_fpga.toml" },
+                    "synth_target": { "type": "string",  "description": "Optional named synth entry from ferrite_fpga.toml" }
                 },
                 "required": ["chip"]
             }),
@@ -1300,15 +1426,18 @@ pub fn all_tool_definitions() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "chip_build_pipeline",
-            description: "Run a full RTL flow for one chip: lint → sim → synth → program → validate. \
+            description: "Run a manifest-aware RTL flow for one chip: lint -> sim -> synth -> program -> validate. \
                 Synth runs as a background job (returns job_id). Other steps run inline. \
-                Returns per-step results and overall success.",
+                Works as a generic MCP workflow for Claude Code, Codex, or any other MCP client.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
                     "chip":     { "type": "string", "description": "Chip name (required, e.g. 'rope_attn')" },
                     "lab_path": { "type": "string", "description": "Path to processor_lab (default: ~/processor_lab)" },
+                    "manifest_path": { "type": "string", "description": "Optional explicit path to ferrite_fpga.toml" },
                     "board":    { "type": "string", "description": "Target board (default: basys3)" },
+                    "sim_target":   { "type": "string", "description": "Optional named cocotb entry from ferrite_fpga.toml" },
+                    "synth_target": { "type": "string", "description": "Optional named synth entry from ferrite_fpga.toml" },
                     "steps": {
                         "type": "array",
                         "items": { "type": "string", "enum": ["lint", "sim", "synth", "program", "validate"] },

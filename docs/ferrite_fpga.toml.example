@@ -1,0 +1,15 @@
+[project]
+name = "attn"
+board = "basys3"
+
+[[cocotb]]
+name = "softmax"
+dir = "ip/softmax/sim"
+mode = "makefile"
+module = "test_softmax_lut"
+sim = "icarus"
+
+[[synth]]
+name = "basys3_n6"
+tcl = "top/basys3/tcl/build_n6_attn.tcl"
+bitstream = "build/basys3_n6/attn_basys3_top_n6.bit"
