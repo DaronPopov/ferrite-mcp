@@ -442,6 +442,14 @@ fn cocotb_makefile_mode(dir: &Path) -> bool {
 }
 
 #[derive(Debug, Deserialize)]
+struct JunitSuites {
+    #[serde(rename = "testsuite", default)]
+    testsuites: Vec<JunitSuite>,
+    #[serde(rename = "testcase", default)]
+    testcases: Vec<JunitCase>,
+}
+
+#[derive(Debug, Deserialize)]
 struct JunitSuite {
     #[serde(rename = "testcase", default)]
     testcases: Vec<JunitCase>,
@@ -459,10 +467,15 @@ struct JunitCase {
 
 fn parse_results_xml(path: &Path) -> Option<(Vec<Value>, Vec<Value>)> {
     let text = std::fs::read_to_string(path).ok()?;
-    let suite: JunitSuite = quick_xml::de::from_str(&text).ok()?;
+    let suites: JunitSuites = quick_xml::de::from_str(&text).ok()?;
     let mut passed = Vec::new();
     let mut failed = Vec::new();
-    for case in suite.testcases {
+    let cases = if !suites.testcases.is_empty() {
+        suites.testcases
+    } else {
+        suites.testsuites.into_iter().flat_map(|suite| suite.testcases).collect()
+    };
+    for case in cases {
         let name = match (case.classname.as_deref(), case.name.as_deref()) {
             (Some(class), Some(name)) => format!("{class}.{name}"),
             (None, Some(name)) => name.to_owned(),
@@ -476,7 +489,11 @@ fn parse_results_xml(path: &Path) -> Option<(Vec<Value>, Vec<Value>)> {
             passed.push(item);
         }
     }
-    Some((passed, failed))
+    if passed.is_empty() && failed.is_empty() {
+        None
+    } else {
+        Some((passed, failed))
+    }
 }
 
 // ── vivado_tcl ────────────────────────────────────────────────────────────────
