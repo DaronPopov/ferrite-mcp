@@ -15,4 +15,5 @@ glob       = { workspace = true }
 regex      = { workspace = true }
 nix        = { workspace = true }
 libc       = { workspace = true }
+quick-xml  = { version = "0.38", features = ["serialize"] }
 fercuda-ffi = { path = "../../../../home/daron/feRcuda/rust/fercuda-ffi" }

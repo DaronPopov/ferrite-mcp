@@ -12,6 +12,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+use serde::Deserialize;
 use serde_json::{json, Value};
 
 use crate::protocol::ToolResult;
@@ -320,12 +321,13 @@ pub fn cocotb_run(args: &Value) -> Result<ToolResult, String> {
         return Ok(ToolResult::error(format!("cocotb_run: dir not found: {dir}")));
     }
 
-    // cocotb 2.x: prefer pytest if available, else fall back to make
-    let use_pytest = std::process::Command::new("python3")
+    let makefile_mode = cocotb_makefile_mode(&dir_path);
+    let pytest_available = std::process::Command::new("python3")
         .args(["-m", "pytest", "--version"])
         .output()
         .map(|o| o.status.success())
         .unwrap_or(false);
+    let use_pytest = !makefile_mode && pytest_available;
 
     let start    = std::time::Instant::now();
     let deadline = start + std::time::Duration::from_secs(timeout);
@@ -376,12 +378,15 @@ pub fn cocotb_run(args: &Value) -> Result<ToolResult, String> {
     let (passed, failed) = if use_pytest {
         parse_pytest_output(&combined)
     } else {
-        parse_cocotb_make_output(&combined)
+        let parsed = parse_results_xml(&dir_path.join("results.xml"))
+            .unwrap_or_else(|| parse_cocotb_make_output(&combined));
+        parsed
     };
 
     Ok(ToolResult::json(&json!({
         "success":     out.status.success(),
         "runner":      if use_pytest { "pytest" } else { "make" },
+        "mode":        if use_pytest { "pytest" } else if makefile_mode { "makefile" } else { "make" },
         "simulator":   simulator,
         "passed":      passed,
         "failed":      failed,
@@ -423,6 +428,55 @@ fn parse_cocotb_make_output(output: &str) -> (Vec<Value>, Vec<Value>) {
         }
     }
     (passed, failed)
+}
+
+fn cocotb_makefile_mode(dir: &Path) -> bool {
+    let makefile = dir.join("Makefile");
+    if !makefile.exists() {
+        return false;
+    }
+    let content = std::fs::read_to_string(makefile).unwrap_or_default();
+    content.contains("cocotb-config --makefiles")
+        || content.contains("Makefile.sim")
+        || content.contains("COCOTB_TEST_MODULES")
+}
+
+#[derive(Debug, Deserialize)]
+struct JunitSuite {
+    #[serde(rename = "testcase", default)]
+    testcases: Vec<JunitCase>,
+}
+
+#[derive(Debug, Deserialize)]
+struct JunitCase {
+    #[serde(rename = "@classname")]
+    classname: Option<String>,
+    #[serde(rename = "@name")]
+    name: Option<String>,
+    failure: Option<Value>,
+    error: Option<Value>,
+}
+
+fn parse_results_xml(path: &Path) -> Option<(Vec<Value>, Vec<Value>)> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let suite: JunitSuite = quick_xml::de::from_str(&text).ok()?;
+    let mut passed = Vec::new();
+    let mut failed = Vec::new();
+    for case in suite.testcases {
+        let name = match (case.classname.as_deref(), case.name.as_deref()) {
+            (Some(class), Some(name)) => format!("{class}.{name}"),
+            (None, Some(name)) => name.to_owned(),
+            (Some(class), None) => class.to_owned(),
+            (None, None) => continue,
+        };
+        let item = json!({ "name": name });
+        if case.failure.is_some() || case.error.is_some() {
+            failed.push(item);
+        } else {
+            passed.push(item);
+        }
+    }
+    Some((passed, failed))
 }
 
 // ── vivado_tcl ────────────────────────────────────────────────────────────────

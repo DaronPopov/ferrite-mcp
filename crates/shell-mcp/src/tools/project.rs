@@ -12,6 +12,7 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Duration;
 
+use serde::Deserialize;
 use serde_json::{json, Value};
 
 use crate::job_store::JobStore;
@@ -326,7 +327,7 @@ pub fn chip_build_pipeline(args: &Value, store: &Arc<JobStore>) -> Result<ToolRe
 
     if dry_run {
         let plan: Vec<Value> = steps.iter().map(|s| {
-            json!({ "step": s, "cmd": build_step_cmd(chip, &chip_path, board, s) })
+            json!({ "step": s, "cmd": build_step_cmd_resolved(chip, &chip_path, board, s) })
         }).collect();
         return Ok(ToolResult::json(&json!({
             "chip": chip,
@@ -340,7 +341,7 @@ pub fn chip_build_pipeline(args: &Value, store: &Arc<JobStore>) -> Result<ToolRe
     let mut overall_success = true;
 
     for step in &steps {
-        let cmd = build_step_cmd(chip, &chip_path, board, step);
+        let cmd = build_step_cmd_resolved(chip, &chip_path, board, step);
         if cmd.is_empty() {
             step_results.push(json!({ "step": step, "skipped": true, "reason": "unsupported step" }));
             continue;
@@ -435,6 +436,157 @@ fn build_step_cmd(chip: &str, chip_path: &Path, board: &str, step: &str) -> Stri
         }
         _ => String::new(),
     }
+}
+
+fn build_step_cmd_resolved(chip: &str, chip_path: &Path, board: &str, step: &str) -> String {
+    let manifest = load_fpga_manifest(chip_path);
+    match step {
+        "lint" => build_step_cmd(chip, chip_path, board, step),
+        "sim" => build_sim_cmd(chip_path, manifest.as_ref()),
+        "synth" => build_synth_cmd(chip, chip_path, board, manifest.as_ref()),
+        "program" => build_program_cmd(chip, chip_path, manifest.as_ref()),
+        "validate" => build_sim_cmd(chip_path, manifest.as_ref()),
+        _ => String::new(),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct FpgaManifest {
+    #[serde(default)]
+    cocotb: Vec<CocotbEntry>,
+    #[serde(default)]
+    synth: Vec<SynthEntry>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CocotbEntry {
+    dir: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct SynthEntry {
+    tcl: String,
+    bitstream: Option<String>,
+}
+
+fn load_fpga_manifest(chip_path: &Path) -> Option<FpgaManifest> {
+    let text = std::fs::read_to_string(chip_path.join("ferrite_fpga.toml")).ok()?;
+    toml::from_str(&text).ok()
+}
+
+fn build_sim_cmd(chip_path: &Path, manifest: Option<&FpgaManifest>) -> String {
+    let sim_dirs = manifest
+        .map(|m| {
+            m.cocotb.iter()
+                .map(|entry| chip_path.join(&entry.dir))
+                .filter(|dir| dir.is_dir())
+                .collect::<Vec<_>>()
+        })
+        .filter(|dirs| !dirs.is_empty())
+        .unwrap_or_else(|| discover_sim_dirs(chip_path));
+
+    if sim_dirs.is_empty() {
+        return String::new();
+    }
+
+    let joined = sim_dirs
+        .iter()
+        .map(|dir| shell_single_quote(&dir.display().to_string()))
+        .collect::<Vec<_>>()
+        .join(" ");
+    format!(
+        "for sim_dir in {joined}; do if [ -f \"$sim_dir/Makefile\" ]; then (cd \"$sim_dir\" && make SIM=icarus 2>&1); else (cd \"$sim_dir\" && python3 -m pytest -x -q 2>&1); fi; done"
+    )
+}
+
+fn build_synth_cmd(chip: &str, chip_path: &Path, board: &str, manifest: Option<&FpgaManifest>) -> String {
+    let vivado = "/opt/2025.2/Vivado/bin/vivado";
+    let tcl = manifest
+        .and_then(|m| m.synth.first())
+        .map(|entry| chip_path.join(&entry.tcl))
+        .filter(|path| path.exists())
+        .or_else(|| discover_synth_tcl(chip, chip_path, board));
+    match tcl {
+        Some(tcl) => format!("{vivado} -mode batch -source {}", tcl.display()),
+        None => String::new(),
+    }
+}
+
+fn build_program_cmd(chip: &str, chip_path: &Path, manifest: Option<&FpgaManifest>) -> String {
+    let bit = manifest
+        .and_then(|m| m.synth.first())
+        .and_then(|entry| entry.bitstream.as_ref())
+        .map(|bit| chip_path.join(bit))
+        .filter(|path| path.exists())
+        .or_else(|| discover_bitstream(chip, chip_path));
+    match bit {
+        Some(bit) => format!(
+            "/opt/2025.2/Vivado/bin/vivado -mode batch -source /dev/stdin <<'EOF'\nopen_hw_manager\nconnect_hw_server\nopen_hw_target\nset_property PROGRAM.FILE {} [current_hw_device]\nprogram_hw_devices\nEOF",
+            bit.display()
+        ),
+        None => String::new(),
+    }
+}
+
+fn discover_sim_dirs(chip_path: &Path) -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    let Ok(entries) = std::fs::read_dir(chip_path.join("ip")) else { return dirs; };
+    for entry in entries.flatten() {
+        let sim = entry.path().join("sim");
+        if sim.is_dir() {
+            dirs.push(sim);
+        }
+    }
+    dirs
+}
+
+fn discover_synth_tcl(chip: &str, chip_path: &Path, board: &str) -> Option<PathBuf> {
+    let mut fallback = None;
+    let Ok(entries) = std::fs::read_dir(chip_path.join("top").join(board).join("tcl")) else { return None; };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let name = path.file_name().and_then(|v| v.to_str()).unwrap_or_default();
+        if !name.ends_with(".tcl") {
+            continue;
+        }
+        if name.starts_with("build") && name.contains(chip) {
+            return Some(path);
+        }
+        if fallback.is_none() && name.starts_with("build") {
+            fallback = Some(path);
+        }
+    }
+    fallback
+}
+
+fn discover_bitstream(chip: &str, chip_path: &Path) -> Option<PathBuf> {
+    let mut stack = vec![chip_path.join("build")];
+    let mut fallback = None;
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(dir) else { continue; };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+                continue;
+            }
+            if path.extension().and_then(|v| v.to_str()) != Some("bit") {
+                continue;
+            }
+            let name = path.file_name().and_then(|v| v.to_str()).unwrap_or_default();
+            if name.contains(chip) {
+                return Some(path);
+            }
+            if fallback.is_none() {
+                fallback = Some(path);
+            }
+        }
+    }
+    fallback
+}
+
+fn shell_single_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\"'\"'"))
 }
 
 // ── board_status ──────────────────────────────────────────────────────────────
