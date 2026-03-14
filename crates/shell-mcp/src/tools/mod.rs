@@ -592,6 +592,23 @@ pub fn all_tool_definitions() -> Vec<ToolDef> {
             }),
         },
         ToolDef {
+            name: "rtl_regression_run",
+            description: "Run a chip-level RTL regression flow using ferrite's path resolution. \
+                           Defaults to lint + sim and returns per-step results.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "chip":         { "type": "string",  "description": "Chip name under processor_lab/chips" },
+                    "lab_path":     { "type": "string",  "description": "Path to processor_lab (default ~/processor_lab)" },
+                    "board":        { "type": "string",  "description": "Board target (default basys3)" },
+                    "steps":        { "type": "array",   "items": { "type": "string" }, "description": "Regression steps (default: [lint, sim])" },
+                    "timeout_secs": { "type": "integer", "description": "Per-step timeout in seconds (default 300)" },
+                    "dry_run":      { "type": "boolean", "description": "Show resolved commands without running them" }
+                },
+                "required": ["chip"]
+            }),
+        },
+        ToolDef {
             name: "vivado_tcl",
             description: "Run Vivado 2025.2 in batch Tcl mode. \
                            Provide 'script' (file path) or 'cmd' (inline Tcl). \

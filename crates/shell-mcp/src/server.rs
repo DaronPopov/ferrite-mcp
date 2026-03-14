@@ -391,6 +391,7 @@ impl McpServer {
             "project_context"     => tools::project::project_context(args, &self.state),
             "chip_status"         => tools::project::chip_status(args),
             "chip_build_pipeline" => tools::project::chip_build_pipeline(args, &self.store),
+            "rtl_regression_run"  => tools::project::rtl_regression_run(args),
             "board_status"        => tools::project::board_status(args),
             "fpga_monitor"        => tools::project::fpga_monitor(args, &self.store),
             // Remote SSH (Tier 2)

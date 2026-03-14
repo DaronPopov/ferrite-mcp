@@ -389,6 +389,70 @@ pub fn chip_build_pipeline(args: &Value, store: &Arc<JobStore>) -> Result<ToolRe
     })))
 }
 
+pub fn rtl_regression_run(args: &Value) -> Result<ToolResult, String> {
+    let chip = args["chip"].as_str().ok_or("rtl_regression_run: 'chip' is required")?;
+    let lab_path = args["lab_path"].as_str()
+        .map(expand_tilde)
+        .unwrap_or_else(|| expand_tilde("~/processor_lab"));
+    let board = args["board"].as_str().unwrap_or("basys3");
+    let dry_run = args["dry_run"].as_bool().unwrap_or(false);
+    let timeout_secs = args["timeout_secs"].as_u64().unwrap_or(300);
+    let steps: Vec<&str> = args["steps"].as_array()
+        .map(|a| a.iter().filter_map(|v| v.as_str()).collect())
+        .unwrap_or_else(|| vec!["lint", "sim"]);
+
+    let chip_path = lab_path.join("chips").join(chip);
+    if !chip_path.exists() {
+        return Err(format!("rtl_regression_run: chip '{}' not found at {}", chip, chip_path.display()));
+    }
+
+    if dry_run {
+        let plan: Vec<Value> = steps.iter().map(|s| {
+            json!({ "step": s, "cmd": build_step_cmd_resolved(chip, &chip_path, board, s) })
+        }).collect();
+        return Ok(ToolResult::json(&json!({
+            "chip": chip,
+            "board": board,
+            "dry_run": true,
+            "plan": plan,
+        })));
+    }
+
+    let mut step_results = Vec::new();
+    let mut overall_success = true;
+    for step in &steps {
+        let cmd = build_step_cmd_resolved(chip, &chip_path, board, step);
+        if cmd.is_empty() {
+            step_results.push(json!({ "step": step, "skipped": true, "reason": "unsupported or unresolved step" }));
+            continue;
+        }
+
+        let raw = run(&cmd, &chip_path, &[], "", Duration::from_secs(timeout_secs));
+        let success = raw["success"].as_bool().unwrap_or(false);
+        if !success {
+            overall_success = false;
+        }
+        step_results.push(json!({
+            "step": step,
+            "success": success,
+            "cmd": cmd,
+            "stdout": raw["stdout"],
+            "stderr": raw["stderr"],
+            "duration_ms": raw["duration_ms"],
+        }));
+        if !success {
+            break;
+        }
+    }
+
+    Ok(ToolResult::json(&json!({
+        "chip": chip,
+        "board": board,
+        "overall_success": overall_success,
+        "steps": step_results,
+    })))
+}
+
 fn build_step_cmd(chip: &str, chip_path: &Path, board: &str, step: &str) -> String {
     match step {
         "lint" => {
