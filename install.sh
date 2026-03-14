@@ -16,6 +16,8 @@ set -e
 REPO="https://github.com/DaronPopov/ferrite-mcp"
 BIN="ferrite"
 CARGO_BIN="$HOME/.cargo/bin/$BIN"
+UP_BIN="ferrite-up"
+UP_CARGO_BIN="$HOME/.cargo/bin/$UP_BIN"
 
 find_ferrite_bin() {
     if command -v "$BIN" >/dev/null 2>&1; then
@@ -62,7 +64,7 @@ if [ -n "$LOCAL_PATH" ]; then
     cargo install --path "$LOCAL_PATH/crates/shell-bin"
 else
     inf "Building from $REPO ..."
-    cargo install --git "$REPO" shell-bin --bin "$BIN" --locked
+    cargo install --git "$REPO" shell-bin --bin "$BIN" --bin "$UP_BIN" --locked
 fi
 
 if ! FERRITE_BIN="$(find_ferrite_bin)"; then
@@ -73,6 +75,12 @@ elif [ "$ALREADY_INSTALLED" = "1" ]; then
     grn "ferrite updated"
 else
     grn "ferrite installed"
+fi
+
+if [ -x "$UP_CARGO_BIN" ] || command -v "$UP_BIN" >/dev/null 2>&1; then
+    grn "ferrite-up installed"
+else
+    yel "ferrite-up missing after install"
 fi
 
 echo ""
