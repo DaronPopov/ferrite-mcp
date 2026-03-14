@@ -96,3 +96,23 @@ Set these env vars on the `ferrite --mcp` process to make the server exit cleanl
 - `FERRITE_MCP_MAX_RSS_MB`
 
 Use the `health` tool to inspect current uptime, RSS, call count, job-buffer pressure, and whether restart is recommended.
+
+---
+
+## Remote SSH workflow
+
+For private remote hardware development, keep `ferrite` on the Linux workstation and reach it over SSH.
+
+```sh
+ferrite remote doctor
+ferrite remote up
+ferrite remote login-shell
+ferrite remote mcp-config <host> [user]
+```
+
+- `remote doctor` checks Tailscale, SSH, tmux, feRcuda, Vivado, and CUDA.
+- `remote up` prepares a tmux-backed session and prints the exact SSH attach command.
+- `remote login-shell` is intended for password-based SSH logins: it creates or reuses the tmux session and attaches immediately.
+- `remote mcp-config` prints the Mac-side Codex MCP stanza for `ssh ... ferrite --mcp`.
+
+For password-based access from outside your home network, prefer Tailscale plus SSH password auth over exposing port `22` directly to the public internet.
