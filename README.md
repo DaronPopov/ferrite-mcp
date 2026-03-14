@@ -104,12 +104,14 @@ Use the `health` tool to inspect current uptime, RSS, call count, job-buffer pre
 For private remote hardware development, keep `ferrite` on the Linux workstation and reach it over SSH.
 
 ```sh
+ferrite-up
 ferrite remote doctor
 ferrite remote up
 ferrite remote login-shell
 ferrite remote mcp-config <host> [user]
 ```
 
+- `ferrite-up` is the one-shot desktop command: it installs the SSH auto-attach hook, ensures the remote path is up, creates the tmux session, and prints the exact external login command.
 - `remote doctor` checks Tailscale, SSH, tmux, feRcuda, Vivado, and CUDA.
 - `remote up` prepares a tmux-backed session and prints the exact SSH attach command.
 - `remote login-shell` is intended for password-based SSH logins: it creates or reuses the tmux session and attaches immediately.
