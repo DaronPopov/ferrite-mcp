@@ -1,0 +1,7 @@
+[package]
+name        = "fercuda-ffi"
+description = "Stub feRcuda FFI for ferrite-mcp when feRcuda is not present. Point shell-mcp's fercuda-ffi path at your feRcuda checkout for native GPU support."
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
