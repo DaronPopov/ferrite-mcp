@@ -255,7 +255,7 @@ fn detect_ahead_behind(root: &PathBuf, branch: &str) -> (i64, i64) {
     }
 
     // Refresh remote tracking refs with a tight timeout (no hanging on bad SSH)
-    let fetch = run("git fetch --quiet --no-tags", root, &[], "", Duration::from_secs(8));
+    let _fetch = run("git fetch --quiet --no-tags", root, &[], "", Duration::from_secs(8));
     // Ignore fetch failure — stale tracking refs are still useful
 
     // Check that origin/<branch> tracking ref exists before comparing
