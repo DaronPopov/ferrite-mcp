@@ -35,7 +35,11 @@ pub fn run_enable(session: Option<&str>) -> Result<()> {
     println!("tailscale  : {tailscale_note}");
     println!("sshd       : {sshd_note}");
     println!("password   : use your Linux account password");
-    println!("next       : ssh {}@{}", current_user(), best_host_for_login());
+    println!(
+        "next       : ssh {}@{}",
+        current_user(),
+        best_host_for_login()
+    );
     println!("landing    : ferrite remote login-shell {session}");
 
     Ok(())
@@ -67,8 +71,14 @@ fn run_up(session: Option<&str>) -> Result<()> {
     println!("ferrite    : {}", report.ferrite_bin.display());
     println!("sshd       : {}", report.sshd.summary());
     println!("tailscale  : {}", report.tailscale.summary());
-    println!("tmux state : {}", if report.tmux.session_exists { "existing session reused" } else { "created" });
-    println!("feRcuda    : {}", report.fercuda.summary());
+    println!(
+        "tmux state : {}",
+        if report.tmux.session_exists {
+            "existing session reused"
+        } else {
+            "created"
+        }
+    );
     println!("Vivado     : {}", report.vivado.summary());
     println!("CUDA       : {}", report.cuda.summary());
 
@@ -96,7 +106,6 @@ fn run_doctor() -> Result<()> {
     println!();
     println!("[tooling]");
     println!("tmux       : {}", report.tmux.summary());
-    println!("feRcuda    : {}", report.fercuda.summary());
     println!("Vivado     : {}", report.vivado.summary());
     println!("CUDA       : {}", report.cuda.summary());
 
@@ -144,7 +153,10 @@ fn run_login_shell(session: Option<&str>) -> Result<()> {
 
 fn run_mcp_config(host: Option<&String>, user: Option<&String>) -> Result<()> {
     let host = host.ok_or_else(|| anyhow!("usage: ferrite remote mcp-config <host> [user]"))?;
-    let user = user.cloned().or_else(|| env::var("USER").ok()).unwrap_or_else(|| "daron".to_owned());
+    let user = user
+        .cloned()
+        .or_else(|| env::var("USER").ok())
+        .unwrap_or_else(|| "daron".to_owned());
     let ferrite_bin = env::current_exe().unwrap_or_else(|_| PathBuf::from("~/.cargo/bin/ferrite"));
     let remote_bin = ferrite_bin.display().to_string();
 
@@ -198,7 +210,6 @@ struct Report {
     tailscale: TailscaleCheck,
     sshd: Check,
     tmux: TmuxCheck,
-    fercuda: Check,
     vivado: Check,
     cuda: Check,
 }
@@ -219,7 +230,8 @@ impl Report {
 
     fn ssh_dns_command(&self) -> Option<String> {
         let user = env::var("USER").unwrap_or_else(|_| "daron".to_owned());
-        self.best_dns_display().map(|host| format!("ssh {}@{}", user, host))
+        self.best_dns_display()
+            .map(|host| format!("ssh {}@{}", user, host))
     }
 
     fn warning_lines(&self) -> Vec<String> {
@@ -229,7 +241,6 @@ impl Report {
             ("tailscale", &self.tailscale.base),
             ("sshd", &self.sshd),
             ("tmux", &self.tmux.base),
-            ("feRcuda", &self.fercuda),
             ("Vivado", &self.vivado),
             ("CUDA", &self.cuda),
         ] {
@@ -250,11 +261,17 @@ struct Check {
 
 impl Check {
     fn ok(message: impl Into<String>) -> Self {
-        Self { ok: true, message: message.into() }
+        Self {
+            ok: true,
+            message: message.into(),
+        }
     }
 
     fn warn(message: impl Into<String>) -> Self {
-        Self { ok: false, message: message.into() }
+        Self {
+            ok: false,
+            message: message.into(),
+        }
     }
 
     fn summary(&self) -> &str {
@@ -299,7 +316,6 @@ fn collect_report(session: &str) -> Result<Report> {
         tailscale: check_tailscale(),
         sshd: check_sshd(),
         tmux: check_tmux(session),
-        fercuda: check_fercuda(),
         vivado: check_vivado(),
         cuda: check_cuda(),
     })
@@ -383,7 +399,10 @@ fn check_tailscale() -> TailscaleCheck {
 
     let body = String::from_utf8_lossy(&output.stdout);
     if let Ok(json) = serde_json::from_str::<Value>(&body) {
-        let state = json.get("BackendState").and_then(Value::as_str).unwrap_or_default();
+        let state = json
+            .get("BackendState")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
         if state == "Running" {
             let ip = json
                 .get("Self")
@@ -422,11 +441,10 @@ fn check_sshd() -> Check {
     }
 
     for unit in ["ssh", "sshd"] {
-        let output = Command::new("systemctl")
-            .args(["is-active", unit])
-            .output();
+        let output = Command::new("systemctl").args(["is-active", unit]).output();
         if let Ok(output) = output {
-            if output.status.success() && String::from_utf8_lossy(&output.stdout).trim() == "active" {
+            if output.status.success() && String::from_utf8_lossy(&output.stdout).trim() == "active"
+            {
                 return Check::ok(format!("service {unit} active"));
             }
         }
@@ -478,21 +496,6 @@ fn check_tmux(session: &str) -> TmuxCheck {
     }
 }
 
-fn check_fercuda() -> Check {
-    let candidates = [
-        env::var("FERRITE_FERCUDA_ROOT").ok().map(PathBuf::from),
-        env::var("HOME").ok().map(|home| PathBuf::from(home).join("feRcuda")),
-        Some(PathBuf::from("/home/daron/feRcuda")),
-    ];
-
-    for candidate in candidates.into_iter().flatten() {
-        if candidate.join("rust/fercuda-ffi/Cargo.toml").exists() {
-            return Check::ok(format!("found at {}", candidate.display()));
-        }
-    }
-
-    Check::warn("missing expected feRcuda checkout; set FERRITE_FERCUDA_ROOT or clone ~/feRcuda")
-}
 
 fn check_vivado() -> Check {
     let cfg = shell_mcp::FerriteConfig::load();
@@ -501,7 +504,10 @@ fn check_vivado() -> Check {
         if path.join("vivado").exists() || path.join("vivado.bat").exists() {
             return Check::ok(format!("configured at {}", path.display()));
         }
-        return Check::warn(format!("configured path missing vivado binary: {}", path.display()));
+        return Check::warn(format!(
+            "configured path missing vivado binary: {}",
+            path.display()
+        ));
     }
 
     if let Some(path) = find_bin("vivado") {
@@ -573,7 +579,12 @@ fn local_hostname() -> String {
 
 fn ensure_tailscale() -> String {
     match check_tailscale() {
-        TailscaleCheck { base: Check { ok: true, message, .. }, .. } => message,
+        TailscaleCheck {
+            base: Check {
+                ok: true, message, ..
+            },
+            ..
+        } => message,
         _ => {
             let Some(bin) = find_bin("tailscale") else {
                 return "not installed".to_owned();
@@ -590,10 +601,7 @@ fn ensure_tailscale() -> String {
                 }
             }
 
-            if let Ok(status) = Command::new(&bin)
-                .args(["up", "--accept-routes"])
-                .status()
-            {
+            if let Ok(status) = Command::new(&bin).args(["up", "--accept-routes"]).status() {
                 if status.success() {
                     return check_tailscale().base.message;
                 }
@@ -606,7 +614,9 @@ fn ensure_tailscale() -> String {
 
 fn ensure_sshd() -> String {
     match check_sshd() {
-        Check { ok: true, message, .. } => message,
+        Check {
+            ok: true, message, ..
+        } => message,
         _ => {
             for unit in ["ssh", "sshd"] {
                 if let Ok(status) = Command::new("sudo")

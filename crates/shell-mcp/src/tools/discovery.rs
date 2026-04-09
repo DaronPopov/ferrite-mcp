@@ -14,7 +14,9 @@ use crate::protocol::ToolResult;
 // ── find_lib ──────────────────────────────────────────────────────────────────
 
 pub fn find_lib(args: &Value) -> Result<ToolResult, String> {
-    let name = args["name"].as_str().ok_or("find_lib: 'name' is required")?;
+    let name = args["name"]
+        .as_str()
+        .ok_or("find_lib: 'name' is required")?;
     let _version_hint = args["version_hint"].as_str();
 
     let result = probe_library(name);
@@ -63,14 +65,22 @@ fn try_pkg_config(name: &str) -> Option<Value> {
             .output()
         {
             if out.status.success() {
-                let version  = String::from_utf8_lossy(&out.stdout).trim().lines().next()
-                    .unwrap_or("").to_owned();
+                let version = String::from_utf8_lossy(&out.stdout)
+                    .trim()
+                    .lines()
+                    .next()
+                    .unwrap_or("")
+                    .to_owned();
 
                 if let (Ok(libs), Ok(cflags)) = (
-                    std::process::Command::new("pkg-config").args(["--libs",   candidate]).output(),
-                    std::process::Command::new("pkg-config").args(["--cflags", candidate]).output(),
+                    std::process::Command::new("pkg-config")
+                        .args(["--libs", candidate])
+                        .output(),
+                    std::process::Command::new("pkg-config")
+                        .args(["--cflags", candidate])
+                        .output(),
                 ) {
-                    let link_flags   = String::from_utf8_lossy(&libs.stdout).trim().to_owned();
+                    let link_flags = String::from_utf8_lossy(&libs.stdout).trim().to_owned();
                     let include_dirs: Vec<String> = String::from_utf8_lossy(&cflags.stdout)
                         .split_whitespace()
                         .filter(|f| f.starts_with("-I"))
@@ -108,7 +118,7 @@ fn try_env_hint(name: &str) -> Option<Value> {
             let path = std::path::Path::new(&val);
             if path.exists() {
                 let include = path.join("include");
-                let lib     = path.join("lib");
+                let lib = path.join("lib");
                 return Some(json!({
                     "found": true,
                     "name": name,
@@ -158,18 +168,22 @@ fn try_filesystem_paths(name: &str) -> Option<String> {
         format!("/usr/lib/lib{lower}.a"),
         format!("/usr/local/lib/lib{lower}.a"),
     ];
-    candidates.into_iter().find(|p| std::path::Path::new(p).exists())
+    candidates
+        .into_iter()
+        .find(|p| std::path::Path::new(p).exists())
 }
 
 // ── discover ──────────────────────────────────────────────────────────────────
 
 pub fn discover(args: &Value) -> Result<ToolResult, String> {
-    let category = args["category"].as_str().ok_or("discover: 'category' is required")?;
+    let category = args["category"]
+        .as_str()
+        .ok_or("discover: 'category' is required")?;
 
     let result = match category {
-        "cuda"        => discover_cuda(),
-        "rocm"        => discover_rocm(),
-        "ml"          => discover_ml(),
+        "cuda" => discover_cuda(),
+        "rocm" => discover_rocm(),
+        "ml" => discover_ml(),
         "build-tools" => discover_build_tools(),
         "all" => {
             json!({
@@ -196,17 +210,25 @@ fn discover_cuda() -> Value {
     let nvcc_version = nvcc.as_ref().and_then(|p| run_version_flag(p, "--version"));
 
     let cudnn = find_cudnn(cuda_root.as_deref());
-    let nccl  = find_nccl(cuda_root.as_deref());
+    let nccl = find_nccl(cuda_root.as_deref());
 
     let libcuda = try_ldconfig("cuda").or_else(|| {
-        ["/usr/lib/x86_64-linux-gnu/libcuda.so",
-         "/usr/lib/aarch64-linux-gnu/libcuda.so"]
-            .iter().find(|p| std::path::Path::new(p).exists())
-            .map(|s| s.to_string())
+        [
+            "/usr/lib/x86_64-linux-gnu/libcuda.so",
+            "/usr/lib/aarch64-linux-gnu/libcuda.so",
+        ]
+        .iter()
+        .find(|p| std::path::Path::new(p).exists())
+        .map(|s| s.to_string())
     });
 
-    let gpu_info = run_cmd("nvidia-smi", &["--query-gpu=name,driver_version,memory.total",
-                                            "--format=csv,noheader"]);
+    let gpu_info = run_cmd(
+        "nvidia-smi",
+        &[
+            "--query-gpu=name,driver_version,memory.total",
+            "--format=csv,noheader",
+        ],
+    );
 
     json!({
         "cuda_root": cuda_root,
@@ -310,12 +332,15 @@ fn discover_rocm() -> Value {
         .or_else(|| std::env::var("ROCM_PATH").ok());
 
     let hipcc = which_path("hipcc").or_else(|| {
-        rocm_root.as_ref().map(|r| format!("{r}/bin/hipcc"))
+        rocm_root
+            .as_ref()
+            .map(|r| format!("{r}/bin/hipcc"))
             .filter(|p| std::path::Path::new(p).exists())
     });
 
     let version = rocm_root.as_ref().and_then(|r| {
-        std::fs::read_to_string(format!("{r}/.info/version")).ok()
+        std::fs::read_to_string(format!("{r}/.info/version"))
+            .ok()
             .map(|s| s.trim().to_owned())
     });
 
@@ -342,13 +367,16 @@ fn discover_ml() -> Value {
                 ];
                 candidates.iter().find_map(|pattern| {
                     glob::glob(pattern).ok()?.find_map(|e| {
-                        e.ok().filter(|p| p.exists()).map(|p| p.display().to_string())
+                        e.ok()
+                            .filter(|p| p.exists())
+                            .map(|p| p.display().to_string())
                     })
                 })
             });
 
         let version = root.as_ref().and_then(|r| {
-            std::fs::read_to_string(format!("{r}/version.txt")).ok()
+            std::fs::read_to_string(format!("{r}/version.txt"))
+                .ok()
                 .map(|s| s.trim().to_owned())
         });
 
@@ -379,20 +407,20 @@ fn discover_ml() -> Value {
 
 fn discover_build_tools() -> Value {
     let tools = [
-        ("gcc",     &["--version"][..]),
-        ("g++",     &["--version"]),
-        ("clang",   &["--version"]),
+        ("gcc", &["--version"][..]),
+        ("g++", &["--version"]),
+        ("clang", &["--version"]),
         ("clang++", &["--version"]),
-        ("cmake",   &["--version"]),
-        ("ninja",   &["--version"]),
-        ("make",    &["--version"]),
-        ("cargo",   &["--version"]),
-        ("rustc",   &["--version"]),
-        ("nvcc",    &["--version"]),
+        ("cmake", &["--version"]),
+        ("ninja", &["--version"]),
+        ("make", &["--version"]),
+        ("cargo", &["--version"]),
+        ("rustc", &["--version"]),
+        ("nvcc", &["--version"]),
         ("python3", &["--version"]),
-        ("pip3",    &["--version"]),
-        ("meson",   &["--version"]),
-        ("bazel",   &["--version"]),
+        ("pip3", &["--version"]),
+        ("meson", &["--version"]),
+        ("bazel", &["--version"]),
     ];
 
     let mut result = serde_json::Map::new();
@@ -405,9 +433,14 @@ fn discover_build_tools() -> Value {
                 .and_then(|o| {
                     let text = String::from_utf8_lossy(&o.stdout).to_string()
                         + &String::from_utf8_lossy(&o.stderr);
-                    text.lines().find(|l| !l.trim().is_empty()).map(|l| l.trim().to_owned())
+                    text.lines()
+                        .find(|l| !l.trim().is_empty())
+                        .map(|l| l.trim().to_owned())
                 });
-            result.insert(name.to_owned(), json!({ "found": true, "path": path, "version": version }));
+            result.insert(
+                name.to_owned(),
+                json!({ "found": true, "path": path, "version": version }),
+            );
         } else {
             result.insert(name.to_owned(), json!({ "found": false }));
         }
@@ -425,7 +458,9 @@ fn which_path(name: &str) -> Option<String> {
         .map(|dir| std::path::PathBuf::from(dir).join(name))
         .find(|p| {
             use std::os::unix::fs::PermissionsExt;
-            p.metadata().map(|m| m.is_file() && m.permissions().mode() & 0o111 != 0).unwrap_or(false)
+            p.metadata()
+                .map(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+                .unwrap_or(false)
         })
         .map(|p| p.display().to_string())
 }
@@ -438,7 +473,9 @@ fn run_version_flag(bin: &str, flag: &str) -> Option<String> {
         .and_then(|o| {
             let text = String::from_utf8_lossy(&o.stdout).to_string()
                 + &String::from_utf8_lossy(&o.stderr);
-            text.lines().find(|l| !l.trim().is_empty()).map(|l| l.trim().to_owned())
+            text.lines()
+                .find(|l| !l.trim().is_empty())
+                .map(|l| l.trim().to_owned())
         })
 }
 

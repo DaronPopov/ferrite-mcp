@@ -4,8 +4,8 @@ use shell_core::{state::ShellState, types::ExitStatus};
 
 pub mod cd;
 pub mod echo;
-pub mod export;
 pub mod exit;
+pub mod export;
 pub mod pwd;
 
 /// A built-in command implementation.

@@ -31,14 +31,8 @@ fn collect_actual_state(args: &Value, desired: &DesiredStateV0) -> Result<Actual
         return serde_json::from_value(args["actual"].clone())
             .map_err(|e| format!("invalid actual schema: {e}"));
     }
-    let actual = ActualState {
-        fercuda_owned_sessions: Vec::new(),
-    };
-    if desired.fercuda.is_some() {
-        // Standalone install: no feRcuda runtime probe from this crate.
-        // Caller can pass `actual.fercuda_owned_sessions` when available.
-    }
-    Ok(actual)
+    let _ = desired;
+    Ok(ActualState {})
 }
 
 fn apply_actions(
@@ -64,8 +58,11 @@ fn apply_actions(
         if a.suggested_tool == "exec" {
             let tr = execution::exec_cmd(&a.suggested_arguments, state)?;
             let result = serde_json::from_str::<Value>(
-                tr.content.first().map(|c| c.text.as_str()).unwrap_or("{}")
-            ).unwrap_or_else(|_| json!({"raw": tr.content.first().map(|c| c.text.clone()).unwrap_or_default()}));
+                tr.content.first().map(|c| c.text.as_str()).unwrap_or("{}"),
+            )
+            .unwrap_or_else(
+                |_| json!({"raw": tr.content.first().map(|c| c.text.clone()).unwrap_or_default()}),
+            );
             applied.push(json!({
                 "action_id": a.id,
                 "applied": true,
@@ -92,19 +89,23 @@ fn apply_actions(
     Ok(applied)
 }
 
-pub fn control_reconcile(args: &Value, state: &Arc<Mutex<ServerState>>) -> Result<ToolResult, String> {
+pub fn control_reconcile(
+    args: &Value,
+    state: &Arc<Mutex<ServerState>>,
+) -> Result<ToolResult, String> {
     let op = args["op"].as_str().unwrap_or("status");
     match op {
         "set_desired" => {
-            let desired_v = args["desired"]
-                .clone();
+            let desired_v = args["desired"].clone();
             if desired_v.is_null() {
                 return Err("control_reconcile: 'desired' is required for set_desired".to_owned());
             }
             let desired: DesiredStateV0 = serde_json::from_value(desired_v)
                 .map_err(|e| format!("invalid desired schema: {e}"))?;
             desired.validate()?;
-            let mut guard = store().lock().map_err(|e| format!("control lock poisoned: {e}"))?;
+            let mut guard = store()
+                .lock()
+                .map_err(|e| format!("control lock poisoned: {e}"))?;
             guard.desired = Some(desired.clone());
             Ok(ToolResult::json(&json!({
                 "ok": true,
@@ -113,7 +114,9 @@ pub fn control_reconcile(args: &Value, state: &Arc<Mutex<ServerState>>) -> Resul
             })))
         }
         "get_desired" => {
-            let guard = store().lock().map_err(|e| format!("control lock poisoned: {e}"))?;
+            let guard = store()
+                .lock()
+                .map_err(|e| format!("control lock poisoned: {e}"))?;
             Ok(ToolResult::json(&json!({
                 "ok": true,
                 "op": op,
@@ -121,7 +124,9 @@ pub fn control_reconcile(args: &Value, state: &Arc<Mutex<ServerState>>) -> Resul
             })))
         }
         "clear" => {
-            let mut guard = store().lock().map_err(|e| format!("control lock poisoned: {e}"))?;
+            let mut guard = store()
+                .lock()
+                .map_err(|e| format!("control lock poisoned: {e}"))?;
             guard.desired = None;
             guard.last_tick_actions.clear();
             Ok(ToolResult::json(&json!({
@@ -134,8 +139,13 @@ pub fn control_reconcile(args: &Value, state: &Arc<Mutex<ServerState>>) -> Resul
             let apply = args["apply"].as_bool().unwrap_or(false);
             let enable_apply_runtime = args["enable_apply_runtime"].as_bool().unwrap_or(false);
             let desired = if args["desired"].is_null() {
-                let guard = store().lock().map_err(|e| format!("control lock poisoned: {e}"))?;
-                guard.desired.clone().ok_or("no desired state configured".to_owned())?
+                let guard = store()
+                    .lock()
+                    .map_err(|e| format!("control lock poisoned: {e}"))?;
+                guard
+                    .desired
+                    .clone()
+                    .ok_or("no desired state configured".to_owned())?
             } else {
                 let d: DesiredStateV0 = serde_json::from_value(args["desired"].clone())
                     .map_err(|e| format!("invalid desired schema: {e}"))?;
@@ -144,10 +154,16 @@ pub fn control_reconcile(args: &Value, state: &Arc<Mutex<ServerState>>) -> Resul
             };
             let actual = collect_actual_state(args, &desired)?;
             let actions = build_reconcile_plan(&desired, &actual);
-            let applied = if apply { apply_actions(&actions, state, enable_apply_runtime)? } else { Vec::new() };
+            let applied = if apply {
+                apply_actions(&actions, state, enable_apply_runtime)?
+            } else {
+                Vec::new()
+            };
 
             {
-                let mut guard = store().lock().map_err(|e| format!("control lock poisoned: {e}"))?;
+                let mut guard = store()
+                    .lock()
+                    .map_err(|e| format!("control lock poisoned: {e}"))?;
                 guard.desired = Some(desired.clone());
                 guard.last_tick_actions = actions.clone();
             }
@@ -164,7 +180,9 @@ pub fn control_reconcile(args: &Value, state: &Arc<Mutex<ServerState>>) -> Resul
             })))
         }
         "status" => {
-            let guard = store().lock().map_err(|e| format!("control lock poisoned: {e}"))?;
+            let guard = store()
+                .lock()
+                .map_err(|e| format!("control lock poisoned: {e}"))?;
             Ok(ToolResult::json(&json!({
                 "ok": true,
                 "op": op,
@@ -213,25 +231,33 @@ mod tests {
         reset_store();
         let desired = json!({
             "version": "v0",
-            "fercuda": {
-                "min_sessions": 1,
-                "max_sessions": 2
+            "build": {
+                "cwd": ".",
+                "command": "echo hello"
             }
         });
         let st = state();
-        let set = control_reconcile(&json!({
-            "op": "set_desired",
-            "desired": desired
-        }), &st).expect("set_desired");
+        let set = control_reconcile(
+            &json!({
+                "op": "set_desired",
+                "desired": desired
+            }),
+            &st,
+        )
+        .expect("set_desired");
         let set_v = parse_tool_json(&set);
         assert_eq!(set_v["ok"], json!(true));
 
-        let get = control_reconcile(&json!({
-            "op": "get_desired"
-        }), &st).expect("get_desired");
+        let get = control_reconcile(
+            &json!({
+                "op": "get_desired"
+            }),
+            &st,
+        )
+        .expect("get_desired");
         let get_v = parse_tool_json(&get);
         assert_eq!(get_v["desired"]["version"], json!("v0"));
-        assert_eq!(get_v["desired"]["fercuda"]["min_sessions"], json!(1));
+        assert_eq!(get_v["desired"]["build"]["command"], json!("echo hello"));
         reset_store();
     }
 
@@ -240,18 +266,22 @@ mod tests {
         let _guard = lock_tests();
         reset_store();
         let st = state();
-        let tr = control_reconcile(&json!({
-            "op": "tick",
-            "apply": true,
-            "enable_apply_runtime": false,
-            "desired": {
-                "version": "v0",
-                "build": {
-                    "cwd": ".",
-                    "command": "echo hello"
+        let tr = control_reconcile(
+            &json!({
+                "op": "tick",
+                "apply": true,
+                "enable_apply_runtime": false,
+                "desired": {
+                    "version": "v0",
+                    "build": {
+                        "cwd": ".",
+                        "command": "echo hello"
+                    }
                 }
-            }
-        }), &st).expect("tick");
+            }),
+            &st,
+        )
+        .expect("tick");
         let v = parse_tool_json(&tr);
         assert_eq!(v["ok"], json!(true));
         assert_eq!(v["apply"], json!(true));
@@ -265,27 +295,23 @@ mod tests {
     }
 
     #[test]
-    fn tick_fercuda_range_noop_with_explicit_actual() {
+    fn tick_with_empty_actual_and_no_build_goal_is_noop() {
         let _guard = lock_tests();
         reset_store();
         let st = state();
-        let tr = control_reconcile(&json!({
-            "op": "tick",
-            "desired": {
-                "version": "v0",
-                "fercuda": {
-                    "min_sessions": 1,
-                    "max_sessions": 2
+        let tr = control_reconcile(
+            &json!({
+                "op": "tick",
+                "desired": {
+                    "version": "v0"
                 }
-            },
-            "actual": {
-                "fercuda_owned_sessions": [42]
-            }
-        }), &st).expect("tick");
+            }),
+            &st,
+        )
+        .expect("tick");
         let v = parse_tool_json(&tr);
         let plan = v["plan"].as_array().cloned().unwrap_or_default();
-        assert_eq!(plan.len(), 1);
-        assert_eq!(plan[0]["status"], json!("noop"));
+        assert!(plan.is_empty());
         reset_store();
     }
 }

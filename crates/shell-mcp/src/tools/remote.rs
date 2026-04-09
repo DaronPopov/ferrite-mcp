@@ -23,8 +23,12 @@ const SSH_OPTS: &str = "-o StrictHostKeyChecking=no -o BatchMode=yes -o ConnectT
 // ── remote_exec ───────────────────────────────────────────────────────────────
 
 pub fn remote_exec(args: &Value) -> Result<ToolResult, String> {
-    let host    = args["host"].as_str().ok_or("remote_exec: 'host' is required")?;
-    let cmd     = args["cmd"].as_str().ok_or("remote_exec: 'cmd' is required")?;
+    let host = args["host"]
+        .as_str()
+        .ok_or("remote_exec: 'host' is required")?;
+    let cmd = args["cmd"]
+        .as_str()
+        .ok_or("remote_exec: 'cmd' is required")?;
     let timeout = args["timeout_secs"].as_u64().unwrap_or(60);
 
     // Build the remote shell command
@@ -35,7 +39,8 @@ pub fn remote_exec(args: &Value) -> Result<ToolResult, String> {
     };
 
     // Inject extra env vars inline
-    let env_prefix = args["env"].as_object()
+    let env_prefix = args["env"]
+        .as_object()
         .map(|m| {
             m.iter()
                 .filter_map(|(k, v)| v.as_str().map(|s| format!("{}={}", k, shell_escape(s))))
@@ -65,8 +70,12 @@ pub fn remote_exec(args: &Value) -> Result<ToolResult, String> {
 // ── remote_build ──────────────────────────────────────────────────────────────
 
 pub fn remote_build(args: &Value, store: &Arc<JobStore>) -> Result<ToolResult, String> {
-    let host    = args["host"].as_str().ok_or("remote_build: 'host' is required")?;
-    let project = args["project"].as_str().ok_or("remote_build: 'project' is required")?;
+    let host = args["host"]
+        .as_str()
+        .ok_or("remote_build: 'host' is required")?;
+    let project = args["project"]
+        .as_str()
+        .ok_or("remote_build: 'project' is required")?;
 
     // Auto-detect build command from project type if not supplied
     let build_cmd = if let Some(c) = args["build_cmd"].as_str() {
@@ -78,7 +87,8 @@ pub fn remote_build(args: &Value, store: &Arc<JobStore>) -> Result<ToolResult, S
     let remote_path = format!("~/{project}");
     let full_cmd = format!("cd {remote_path} && {build_cmd}");
 
-    let label = args["label"].as_str()
+    let label = args["label"]
+        .as_str()
         .map(str::to_owned)
         .unwrap_or_else(|| format!("remote_build_{host}_{project}"));
 
@@ -104,7 +114,9 @@ fn detect_build_cmd(project: &str) -> String {
         "cargo build --release 2>&1".to_owned()
     } else if project.contains("processor_lab") || project.contains("verilog") {
         "echo 'Use chip_build_pipeline for RTL projects' 2>&1".to_owned()
-    } else if project.contains("rust") || std::path::Path::new(&format!("~/{project}/Cargo.toml")).exists() {
+    } else if project.contains("rust")
+        || std::path::Path::new(&format!("~/{project}/Cargo.toml")).exists()
+    {
         "cargo build --release 2>&1".to_owned()
     } else if std::path::Path::new(&format!("~/{project}/package.json")).exists() {
         "npm run build 2>&1".to_owned()
@@ -118,10 +130,14 @@ fn detect_build_cmd(project: &str) -> String {
 // ── sync_project ──────────────────────────────────────────────────────────────
 
 pub fn sync_project(args: &Value) -> Result<ToolResult, String> {
-    let project   = args["project"].as_str().ok_or("sync_project: 'project' is required")?;
-    let host      = args["host"].as_str().ok_or("sync_project: 'host' is required")?;
+    let project = args["project"]
+        .as_str()
+        .ok_or("sync_project: 'project' is required")?;
+    let host = args["host"]
+        .as_str()
+        .ok_or("sync_project: 'host' is required")?;
     let direction = args["direction"].as_str().unwrap_or("push");
-    let dry_run   = args["dry_run"].as_bool().unwrap_or(false);
+    let dry_run = args["dry_run"].as_bool().unwrap_or(false);
 
     let default_excludes = [
         "target/",
@@ -138,13 +154,22 @@ pub fn sync_project(args: &Value) -> Result<ToolResult, String> {
         "*.log",
     ];
 
-    let extra_excludes: Vec<String> = args["extra_excludes"].as_array()
-        .map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_owned)).collect())
+    let extra_excludes: Vec<String> = args["extra_excludes"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str().map(str::to_owned))
+                .collect()
+        })
         .unwrap_or_default();
 
     let mut exclude_args = String::new();
     let extra_refs: Vec<&str> = extra_excludes.iter().map(|s| s.as_str()).collect();
-    for exc in default_excludes.iter().copied().chain(extra_refs.iter().copied()) {
+    for exc in default_excludes
+        .iter()
+        .copied()
+        .chain(extra_refs.iter().copied())
+    {
         exclude_args.push_str(&format!(" --exclude={}", shell_escape(exc)));
     }
 
@@ -154,7 +179,7 @@ pub fn sync_project(args: &Value) -> Result<ToolResult, String> {
 
     let (src, dst) = match direction {
         "pull" => (remote_path.clone(), format!("{}/", local_path.display())),
-        _      => (format!("{}/", local_path.display()), remote_path.clone()),
+        _ => (format!("{}/", local_path.display()), remote_path.clone()),
     };
 
     let cmd = format!("rsync -avz --progress{dry_flag}{exclude_args} {src} {dst}");
@@ -168,17 +193,27 @@ pub fn sync_project(args: &Value) -> Result<ToolResult, String> {
     let success = raw["success"].as_bool().unwrap_or(false);
 
     // Count transferred files from rsync output
-    let files_transferred: usize = stdout.lines()
-        .filter(|l| !l.starts_with("sending") && !l.starts_with("receiving")
-                 && !l.starts_with("sent") && !l.starts_with("total")
-                 && !l.is_empty() && !l.starts_with("building"))
+    let files_transferred: usize = stdout
+        .lines()
+        .filter(|l| {
+            !l.starts_with("sending")
+                && !l.starts_with("receiving")
+                && !l.starts_with("sent")
+                && !l.starts_with("total")
+                && !l.is_empty()
+                && !l.starts_with("building")
+        })
         .count();
 
     // Extract bytes from last line "sent N bytes  received M bytes"
-    let bytes_sent: u64 = stdout.lines().rev()
+    let bytes_sent: u64 = stdout
+        .lines()
+        .rev()
         .find(|l| l.contains("sent") && l.contains("bytes"))
         .and_then(|l| {
-            l.split_whitespace().nth(1).and_then(|s| s.replace(',', "").parse().ok())
+            l.split_whitespace()
+                .nth(1)
+                .and_then(|s| s.replace(',', "").parse().ok())
         })
         .unwrap_or(0);
 

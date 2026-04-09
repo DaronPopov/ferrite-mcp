@@ -13,5 +13,8 @@ pub trait Hook: Send + Sync {
     ///
     /// Returns `Ok(Some(event))` to pass a (possibly modified) event to
     /// subsequent hooks, or `Ok(None)` to consume the event.
-    fn on_event(&mut self, event: HookEvent) -> Result<Option<HookEvent>, Box<dyn std::error::Error>>;
+    fn on_event(
+        &mut self,
+        event: HookEvent,
+    ) -> Result<Option<HookEvent>, Box<dyn std::error::Error>>;
 }

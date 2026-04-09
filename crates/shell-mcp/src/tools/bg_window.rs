@@ -19,20 +19,22 @@ pub fn live_window(args: &Value, store: &Arc<JobStore>) -> Result<ToolResult, St
 
     match job_id {
         Some(id) => open_job_window(id, args, store),
-        None     => open_ferrite_window(args),
+        None => open_ferrite_window(args),
     }
 }
 
 // ── job output window ─────────────────────────────────────────────────────────
 
-fn open_job_window(job_id: &str, args: &Value, store: &Arc<JobStore>) -> Result<ToolResult, String> {
-    let job = store.get(job_id)
+fn open_job_window(
+    job_id: &str,
+    args: &Value,
+    store: &Arc<JobStore>,
+) -> Result<ToolResult, String> {
+    let job = store
+        .get(job_id)
         .ok_or_else(|| format!("live_window: job '{job_id}' not found"))?;
 
-    let title = args["title"]
-        .as_str()
-        .unwrap_or(&job.label)
-        .to_string();
+    let title = args["title"].as_str().unwrap_or(&job.label).to_string();
 
     // The log file must exist — bg_spawn creates it immediately.
     // If not (e.g. bg_attach job or log write failed), surface a clear error.
@@ -82,4 +84,3 @@ fn open_ferrite_window(args: &Value) -> Result<ToolResult, String> {
         "note":  format!("Cream interactive shell opened (pid {pid})")
     })))
 }
-

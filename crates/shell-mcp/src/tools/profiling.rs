@@ -12,13 +12,13 @@ use serde_json::{json, Value};
 
 use crate::protocol::ToolResult;
 use crate::server::ServerState;
+use crate::tools::state::read_cwd;
 
 // ── ncu_profile ───────────────────────────────────────────────────────────────
 
 /// Key metric set — covers occupancy, bandwidth, cache efficiency, SM throughput.
 /// These names work for CUDA 12.x / Nsight Compute 2023+.
-const NCU_METRICS: &str =
-    "sm__warps_active.avg.pct_of_peak_sustained_active,\
+const NCU_METRICS: &str = "sm__warps_active.avg.pct_of_peak_sustained_active,\
      sm__throughput.avg.pct_of_peak_sustained_elapsed,\
      dram__throughput.avg.pct_of_peak_sustained_elapsed,\
      l1tex__t_sector_hit_rate.pct,\
@@ -27,7 +27,9 @@ const NCU_METRICS: &str =
      smsp__warp_issue_stalled_short_scoreboard_per_warp_active.pct";
 
 pub fn ncu_profile(args: &Value, state: &Arc<Mutex<ServerState>>) -> Result<ToolResult, String> {
-    let cmd_str = args["cmd"].as_str().ok_or("ncu_profile: 'cmd' is required")?;
+    let cmd_str = args["cmd"]
+        .as_str()
+        .ok_or("ncu_profile: 'cmd' is required")?;
     let kernel_filter = args["kernel"].as_str();
     let timeout_secs = args["timeout_secs"].as_u64().unwrap_or(120);
     let metric_set = args["metrics"].as_str().unwrap_or(NCU_METRICS);
@@ -36,15 +38,16 @@ pub fn ncu_profile(args: &Value, state: &Arc<Mutex<ServerState>>) -> Result<Tool
         "ncu not found in PATH. Install Nsight Compute from https://developer.nvidia.com/nsight-compute".to_owned()
     })?;
 
-    let cwd = state.lock()
-        .map_err(|e| format!("state lock: {e}"))?
-        .cwd.clone();
+    let cwd = read_cwd(state);
 
     let mut ncu_args: Vec<String> = vec![
         "--csv".into(),
-        "--metrics".into(), metric_set.to_owned(),
-        "--target-processes".into(), "all".into(),
-        "--print-summary".into(), "per-kernel".into(),
+        "--metrics".into(),
+        metric_set.to_owned(),
+        "--target-processes".into(),
+        "all".into(),
+        "--print-summary".into(),
+        "per-kernel".into(),
     ];
 
     if let Some(k) = kernel_filter {
@@ -66,7 +69,9 @@ pub fn ncu_profile(args: &Value, state: &Arc<Mutex<ServerState>>) -> Result<Tool
 
     // ncu writes ==ERROR== messages to stdout, not stderr
     let combined_out = format!("{stdout}\n{stderr}");
-    let perm_hint = if combined_out.contains("ERR_NVGPUCTRPERM") || combined_out.contains("Permission denied") {
+    let perm_hint = if combined_out.contains("ERR_NVGPUCTRPERM")
+        || combined_out.contains("Permission denied")
+    {
         Some("ncu requires elevated permissions on Linux. Fix with: echo 0 | sudo tee /proc/sys/kernel/perf_event_paranoid")
     } else {
         None
@@ -96,26 +101,35 @@ fn parse_ncu_csv(csv: &str) -> Vec<Value> {
         if line.starts_with('"') || line.starts_with("ID") {
             // Try to parse data line
             let cols = split_csv_line(line);
-            if cols.len() < 11 { continue; }
+            if cols.len() < 11 {
+                continue;
+            }
 
             // Skip header row
-            if cols[0].trim_matches('"') == "ID" { continue; }
+            if cols[0].trim_matches('"') == "ID" {
+                continue;
+            }
 
             let kernel_name = cols[4].trim_matches('"').to_owned();
             let metric_name = cols[8].trim_matches('"').to_owned();
             let metric_unit = cols[9].trim_matches('"').to_owned();
-            let metric_val  = cols[10].trim_matches('"').to_owned();
+            let metric_val = cols[10].trim_matches('"').to_owned();
 
-            if kernel_name.is_empty() || metric_name.is_empty() { continue; }
+            if kernel_name.is_empty() || metric_name.is_empty() {
+                continue;
+            }
 
-            let entry = by_kernel.entry(kernel_name.clone())
+            let entry = by_kernel
+                .entry(kernel_name.clone())
                 .or_insert_with(serde_json::Map::new);
 
-            entry.entry("kernel_name".to_owned())
+            entry
+                .entry("kernel_name".to_owned())
                 .or_insert_with(|| Value::String(kernel_name));
 
             // Store as number if parseable, else string
-            let val: Value = metric_val.parse::<f64>()
+            let val: Value = metric_val
+                .parse::<f64>()
                 .map(|f| json!(f))
                 .unwrap_or_else(|_| Value::String(metric_val.clone()));
 
@@ -144,13 +158,27 @@ fn parse_ncu_csv(csv: &str) -> Vec<Value> {
 }
 
 fn metric_alias(name: &str) -> String {
-    if name.contains("warps_active") { return "occupancy".into(); }
-    if name.contains("dram__throughput") { return "dram_throughput".into(); }
-    if name.contains("sm__throughput") { return "sm_throughput".into(); }
-    if name.contains("l1tex") { return "l1_hit_rate".into(); }
-    if name.contains("lts__t_sector") { return "l2_hit_rate".into(); }
-    if name.contains("long_scoreboard") { return "stall_long_sb".into(); }
-    if name.contains("short_scoreboard") { return "stall_short_sb".into(); }
+    if name.contains("warps_active") {
+        return "occupancy".into();
+    }
+    if name.contains("dram__throughput") {
+        return "dram_throughput".into();
+    }
+    if name.contains("sm__throughput") {
+        return "sm_throughput".into();
+    }
+    if name.contains("l1tex") {
+        return "l1_hit_rate".into();
+    }
+    if name.contains("lts__t_sector") {
+        return "l2_hit_rate".into();
+    }
+    if name.contains("long_scoreboard") {
+        return "stall_long_sb".into();
+    }
+    if name.contains("short_scoreboard") {
+        return "stall_short_sb".into();
+    }
     // Shorten long metric names
     name.split("__").last().unwrap_or(name).to_owned()
 }
@@ -162,7 +190,10 @@ fn split_csv_line(line: &str) -> Vec<String> {
     for ch in line.chars() {
         match ch {
             '"' => in_quotes = !in_quotes,
-            ',' if !in_quotes => { cols.push(cur.clone()); cur.clear(); }
+            ',' if !in_quotes => {
+                cols.push(cur.clone());
+                cur.clear();
+            }
             c => cur.push(c),
         }
     }
@@ -173,7 +204,9 @@ fn split_csv_line(line: &str) -> Vec<String> {
 // ── ptx_inspect ───────────────────────────────────────────────────────────────
 
 pub fn ptx_inspect(args: &Value) -> Result<ToolResult, String> {
-    let path = args["path"].as_str().ok_or("ptx_inspect: 'path' is required")?;
+    let path = args["path"]
+        .as_str()
+        .ok_or("ptx_inspect: 'path' is required")?;
     let kernel_filter = args["kernel"].as_str();
 
     let (ptx, ptxas_verbose) = if path.ends_with(".cu") {
@@ -201,11 +234,12 @@ fn compile_to_ptx(src: &str) -> Result<(String, Option<String>), String> {
 
     let mut cmd = std::process::Command::new(&nvcc);
     cmd.arg("--ptx")
-       .arg("--ptxas-options=-v")
-       .args(&arch)
-       .arg("-I/usr/local/cuda/include")
-       .arg("-o").arg(&out_ptx)
-       .arg(src);
+        .arg("--ptxas-options=-v")
+        .args(&arch)
+        .arg("-I/usr/local/cuda/include")
+        .arg("-o")
+        .arg(&out_ptx)
+        .arg(src);
 
     let out = cmd.output().map_err(|e| format!("nvcc: {e}"))?;
     let stderr = String::from_utf8_lossy(&out.stderr).to_string();
@@ -214,19 +248,21 @@ fn compile_to_ptx(src: &str) -> Result<(String, Option<String>), String> {
         return Err(format!("nvcc ptx compile failed:\n{stderr}"));
     }
 
-    let ptx = std::fs::read_to_string(&out_ptx)
-        .map_err(|e| format!("reading ptx output: {e}"))?;
+    let ptx = std::fs::read_to_string(&out_ptx).map_err(|e| format!("reading ptx output: {e}"))?;
     std::fs::remove_file(&out_ptx).ok();
 
     // ptxas -v output is in stderr — extract "Used N registers, ..."
-    let verbose = if stderr.contains("Used") { Some(stderr) } else { None };
+    let verbose = if stderr.contains("Used") {
+        Some(stderr)
+    } else {
+        None
+    };
 
     Ok((ptx, verbose))
 }
 
 fn dump_ptx_from_binary(binary: &str) -> Result<String, String> {
-    let cuobjdump = which_bin("cuobjdump")
-        .ok_or("cuobjdump not found — install CUDA toolkit")?;
+    let cuobjdump = which_bin("cuobjdump").ok_or("cuobjdump not found — install CUDA toolkit")?;
 
     let out = std::process::Command::new(&cuobjdump)
         .args(["--dump-ptx", binary])
@@ -303,7 +339,11 @@ fn analyse_kernel_body(name: &str, lines: &[&str]) -> Value {
                     regs_b32 += n;
                 } else if t.contains(".f32") {
                     regs_f32 += n;
-                } else if t.contains(".b64") || t.contains(".u64") || t.contains(".s64") || t.contains(".f64") {
+                } else if t.contains(".b64")
+                    || t.contains(".u64")
+                    || t.contains(".s64")
+                    || t.contains(".f64")
+                {
                     regs_b64 += n;
                 } else if t.contains(".pred") {
                     regs_pred += n;
@@ -319,11 +359,17 @@ fn analyse_kernel_body(name: &str, lines: &[&str]) -> Value {
         }
 
         // Memory ops
-        if t.starts_with("ld.global") { ld_global += 1; }
-        else if t.starts_with("st.global") { st_global += 1; }
-        else if t.starts_with("ld.shared") { ld_shared += 1; }
-        else if t.starts_with("st.shared") { st_shared += 1; }
-        else if t.starts_with("bar.sync") || t.starts_with("membar") { sync_threads += 1; }
+        if t.starts_with("ld.global") {
+            ld_global += 1;
+        } else if t.starts_with("st.global") {
+            st_global += 1;
+        } else if t.starts_with("ld.shared") {
+            ld_shared += 1;
+        } else if t.starts_with("st.shared") {
+            st_shared += 1;
+        } else if t.starts_with("bar.sync") || t.starts_with("membar") {
+            sync_threads += 1;
+        }
     }
 
     // Total register footprint per thread (rough: b64 counts as 2 × b32)
@@ -354,21 +400,22 @@ fn extract_reg_count(decl: &str) -> Option<u32> {
     // Matches: .reg .b32 %r<16>; → 16
     // or:      .reg .f32 %f<8>; → 8
     let start = decl.find('<')? + 1;
-    let end   = decl.find('>')?;
+    let end = decl.find('>')?;
     decl[start..end].parse().ok()
 }
 
 fn extract_array_size(decl: &str) -> Option<u64> {
     // .shared .align 4 .b8 smem[2048]; → 2048
     let start = decl.find('[')? + 1;
-    let end   = decl.find(']')?;
+    let end = decl.find(']')?;
     decl[start..end].parse().ok()
 }
 
 fn live_arch_flags() -> Option<Vec<String>> {
     let out = std::process::Command::new("nvidia-smi")
         .args(["--query-gpu=compute_cap", "--format=csv,noheader"])
-        .output().ok()?;
+        .output()
+        .ok()?;
     let s = String::from_utf8_lossy(&out.stdout);
     let cap = s.lines().next()?.trim();
     let (maj, min) = cap.split_once('.')?;
@@ -384,26 +431,30 @@ pub fn compute_sanitizer(
     args: &Value,
     state: &Arc<Mutex<ServerState>>,
 ) -> Result<ToolResult, String> {
-    let cmd_str = args["cmd"].as_str().ok_or("compute_sanitizer: 'cmd' is required")?;
-    let tool    = args["tool"].as_str().unwrap_or("memcheck");
+    let cmd_str = args["cmd"]
+        .as_str()
+        .ok_or("compute_sanitizer: 'cmd' is required")?;
+    let tool = args["tool"].as_str().unwrap_or("memcheck");
     let timeout = args["timeout_secs"].as_u64().unwrap_or(120);
 
     let valid_tools = ["memcheck", "racecheck", "initcheck", "synccheck"];
     if !valid_tools.contains(&tool) {
-        return Err(format!("compute_sanitizer: invalid tool '{tool}'. Choose from: {}", valid_tools.join(", ")));
+        return Err(format!(
+            "compute_sanitizer: invalid tool '{tool}'. Choose from: {}",
+            valid_tools.join(", ")
+        ));
     }
 
-    let sanitizer = which_bin("compute-sanitizer").ok_or_else(|| {
-        "compute-sanitizer not found. Install CUDA toolkit (>= 11.x)".to_owned()
-    })?;
+    let sanitizer = which_bin("compute-sanitizer")
+        .ok_or_else(|| "compute-sanitizer not found. Install CUDA toolkit (>= 11.x)".to_owned())?;
 
-    let cwd = state.lock()
-        .map_err(|e| format!("state lock: {e}"))?
-        .cwd.clone();
+    let cwd = read_cwd(state);
 
     let mut san_args: Vec<String> = vec![
-        "--tool".into(), tool.to_owned(),
-        "--print-limit".into(), "100".into(),
+        "--tool".into(),
+        tool.to_owned(),
+        "--print-limit".into(),
+        "100".into(),
     ];
     san_args.extend(cmd_str.split_whitespace().map(str::to_owned));
 
@@ -433,10 +484,14 @@ fn parse_sanitizer_errors(output: &str) -> Vec<Value> {
 
     for line in output.lines() {
         let t = line.trim();
-        if !t.starts_with("=========") { continue; }
+        if !t.starts_with("=========") {
+            continue;
+        }
         let content = t.trim_start_matches('=').trim_start_matches(' ');
 
-        if content.is_empty() { continue; }
+        if content.is_empty() {
+            continue;
+        }
 
         if content.starts_with("Error ") && content.contains("out of") {
             // Start of new error block
@@ -449,9 +504,11 @@ fn parse_sanitizer_errors(output: &str) -> Vec<Value> {
             }
         } else if let Some(ref mut e) = current {
             // Classify the content line
-            if content.contains("out of bounds") || content.contains("Invalid") ||
-               content.contains("Race condition") || content.contains("Uninitialized") ||
-               content.contains("Barrier error")
+            if content.contains("out of bounds")
+                || content.contains("Invalid")
+                || content.contains("Race condition")
+                || content.contains("Uninitialized")
+                || content.contains("Barrier error")
             {
                 e.insert("type".into(), Value::String(content.to_owned()));
             } else if content.starts_with("by thread") {
@@ -467,9 +524,13 @@ fn parse_sanitizer_errors(output: &str) -> Vec<Value> {
                     if let Some((file, line)) = file_line.rsplit_once(':') {
                         e.insert("kernel".into(), Value::String(kernel));
                         e.insert("file".into(), Value::String(file.trim().to_owned()));
-                        e.insert("line".into(), line.trim().parse::<u64>()
-                            .map(Value::from)
-                            .unwrap_or(Value::Null));
+                        e.insert(
+                            "line".into(),
+                            line.trim()
+                                .parse::<u64>()
+                                .map(Value::from)
+                                .unwrap_or(Value::Null),
+                        );
                     }
                 }
             }
@@ -487,7 +548,8 @@ fn parse_sanitizer_summary(output: &str) -> Value {
     for line in output.lines() {
         let t = line.trim().trim_start_matches('=').trim();
         if t.starts_with("ERROR SUMMARY:") {
-            let count: u64 = t.split_whitespace()
+            let count: u64 = t
+                .split_whitespace()
                 .nth(2)
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(0);
@@ -501,7 +563,9 @@ fn parse_sanitizer_summary(output: &str) -> Value {
 
 fn which_bin(name: &str) -> Option<String> {
     let path_var = std::env::var("PATH").unwrap_or_default();
-    path_var.split(':').filter(|d| !d.is_empty())
+    path_var
+        .split(':')
+        .filter(|d| !d.is_empty())
         .map(|d| Path::new(d).join(name))
         .find(|p| {
             use std::os::unix::fs::PermissionsExt;
@@ -545,7 +609,7 @@ fn run_with_timeout(
         buf
     });
 
-    let start    = Instant::now();
+    let start = Instant::now();
     let deadline = start + Duration::from_secs(timeout_secs);
 
     let status = loop {
@@ -567,7 +631,7 @@ fn run_with_timeout(
     let duration_ms = start.elapsed().as_millis() as u64;
     let stdout = stdout_thread.join().unwrap_or_default();
     let stderr = stderr_thread.join().unwrap_or_default();
-    let code   = status.code().unwrap_or(-1);
+    let code = status.code().unwrap_or(-1);
 
     Ok((stdout, stderr, code, duration_ms))
 }

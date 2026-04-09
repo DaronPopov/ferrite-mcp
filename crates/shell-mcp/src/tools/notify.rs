@@ -16,45 +16,47 @@
 //!   desktop   — send desktop notification (default: true)
 //!   phone     — send phone notification via ntfy.sh (default: true if topic set)
 
-use std::time::Duration;
 use serde_json::{json, Value};
+use std::time::Duration;
 
 use crate::protocol::ToolResult;
 use crate::tools::execution::run;
 
 pub fn notify(args: &Value) -> Result<ToolResult, String> {
-    let message  = args["message"].as_str().ok_or("notify: 'message' is required")?;
-    let title    = args["title"].as_str().unwrap_or("ferrite");
-    let urgency  = args["urgency"].as_str().unwrap_or("normal");
-    let icon     = args["icon"].as_str().unwrap_or("dialog-information");
+    let message = args["message"]
+        .as_str()
+        .ok_or("notify: 'message' is required")?;
+    let title = args["title"].as_str().unwrap_or("ferrite");
+    let urgency = args["urgency"].as_str().unwrap_or("normal");
+    let icon = args["icon"].as_str().unwrap_or("dialog-information");
     let priority = args["priority"].as_str().unwrap_or("default");
-    let desktop  = args["desktop"].as_bool().unwrap_or(true);
+    let desktop = args["desktop"].as_bool().unwrap_or(true);
 
     // Resolve ntfy topic
-    let topic = args["topic"].as_str()
+    let topic = args["topic"]
+        .as_str()
         .map(str::to_owned)
         .or_else(|| std::env::var("NTFY_TOPIC").ok().filter(|t| !t.is_empty()));
     let phone = args["phone"].as_bool().unwrap_or(topic.is_some());
 
-    let tags: Vec<&str> = args["tags"].as_array()
+    let tags: Vec<&str> = args["tags"]
+        .as_array()
         .map(|a| a.iter().filter_map(|v| v.as_str()).collect())
         .unwrap_or_default();
 
     let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("/"));
     let mut desktop_result = json!(null);
-    let mut phone_result   = json!(null);
+    let mut phone_result = json!(null);
 
     // ── Desktop notification ──────────────────────────────────────────────────
     if desktop {
         // Escape for shell
-        let safe_title   = title.replace('"', "\\\"");
+        let safe_title = title.replace('"', "\\\"");
         let safe_message = message.replace('"', "\\\"");
 
-        let cmd = format!(
-            r#"notify-send -u {urgency} -i {icon} "{safe_title}" "{safe_message}""#
-        );
+        let cmd = format!(r#"notify-send -u {urgency} -i {icon} "{safe_title}" "{safe_message}""#);
         let raw = run(&cmd, &cwd, &[], "", Duration::from_secs(5));
-        let ok  = raw["success"].as_bool().unwrap_or(false);
+        let ok = raw["success"].as_bool().unwrap_or(false);
 
         desktop_result = json!({
             "sent":   ok,
@@ -78,7 +80,7 @@ pub fn notify(args: &Value) -> Result<ToolResult, String> {
                     format!(" -H 'Tags: {}'", tags.join(","))
                 };
 
-                let safe_msg   = message.replace('\'', "'\\''");
+                let safe_msg = message.replace('\'', "'\\''");
                 let safe_title = title.replace('\'', "'\\''");
 
                 let cmd = format!(
@@ -90,7 +92,7 @@ pub fn notify(args: &Value) -> Result<ToolResult, String> {
                 );
 
                 let raw = run(&cmd, &cwd, &[], "", Duration::from_secs(15));
-                let ok  = raw["success"].as_bool().unwrap_or(false);
+                let ok = raw["success"].as_bool().unwrap_or(false);
 
                 phone_result = json!({
                     "sent":  ok,

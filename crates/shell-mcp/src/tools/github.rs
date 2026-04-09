@@ -16,22 +16,23 @@ use crate::protocol::ToolResult;
 use crate::server::ServerState;
 use crate::tools::execution::run;
 use crate::tools::project::expand_tilde;
+use crate::tools::state::read_cwd;
 
 const GITHUB_USER: &str = "DaronPopov";
 
 // ── gh_clone ──────────────────────────────────────────────────────────────────
 
 pub fn gh_clone(args: &Value) -> Result<ToolResult, String> {
-    let repo = args["repo"].as_str().ok_or("gh_clone: 'repo' is required")?;
+    let repo = args["repo"]
+        .as_str()
+        .ok_or("gh_clone: 'repo' is required")?;
     let branch = args["branch"].as_str().unwrap_or("");
     let shallow = args["shallow"].as_bool().unwrap_or(false);
 
-    let local_path = args["dest"].as_str()
-        .map(expand_tilde)
-        .unwrap_or_else(|| {
-            let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_owned());
-            PathBuf::from(home).join(repo)
-        });
+    let local_path = args["dest"].as_str().map(expand_tilde).unwrap_or_else(|| {
+        let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_owned());
+        PathBuf::from(home).join(repo)
+    });
 
     let ssh_url = format!("git@github.com:{GITHUB_USER}/{repo}.git");
 
@@ -48,8 +49,8 @@ pub fn gh_clone(args: &Value) -> Result<ToolResult, String> {
     let raw = run(&cmd, &cwd, &[], "", Duration::from_secs(120));
 
     let success = raw["success"].as_bool().unwrap_or(false);
-    let stdout  = raw["stdout"].as_str().unwrap_or("").to_owned();
-    let stderr  = raw["stderr"].as_str().unwrap_or("").to_owned();
+    let stdout = raw["stdout"].as_str().unwrap_or("").to_owned();
+    let stderr = raw["stderr"].as_str().unwrap_or("").to_owned();
 
     // Detect actual branch cloned
     let actual_branch = if !branch.is_empty() {
@@ -73,9 +74,9 @@ pub fn gh_clone(args: &Value) -> Result<ToolResult, String> {
 // ── gh_sync ───────────────────────────────────────────────────────────────────
 
 pub fn gh_sync(args: &Value, state: &Arc<Mutex<ServerState>>) -> Result<ToolResult, String> {
-    let op       = args["op"].as_str().unwrap_or("pull");
-    let branch   = args["branch"].as_str().unwrap_or("");
-    let remote   = args["remote"].as_str().unwrap_or("origin");
+    let op = args["op"].as_str().unwrap_or("pull");
+    let branch = args["branch"].as_str().unwrap_or("");
+    let remote = args["remote"].as_str().unwrap_or("origin");
 
     let path = resolve_work_path(args, state)?;
     let root = git_root_for(&path)?;
@@ -94,16 +95,16 @@ pub fn gh_sync(args: &Value, state: &Arc<Mutex<ServerState>>) -> Result<ToolResu
     };
 
     let cmd = match op {
-        "push"  => format!("git push {push_target} {actual_branch}"),
+        "push" => format!("git push {push_target} {actual_branch}"),
         "fetch" => format!("git fetch {remote}"),
-        _       => format!("git pull {remote} {actual_branch}"),
+        _ => format!("git pull {remote} {actual_branch}"),
     };
 
     let raw = run(&cmd, &root, &[], "", Duration::from_secs(120));
 
     let success = raw["success"].as_bool().unwrap_or(false);
-    let stdout  = raw["stdout"].as_str().unwrap_or("").to_owned();
-    let stderr  = raw["stderr"].as_str().unwrap_or("").to_owned();
+    let stdout = raw["stdout"].as_str().unwrap_or("").to_owned();
+    let stderr = raw["stderr"].as_str().unwrap_or("").to_owned();
     let combined = format!("{stdout}{stderr}");
 
     let fast_forward = combined.contains("Fast-forward") || combined.contains("fast-forward");
@@ -157,7 +158,8 @@ pub fn gh_status(args: &Value, state: &Arc<Mutex<ServerState>>) -> Result<ToolRe
             continue;
         }
 
-        let project = root.file_name()
+        let project = root
+            .file_name()
             .unwrap_or_default()
             .to_string_lossy()
             .into_owned();
@@ -254,14 +256,13 @@ fn detect_ahead_behind(root: &PathBuf, branch: &str) -> (i64, i64) {
         return (0, 0);
     }
 
-    // Refresh remote tracking refs with a tight timeout (no hanging on bad SSH)
-    let _fetch = run("git fetch --quiet --no-tags", root, &[], "", Duration::from_secs(8));
-    // Ignore fetch failure — stale tracking refs are still useful
-
     // Check that origin/<branch> tracking ref exists before comparing
     let ref_check = run(
         &format!("git rev-parse --verify origin/{branch}"),
-        root, &[], "", Duration::from_secs(4),
+        root,
+        &[],
+        "",
+        Duration::from_secs(4),
     );
     if !ref_check["success"].as_bool().unwrap_or(false) {
         return (0, 0);
@@ -269,7 +270,10 @@ fn detect_ahead_behind(root: &PathBuf, branch: &str) -> (i64, i64) {
 
     let rev_list = run(
         &format!("git rev-list --left-right --count origin/{branch}...HEAD"),
-        root, &[], "", Duration::from_secs(8),
+        root,
+        &[],
+        "",
+        Duration::from_secs(8),
     );
 
     if rev_list["success"].as_bool().unwrap_or(false) {
@@ -277,7 +281,7 @@ fn detect_ahead_behind(root: &PathBuf, branch: &str) -> (i64, i64) {
         let parts: Vec<&str> = s.split_whitespace().collect();
         if parts.len() == 2 {
             let behind = parts[0].parse::<i64>().unwrap_or(0);
-            let ahead  = parts[1].parse::<i64>().unwrap_or(0);
+            let ahead = parts[1].parse::<i64>().unwrap_or(0);
             return (ahead, behind);
         }
     }
@@ -321,10 +325,7 @@ fn resolve_work_path(args: &Value, state: &Arc<Mutex<ServerState>>) -> Result<Pa
     if let Some(path) = args["path"].as_str() {
         Ok(expand_tilde(path))
     } else {
-        Ok(state.lock()
-            .map_err(|e| format!("state lock poisoned: {e}"))?
-            .cwd
-            .clone())
+        Ok(read_cwd(state))
     }
 }
 

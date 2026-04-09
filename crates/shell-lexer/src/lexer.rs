@@ -22,7 +22,11 @@ pub struct Lexer<'src> {
 
 impl<'src> Lexer<'src> {
     pub fn new(src: &'src str) -> Self {
-        Self { src, pos: 0, done: false }
+        Self {
+            src,
+            pos: 0,
+            done: false,
+        }
     }
 
     // ── Primitive helpers ────────────────────────────────────────────────────
@@ -59,17 +63,8 @@ impl<'src> Lexer<'src> {
     fn scan_word(&mut self, start: usize) -> TokenKind {
         loop {
             match self.peek() {
-                None
-                | Some(' ')
-                | Some('\t')
-                | Some('\n')
-                | Some(';')
-                | Some('|')
-                | Some('&')
-                | Some('<')
-                | Some('>')
-                | Some('(')
-                | Some(')') => break,
+                None | Some(' ') | Some('\t') | Some('\n') | Some(';') | Some('|') | Some('&')
+                | Some('<') | Some('>') | Some('(') | Some(')') => break,
                 Some('\\') => {
                     self.advance(); // consume backslash
                     self.advance(); // consume escaped char

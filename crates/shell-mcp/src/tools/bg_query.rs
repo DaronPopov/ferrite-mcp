@@ -9,26 +9,30 @@ use serde_json::{json, Value};
 
 use crate::job_store::JobStore;
 use crate::protocol::ToolResult;
+use crate::tools::state::lock_mutex;
 
 // ── bg_status ─────────────────────────────────────────────────────────────────
 
 pub fn bg_status(args: &Value, store: &Arc<JobStore>) -> Result<ToolResult, String> {
-    let job_id     = args["job_id"].as_str().ok_or("bg_status: 'job_id' is required")?;
+    let job_id = args["job_id"]
+        .as_str()
+        .ok_or("bg_status: 'job_id' is required")?;
     let from_start = args["from_start"].as_bool().unwrap_or(false);
 
-    let job = store.get(job_id)
+    let job = store
+        .get(job_id)
         .ok_or_else(|| format!("bg_status: job '{job_id}' not found"))?;
 
     let status = job.current_status();
 
     let (new_stdout, new_stderr) = if from_start {
         {
-            let buf = job.stdout_buf.lock().unwrap();
-            *job.stdout_cursor.lock().unwrap() = buf.len();
+            let buf = lock_mutex(&job.stdout_buf, "job stdout buffer");
+            *lock_mutex(&job.stdout_cursor, "job stdout cursor") = buf.len();
         }
         {
-            let buf = job.stderr_buf.lock().unwrap();
-            *job.stderr_cursor.lock().unwrap() = buf.len();
+            let buf = lock_mutex(&job.stderr_buf, "job stderr buffer");
+            *lock_mutex(&job.stderr_cursor, "job stderr cursor") = buf.len();
         }
         (job.full_stdout(), job.full_stderr())
     } else {
@@ -60,14 +64,17 @@ pub fn bg_status(args: &Value, store: &Arc<JobStore>) -> Result<ToolResult, Stri
 // ── bg_wait ───────────────────────────────────────────────────────────────────
 
 pub fn bg_wait(args: &Value, store: &Arc<JobStore>) -> Result<ToolResult, String> {
-    let job_id       = args["job_id"].as_str().ok_or("bg_wait: 'job_id' is required")?;
+    let job_id = args["job_id"]
+        .as_str()
+        .ok_or("bg_wait: 'job_id' is required")?;
     let timeout_secs = args["timeout_secs"].as_u64().unwrap_or(3600);
 
-    let job = store.get(job_id)
+    let job = store
+        .get(job_id)
         .ok_or_else(|| format!("bg_wait: job '{job_id}' not found"))?;
 
     let completed = job.wait(Duration::from_secs(timeout_secs));
-    let status    = job.current_status();
+    let status = job.current_status();
     store.persist_all();
 
     Ok(ToolResult::json(&json!({
@@ -88,16 +95,19 @@ pub fn bg_wait(args: &Value, store: &Arc<JobStore>) -> Result<ToolResult, String
 // ── bg_tail ───────────────────────────────────────────────────────────────────
 
 pub fn bg_tail(args: &Value, store: &Arc<JobStore>) -> Result<ToolResult, String> {
-    let job_id = args["job_id"].as_str().ok_or("bg_tail: 'job_id' is required")?;
-    let lines  = args["lines"].as_u64().unwrap_or(50) as usize;
+    let job_id = args["job_id"]
+        .as_str()
+        .ok_or("bg_tail: 'job_id' is required")?;
+    let lines = args["lines"].as_u64().unwrap_or(50) as usize;
 
-    let job = store.get(job_id)
+    let job = store
+        .get(job_id)
         .ok_or_else(|| format!("bg_tail: job '{job_id}' not found"))?;
 
     let output = if job.log_path.exists() {
         match std::fs::read_to_string(&job.log_path) {
             Ok(content) => last_n_lines(&content, lines),
-            Err(e)      => format!("[log read error: {e}]"),
+            Err(e) => format!("[log read error: {e}]"),
         }
     } else {
         last_n_lines(&String::from_utf8_lossy(&job.full_stdout()), lines)
@@ -128,28 +138,35 @@ pub fn bg_list(_args: &Value, store: &Arc<JobStore>) -> Result<ToolResult, Strin
 
     // Persist any status changes we observe during listing.
     let mut any_terminal_observed = false;
-    let list: Vec<Value> = jobs.iter().map(|job| {
-        let status = job.current_status();
-        if status.is_terminal() { any_terminal_observed = true; }
-        json!({
-            "job_id":       job.job_id,
-            "pid":          job.pid,
-            "label":        job.label,
-            "cmd":          job.cmd,
-            "status":       status.label(),
-            "exit_code":    status.exit_code(),
-            "elapsed_secs": round1(job.elapsed_secs()),
-            "stdout_bytes": job.stdout_bytes(),
-            "stderr_bytes": job.stderr_bytes(),
-            "log_path":     job.log_path.display().to_string(),
+    let list: Vec<Value> = jobs
+        .iter()
+        .map(|job| {
+            let status = job.current_status();
+            if status.is_terminal() {
+                any_terminal_observed = true;
+            }
+            json!({
+                "job_id":       job.job_id,
+                "pid":          job.pid,
+                "label":        job.label,
+                "cmd":          job.cmd,
+                "status":       status.label(),
+                "exit_code":    status.exit_code(),
+                "elapsed_secs": round1(job.elapsed_secs()),
+                "stdout_bytes": job.stdout_bytes(),
+                "stderr_bytes": job.stderr_bytes(),
+                "log_path":     job.log_path.display().to_string(),
+            })
         })
-    }).collect();
+        .collect();
 
-    if any_terminal_observed { store.persist_all(); }
+    if any_terminal_observed {
+        store.persist_all();
+    }
 
     let running = list.iter().filter(|j| j["status"] == "running").count();
-    let done    = list.iter().filter(|j| j["status"] == "done").count();
-    let failed  = list.iter().filter(|j| j["status"] == "failed").count();
+    let done = list.iter().filter(|j| j["status"] == "done").count();
+    let failed = list.iter().filter(|j| j["status"] == "failed").count();
 
     Ok(ToolResult::json(&json!({
         "jobs":    list,
@@ -160,13 +177,18 @@ pub fn bg_list(_args: &Value, store: &Arc<JobStore>) -> Result<ToolResult, Strin
 // ── wait_for_pattern ─────────────────────────────────────────────────────────
 
 pub fn wait_for_pattern(args: &Value, store: &Arc<JobStore>) -> Result<ToolResult, String> {
-    let job_id       = args["job_id"].as_str().ok_or("wait_for_pattern: 'job_id' is required")?;
-    let pattern      = args["pattern"].as_str().ok_or("wait_for_pattern: 'pattern' is required")?;
+    let job_id = args["job_id"]
+        .as_str()
+        .ok_or("wait_for_pattern: 'job_id' is required")?;
+    let pattern = args["pattern"]
+        .as_str()
+        .ok_or("wait_for_pattern: 'pattern' is required")?;
     let timeout_secs = args["timeout_secs"].as_u64().unwrap_or(60);
-    let from_cursor  = args["from_cursor"].as_bool().unwrap_or(false);
+    let from_cursor = args["from_cursor"].as_bool().unwrap_or(false);
     let check_stderr = args["include_stderr"].as_bool().unwrap_or(true);
 
-    let job = store.get(job_id)
+    let job = store
+        .get(job_id)
         .ok_or_else(|| format!("wait_for_pattern: job '{job_id}' not found"))?;
 
     let re = Regex::new(pattern)
@@ -174,7 +196,7 @@ pub fn wait_for_pattern(args: &Value, store: &Arc<JobStore>) -> Result<ToolResul
 
     // Where to start searching in the buffer.
     let search_from: usize = if from_cursor {
-        *job.stdout_cursor.lock().unwrap()
+        *lock_mutex(&job.stdout_cursor, "job stdout cursor")
     } else {
         0
     };
@@ -184,7 +206,7 @@ pub fn wait_for_pattern(args: &Value, store: &Arc<JobStore>) -> Result<ToolResul
     loop {
         // Search stdout from search_from.
         let (found, match_line, line_num) = {
-            let buf  = job.stdout_buf.lock().unwrap();
+            let buf = lock_mutex(&job.stdout_buf, "job stdout buffer");
             let text = String::from_utf8_lossy(&buf[search_from..]);
             find_first_match(&text, &re)
         };
@@ -205,8 +227,12 @@ pub fn wait_for_pattern(args: &Value, store: &Arc<JobStore>) -> Result<ToolResul
         // Optionally search stderr.
         if check_stderr {
             let (found, match_line, line_num) = {
-                let buf  = job.stderr_buf.lock().unwrap();
-                let from = if from_cursor { *job.stderr_cursor.lock().unwrap() } else { 0 };
+                let buf = lock_mutex(&job.stderr_buf, "job stderr buffer");
+                let from = if from_cursor {
+                    *lock_mutex(&job.stderr_cursor, "job stderr cursor")
+                } else {
+                    0
+                };
                 let text = String::from_utf8_lossy(&buf[from..]);
                 find_first_match(&text, &re)
             };
@@ -254,23 +280,26 @@ pub fn wait_for_pattern(args: &Value, store: &Arc<JobStore>) -> Result<ToolResul
 // ── wait_for_idle ─────────────────────────────────────────────────────────────
 
 pub fn wait_for_idle(args: &Value, store: &Arc<JobStore>) -> Result<ToolResult, String> {
-    let job_id       = args["job_id"].as_str().ok_or("wait_for_idle: 'job_id' is required")?;
-    let idle_secs    = args["idle_secs"].as_u64().unwrap_or(2);
+    let job_id = args["job_id"]
+        .as_str()
+        .ok_or("wait_for_idle: 'job_id' is required")?;
+    let idle_secs = args["idle_secs"].as_u64().unwrap_or(2);
     let timeout_secs = args["timeout_secs"].as_u64().unwrap_or(300);
 
-    let job = store.get(job_id)
+    let job = store
+        .get(job_id)
         .ok_or_else(|| format!("wait_for_idle: job '{job_id}' not found"))?;
 
-    let deadline    = Instant::now() + Duration::from_secs(timeout_secs);
+    let deadline = Instant::now() + Duration::from_secs(timeout_secs);
     let idle_window = Duration::from_secs(idle_secs);
 
-    let mut last_total   = job.stdout_bytes() + job.stderr_bytes();
-    let mut quiet_since  = Instant::now();
+    let mut last_total = job.stdout_bytes() + job.stderr_bytes();
+    let mut quiet_since = Instant::now();
 
     loop {
         let current_total = job.stdout_bytes() + job.stderr_bytes();
         if current_total > last_total {
-            last_total  = current_total;
+            last_total = current_total;
             quiet_since = Instant::now();
         }
 
@@ -314,21 +343,26 @@ pub fn wait_for_idle(args: &Value, store: &Arc<JobStore>) -> Result<ToolResult, 
 // ── output_summary ────────────────────────────────────────────────────────────
 
 pub fn output_summary(args: &Value, store: &Arc<JobStore>) -> Result<ToolResult, String> {
-    let job_id      = args["job_id"].as_str().ok_or("output_summary: 'job_id' is required")?;
-    let head_lines  = args["head_lines"].as_u64().unwrap_or(20) as usize;
-    let tail_lines  = args["tail_lines"].as_u64().unwrap_or(30) as usize;
-    let err_pattern = args["error_pattern"].as_str()
+    let job_id = args["job_id"]
+        .as_str()
+        .ok_or("output_summary: 'job_id' is required")?;
+    let head_lines = args["head_lines"].as_u64().unwrap_or(20) as usize;
+    let tail_lines = args["tail_lines"].as_u64().unwrap_or(30) as usize;
+    let err_pattern = args["error_pattern"]
+        .as_str()
         .unwrap_or(r"(?i)(error|fatal|panic|failed|traceback|exception)");
-    let warn_pattern = args["warn_pattern"].as_str()
+    let warn_pattern = args["warn_pattern"]
+        .as_str()
         .unwrap_or(r"(?i)(warning|warn\b|deprecated)");
 
-    let job = store.get(job_id)
+    let job = store
+        .get(job_id)
         .ok_or_else(|| format!("output_summary: job '{job_id}' not found"))?;
 
-    let err_re  = Regex::new(err_pattern)
-        .map_err(|e| format!("output_summary: bad error_pattern: {e}"))?;
-    let warn_re = Regex::new(warn_pattern)
-        .map_err(|e| format!("output_summary: bad warn_pattern: {e}"))?;
+    let err_re =
+        Regex::new(err_pattern).map_err(|e| format!("output_summary: bad error_pattern: {e}"))?;
+    let warn_re =
+        Regex::new(warn_pattern).map_err(|e| format!("output_summary: bad warn_pattern: {e}"))?;
 
     // Read combined log for interleaved output — fall back to stdout if missing.
     let combined = if job.log_path.exists() {
@@ -340,18 +374,21 @@ pub fn output_summary(args: &Value, store: &Arc<JobStore>) -> Result<ToolResult,
     let all_lines: Vec<&str> = combined.lines().collect();
     let total_lines = all_lines.len();
 
-    let mut errors:   Vec<&str> = Vec::new();
+    let mut errors: Vec<&str> = Vec::new();
     let mut warnings: Vec<&str> = Vec::new();
 
     for line in &all_lines {
-        if err_re.is_match(line)  { errors.push(line); }
-        else if warn_re.is_match(line) { warnings.push(line); }
+        if err_re.is_match(line) {
+            errors.push(line);
+        } else if warn_re.is_match(line) {
+            warnings.push(line);
+        }
     }
 
     // Cap error/warning lists to avoid flooding context.
-    let error_cap   = 50;
+    let error_cap = 50;
     let warning_cap = 30;
-    let errors_truncated   = errors.len() > error_cap;
+    let errors_truncated = errors.len() > error_cap;
     let warnings_truncated = warnings.len() > warning_cap;
     errors.truncate(error_cap);
     warnings.truncate(warning_cap);

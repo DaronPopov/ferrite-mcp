@@ -5,13 +5,14 @@
 //!            ports are opt-in (ports:true) and filtered to named processes only
 //!   note   — session scratchpad stored in ServerState (read/append/clear)
 
-use std::sync::{Arc, Mutex};
 use serde_json::{json, Value};
+use std::sync::{Arc, Mutex};
 
+use super::{eda, filesystem, git, hardware, project, system};
 use crate::job_store::JobStore;
 use crate::protocol::ToolResult;
 use crate::server::ServerState;
-use super::{filesystem, git, system, hardware, eda, project};
+use crate::tools::state::{read_cwd, read_notes, with_notes};
 
 // ── orient ────────────────────────────────────────────────────────────────────
 
@@ -23,13 +24,14 @@ use super::{filesystem, git, system, hardware, eda, project};
 ///   - `recent`    — recently changed SOURCE files (build artifacts + SDK noise suppressed)
 ///   - `ports`     — opt-in (ports:true), named processes only
 ///   - `summary`   — one-line compact string for fast orientation
-pub fn orient(args: &Value, state: &Arc<Mutex<ServerState>>, store: &Arc<JobStore>) -> Result<ToolResult, String> {
-    let cwd = {
-        let s = state.lock().unwrap();
-        s.cwd.to_string_lossy().into_owned()
-    };
+pub fn orient(
+    args: &Value,
+    state: &Arc<Mutex<ServerState>>,
+    store: &Arc<JobStore>,
+) -> Result<ToolResult, String> {
+    let cwd = read_cwd(state).to_string_lossy().into_owned();
 
-    let path          = args["path"].as_str().unwrap_or(&cwd).to_owned();
+    let path = args["path"].as_str().unwrap_or(&cwd).to_owned();
     let recent_window = args["since"].as_str().unwrap_or("2h");
     let include_ports = args["ports"].as_bool().unwrap_or(false);
 
@@ -39,10 +41,10 @@ pub fn orient(args: &Value, state: &Arc<Mutex<ServerState>>, store: &Arc<JobStor
 
     // ── opt-in expansion flags ────────────────────────────────────────────────
     let include_bg_jobs = args["bg_jobs"].as_bool().unwrap_or(false);
-    let include_chips   = args["chips"].as_bool().unwrap_or(false);
-    let include_synth   = args["synth"].as_bool().unwrap_or(false);
-    let include_diff    = args["diff"].as_bool().unwrap_or(false);
-    let include_hw      = args["hw"].as_bool().unwrap_or(false);
+    let include_chips = args["chips"].as_bool().unwrap_or(false);
+    let include_synth = args["synth"].as_bool().unwrap_or(false);
+    let include_diff = args["diff"].as_bool().unwrap_or(false);
+    let include_hw = args["hw"].as_bool().unwrap_or(false);
 
     // ── project discovery ─────────────────────────────────────────────────────
     let projects = discover_projects(&discover_root);
@@ -58,11 +60,14 @@ pub fn orient(args: &Value, state: &Arc<Mutex<ServerState>>, store: &Arc<JobStor
     };
 
     // ── recently changed SOURCE files (artifacts + SDK noise suppressed) ───────
-    let (recent_val, artifacts_suppressed) = match filesystem::changed_since(&json!({
-        "path":           home,
-        "since_relative": recent_window,
-        "max_results":    80,
-    }), state) {
+    let (recent_val, artifacts_suppressed) = match filesystem::changed_since(
+        &json!({
+            "path":           home,
+            "since_relative": recent_window,
+            "max_results":    80,
+        }),
+        state,
+    ) {
         Ok(tr) => slim_changed_filtered(parse_tool_result_json(&tr)),
         Err(_) => (json!({ "count": 0, "changed": [] }), 0usize),
     };
@@ -116,7 +121,15 @@ pub fn orient(args: &Value, state: &Arc<Mutex<ServerState>>, store: &Arc<JobStor
     };
 
     // ── compact summary string ────────────────────────────────────────────────
-    let mut summary = build_summary(&path, &git_val, &recent_val, artifacts_suppressed, &projects, &ports_val, include_ports);
+    let mut summary = build_summary(
+        &path,
+        &git_val,
+        &recent_val,
+        artifacts_suppressed,
+        &projects,
+        &ports_val,
+        include_ports,
+    );
 
     // Append active-job count when bg_jobs was requested
     if include_bg_jobs {
@@ -155,34 +168,42 @@ pub fn note(args: &Value, state: &Arc<Mutex<ServerState>>) -> Result<ToolResult,
 
     match op {
         "read" => {
-            let s = state.lock().unwrap();
+            let notes = read_notes(state);
             Ok(ToolResult::json(&json!({
-                "count": s.notes.len(),
-                "notes": s.notes,
+                "count": notes.len(),
+                "notes": notes,
             })))
         }
         "append" => {
-            let content = args["content"].as_str()
+            let content = args["content"]
+                .as_str()
                 .ok_or("note append: 'content' required")?
                 .to_owned();
-            let mut s = state.lock().unwrap();
-            s.notes.push(content.clone());
+            let count = with_notes(state, |notes| {
+                notes.push(content.clone());
+                notes.len()
+            });
             Ok(ToolResult::json(&json!({
                 "ok":    true,
-                "count": s.notes.len(),
+                "count": count,
                 "added": content,
             })))
         }
         "clear" => {
-            let mut s = state.lock().unwrap();
-            let prev = s.notes.len();
-            s.notes.clear();
+            let prev = with_notes(state, |notes| {
+                let prev = notes.len();
+                notes.clear();
+                prev
+            });
             Ok(ToolResult::json(&json!({
                 "ok":      true,
                 "cleared": prev,
             })))
         }
-        other => Err(format!("note: unknown op '{}' — use read|append|clear", other)),
+        other => Err(format!(
+            "note: unknown op '{}' — use read|append|clear",
+            other
+        )),
     }
 }
 
@@ -191,24 +212,40 @@ pub fn note(args: &Value, state: &Arc<Mutex<ServerState>>) -> Result<ToolResult,
 /// Top-level directory names to skip during project discovery.
 /// These are noisy (system, SDK, media) and not project roots.
 const SKIP_DIRS: &[&str] = &[
-    "nvidia", "nvidia_sdk", "Downloads", "Desktop", "Pictures",
-    "Videos", "Music", "Templates", "Public", "snap", "flatpak",
-    "go", "gems", "perl5",
+    "nvidia",
+    "nvidia_sdk",
+    "Downloads",
+    "Desktop",
+    "Pictures",
+    "Videos",
+    "Music",
+    "Templates",
+    "Public",
+    "snap",
+    "flatpak",
+    "go",
+    "gems",
+    "perl5",
 ];
 
 /// Discover projects under `root`. Walks depth 1, and depth 2 for
 /// dirs that look like workspace containers rather than projects themselves.
 fn discover_projects(root: &str) -> Vec<Value> {
     let root_path = std::path::PathBuf::from(root);
-    let Ok(entries) = std::fs::read_dir(&root_path) else { return vec![] };
+    let Ok(entries) = std::fs::read_dir(&root_path) else {
+        return vec![];
+    };
 
     let mut projects = Vec::new();
 
     for entry in entries.filter_map(|e| e.ok()) {
         let path = entry.path();
-        if !path.is_dir() { continue; }
+        if !path.is_dir() {
+            continue;
+        }
 
-        let name = path.file_name()
+        let name = path
+            .file_name()
             .and_then(|n| n.to_str())
             .unwrap_or("")
             .to_owned();
@@ -225,12 +262,17 @@ fn discover_projects(root: &str) -> Vec<Value> {
             if let Ok(sub_entries) = std::fs::read_dir(&path) {
                 for sub in sub_entries.filter_map(|e| e.ok()) {
                     let sub_path = sub.path();
-                    if !sub_path.is_dir() { continue; }
-                    let sub_name = sub_path.file_name()
+                    if !sub_path.is_dir() {
+                        continue;
+                    }
+                    let sub_name = sub_path
+                        .file_name()
                         .and_then(|n| n.to_str())
                         .unwrap_or("")
                         .to_owned();
-                    if sub_name.starts_with('.') { continue; }
+                    if sub_name.starts_with('.') {
+                        continue;
+                    }
                     if let Some(proj) = classify_project(&sub_path, &sub_name) {
                         projects.push(proj);
                     }
@@ -241,7 +283,10 @@ fn discover_projects(root: &str) -> Vec<Value> {
 
     // Sort by path for stable output
     projects.sort_by(|a, b| {
-        a["path"].as_str().unwrap_or("").cmp(b["path"].as_str().unwrap_or(""))
+        a["path"]
+            .as_str()
+            .unwrap_or("")
+            .cmp(b["path"].as_str().unwrap_or(""))
     });
 
     projects
@@ -249,14 +294,13 @@ fn discover_projects(root: &str) -> Vec<Value> {
 
 /// Identify a project directory by its marker files. Returns None if no markers found.
 fn classify_project(path: &std::path::Path, name: &str) -> Option<Value> {
-    let has_git       = path.join(".git").exists();
-    let has_cargo     = path.join("Cargo.toml").exists();
+    let has_git = path.join(".git").exists();
+    let has_cargo = path.join("Cargo.toml").exists();
     let has_pyproject = path.join("pyproject.toml").exists() || path.join("setup.py").exists();
-    let has_pkg_json  = path.join("package.json").exists();
-    let has_rtl       = path.join("rtl").exists()
-                     || path.join("chips").exists()
-                     || path.join("ip").exists();
-    let has_makefile  = path.join("Makefile").exists();
+    let has_pkg_json = path.join("package.json").exists();
+    let has_rtl =
+        path.join("rtl").exists() || path.join("chips").exists() || path.join("ip").exists();
+    let has_makefile = path.join("Makefile").exists();
 
     // Need at least one meaningful marker
     if !has_git && !has_cargo && !has_pyproject && !has_pkg_json && !has_rtl {
@@ -265,11 +309,21 @@ fn classify_project(path: &std::path::Path, name: &str) -> Option<Value> {
 
     // Build kind tags
     let mut kinds: Vec<&str> = Vec::new();
-    if has_rtl       { kinds.push("rtl"); }
-    if has_cargo     { kinds.push("rust"); }
-    if has_pyproject { kinds.push("python"); }
-    if has_pkg_json  { kinds.push("node"); }
-    if kinds.is_empty() { kinds.push("git"); }
+    if has_rtl {
+        kinds.push("rtl");
+    }
+    if has_cargo {
+        kinds.push("rust");
+    }
+    if has_pyproject {
+        kinds.push("python");
+    }
+    if has_pkg_json {
+        kinds.push("node");
+    }
+    if kinds.is_empty() {
+        kinds.push("git");
+    }
 
     // Read git branch without shelling out
     let branch = if has_git {
@@ -310,10 +364,12 @@ fn read_git_head(head_path: &std::path::Path) -> Option<String> {
 
 /// Extract JSON from a ToolResult's first content item, or return raw text as string value.
 fn parse_tool_result_json(tr: &ToolResult) -> Value {
-    tr.content.first()
+    tr.content
+        .first()
         .and_then(|c| serde_json::from_str(&c.text).ok())
         .unwrap_or_else(|| {
-            tr.content.first()
+            tr.content
+                .first()
                 .map(|c| Value::String(c.text.clone()))
                 .unwrap_or(Value::Null)
         })
@@ -330,20 +386,22 @@ fn cap_array_field(v: &mut Value, key: &str, max: usize) {
 
 /// Build artifact file extensions — generated files that are never source.
 const ARTIFACT_EXTENSIONS: &[&str] = &[
-    ".log", ".jou", ".bit", ".rpt", ".dcp", ".xpr",
-    ".pb",  ".xml", ".vcd", ".wdb", ".ltx", ".mmi",
+    ".log", ".jou", ".bit", ".rpt", ".dcp", ".xpr", ".pb", ".xml", ".vcd", ".wdb", ".ltx", ".mmi",
 ];
 
 /// Path segments that indicate build output directories.
 const ARTIFACT_PATH_SEGMENTS: &[&str] = &[
-    "/build/", "/sim_build/", "/__pycache__/", "/.Xil/",
-    "/runs/",  "/.cache/",    "/target/",
+    "/build/",
+    "/sim_build/",
+    "/__pycache__/",
+    "/.Xil/",
+    "/runs/",
+    "/.cache/",
+    "/target/",
 ];
 
 /// File name fragments that mark backup/log artifacts.
-const ARTIFACT_NAME_SEGMENTS: &[&str] = &[
-    ".backup.", "backup.log", "backup.jou",
-];
+const ARTIFACT_NAME_SEGMENTS: &[&str] = &[".backup.", "backup.log", "backup.jou"];
 
 /// Path segments that indicate SDK/system noise — rootfs trees, runtime dirs, etc.
 const NOISE_PATH_SEGMENTS: &[&str] = &[
@@ -376,10 +434,10 @@ fn is_noise(path: &str) -> bool {
 fn slim_changed_filtered(v: Value) -> (Value, usize) {
     let all = match v["changed"].as_array() {
         Some(a) => a.clone(),
-        None    => return (json!({ "count": 0, "changed": [] }), 0),
+        None => return (json!({ "count": 0, "changed": [] }), 0),
     };
 
-    let mut source     = Vec::new();
+    let mut source = Vec::new();
     let mut suppressed = 0usize;
 
     for f in &all {
@@ -408,24 +466,34 @@ fn slim_changed_filtered(v: Value) -> (Value, usize) {
 fn filter_named_ports(v: Value) -> Value {
     match v.as_array() {
         Some(ports) => {
-            let named: Vec<Value> = ports.iter()
-                .filter(|p| p["process"].as_str().map(|s| !s.is_empty()).unwrap_or(false))
+            let named: Vec<Value> = ports
+                .iter()
+                .filter(|p| {
+                    p["process"]
+                        .as_str()
+                        .map(|s| !s.is_empty())
+                        .unwrap_or(false)
+                })
                 .cloned()
                 .collect();
             json!(named)
         }
-        None => {
-            match v["ports"].as_array() {
-                Some(arr) => {
-                    let named: Vec<Value> = arr.iter()
-                        .filter(|p| p["process"].as_str().map(|s| !s.is_empty()).unwrap_or(false))
-                        .cloned()
-                        .collect();
-                    json!(named)
-                }
-                None => json!([]),
+        None => match v["ports"].as_array() {
+            Some(arr) => {
+                let named: Vec<Value> = arr
+                    .iter()
+                    .filter(|p| {
+                        p["process"]
+                            .as_str()
+                            .map(|s| !s.is_empty())
+                            .unwrap_or(false)
+                    })
+                    .cloned()
+                    .collect();
+                json!(named)
             }
-        }
+            None => json!([]),
+        },
     }
 }
 
@@ -447,28 +515,39 @@ fn build_summary(
     let git_summary = if git.is_null() {
         "not a git repo".to_owned()
     } else {
-        let branch   = git["branch"].as_str().unwrap_or("?");
-        let clean    = git["clean"].as_bool().unwrap_or(true);
-        let ahead    = git["ahead"].as_u64().unwrap_or(0);
-        let behind   = git["behind"].as_u64().unwrap_or(0);
-        let staged   = git["staged"].as_array().map(|a| a.len()).unwrap_or(0);
+        let branch = git["branch"].as_str().unwrap_or("?");
+        let clean = git["clean"].as_bool().unwrap_or(true);
+        let ahead = git["ahead"].as_u64().unwrap_or(0);
+        let behind = git["behind"].as_u64().unwrap_or(0);
+        let staged = git["staged"].as_array().map(|a| a.len()).unwrap_or(0);
         let unstaged = git["unstaged"].as_array().map(|a| a.len()).unwrap_or(0);
 
         let mut parts = vec![format!("branch: {}", branch)];
         if clean {
             parts.push("clean".to_owned());
         } else {
-            if staged   > 0 { parts.push(format!("{} staged", staged)); }
-            if unstaged > 0 { parts.push(format!("{} unstaged", unstaged)); }
+            if staged > 0 {
+                parts.push(format!("{} staged", staged));
+            }
+            if unstaged > 0 {
+                parts.push(format!("{} unstaged", unstaged));
+            }
         }
-        if ahead  > 0 { parts.push(format!("+{} ahead", ahead)); }
-        if behind > 0 { parts.push(format!("{} behind", behind)); }
+        if ahead > 0 {
+            parts.push(format!("+{} ahead", ahead));
+        }
+        if behind > 0 {
+            parts.push(format!("{} behind", behind));
+        }
         parts.join(", ")
     };
 
     let source_count = recent["count"].as_u64().unwrap_or(0);
     let recent_summary = if artifacts_suppressed > 0 {
-        format!("{} source changes ({} suppressed)", source_count, artifacts_suppressed)
+        format!(
+            "{} source changes ({} suppressed)",
+            source_count, artifacts_suppressed
+        )
     } else {
         format!("{} source changes", source_count)
     };
@@ -481,11 +560,14 @@ fn build_summary(
         match ports.as_array() {
             Some(arr) if arr.is_empty() => "no named ports".to_owned(),
             Some(arr) => format!("{} named ports", arr.len()),
-            None      => "no named ports".to_owned(),
+            None => "no named ports".to_owned(),
         }
     };
 
-    format!("{} | git: {} | {} | {} | {}", project, git_summary, recent_summary, proj_summary, ports_summary)
+    format!(
+        "{} | git: {} | {} | {} | {}",
+        project, git_summary, recent_summary, proj_summary, ports_summary
+    )
 }
 
 // ── orient expansion helpers ──────────────────────────────────────────────────
@@ -493,24 +575,27 @@ fn build_summary(
 /// bg_jobs: running + recently completed jobs (within 1 hour).
 fn orient_bg_jobs(store: &Arc<JobStore>) -> Value {
     let jobs = store.all();
-    let active: Vec<Value> = jobs.iter().filter_map(|job| {
-        let status  = job.current_status();
-        let elapsed = job.elapsed_secs();
-        // Always include running; include done/killed from the last hour
-        if status.label() == "running" || elapsed < 3600.0 {
-            Some(json!({
-                "job_id":       job.job_id,
-                "label":        job.label,
-                "status":       status.label(),
-                "elapsed_secs": elapsed as u64,
-                "exit_code":    status.exit_code(),
-            }))
-        } else {
-            None
-        }
-    }).collect();
+    let active: Vec<Value> = jobs
+        .iter()
+        .filter_map(|job| {
+            let status = job.current_status();
+            let elapsed = job.elapsed_secs();
+            // Always include running; include done/killed from the last hour
+            if status.label() == "running" || elapsed < 3600.0 {
+                Some(json!({
+                    "job_id":       job.job_id,
+                    "label":        job.label,
+                    "status":       status.label(),
+                    "elapsed_secs": elapsed as u64,
+                    "exit_code":    status.exit_code(),
+                }))
+            } else {
+                None
+            }
+        })
+        .collect();
     let running = active.iter().filter(|j| j["status"] == "running").count();
-    let shown   = active.len();
+    let shown = active.len();
     json!({ "jobs": active, "running": running, "shown": shown })
 }
 
@@ -521,8 +606,8 @@ fn orient_chips(cwd: &str) -> Value {
         format!("{}/processor_lab", home)
     });
     match project::chip_status(&json!({ "lab_path": lab_path })) {
-        Ok(tr)  => parse_tool_result_json(&tr),
-        Err(e)  => json!({ "error": e }),
+        Ok(tr) => parse_tool_result_json(&tr),
+        Err(e) => json!({ "error": e }),
     }
 }
 
@@ -533,19 +618,25 @@ fn find_processor_lab(cwd: &str) -> Option<String> {
         if p.file_name().map(|n| n == "processor_lab").unwrap_or(false) {
             return Some(p.display().to_string());
         }
-        if !p.pop() { break; }
+        if !p.pop() {
+            break;
+        }
     }
     // Fall back: check ~/processor_lab exists
     let home = std::env::var("HOME").ok()?;
-    let lab  = std::path::PathBuf::from(&home).join("processor_lab");
-    if lab.join("chips").exists() { Some(lab.display().to_string()) } else { None }
+    let lab = std::path::PathBuf::from(&home).join("processor_lab");
+    if lab.join("chips").exists() {
+        Some(lab.display().to_string())
+    } else {
+        None
+    }
 }
 
 /// synth: parse Vivado timing/utilization reports found near cwd.
 fn orient_synth(cwd: &str) -> Value {
     match eda::synth_report(&json!({ "project_dir": cwd })) {
-        Ok(tr)  => parse_tool_result_json(&tr),
-        Err(e)  => json!({ "error": e }),
+        Ok(tr) => parse_tool_result_json(&tr),
+        Err(e) => json!({ "error": e }),
     }
 }
 

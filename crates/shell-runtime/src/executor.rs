@@ -56,14 +56,22 @@ impl Executor {
     fn execute_pipeline(&mut self, pipeline: &Pipeline) -> ExitStatus {
         if pipeline.commands.len() == 1 {
             let status = self.execute_command(&pipeline.commands[0]);
-            if pipeline.negate { ExitStatus(!status.success() as i32) } else { status }
+            if pipeline.negate {
+                ExitStatus(!status.success() as i32)
+            } else {
+                status
+            }
         } else {
             // TODO: pipe setup with fork + dup2
             let mut last = ExitStatus::SUCCESS;
             for cmd in &pipeline.commands {
                 last = self.execute_command(cmd);
             }
-            if pipeline.negate { ExitStatus(!last.success() as i32) } else { last }
+            if pipeline.negate {
+                ExitStatus(!last.success() as i32)
+            } else {
+                last
+            }
         }
     }
 
@@ -77,11 +85,15 @@ impl Executor {
         // Expand all words
         let mut expanded_words: Vec<String> = Vec::new();
         for word in &cmd.words {
-            let raw: String = word.parts.iter().map(|p| match p {
-                WordPart::Literal(s) => s.clone(),
-                WordPart::Variable(v) => self.state.env.get(v).unwrap_or("").to_owned(),
-                WordPart::CmdSubst(_) | WordPart::Glob(_) => String::new(), // TODO
-            }).collect();
+            let raw: String = word
+                .parts
+                .iter()
+                .map(|p| match p {
+                    WordPart::Literal(s) => s.clone(),
+                    WordPart::Variable(v) => self.state.env.get(v).unwrap_or("").to_owned(),
+                    WordPart::CmdSubst(_) | WordPart::Glob(_) => String::new(), // TODO
+                })
+                .collect();
 
             match expand_word(&raw, &self.state.env) {
                 Ok(words) => expanded_words.extend(words),
@@ -98,7 +110,9 @@ impl Executor {
         };
 
         // Fire PreExec hook
-        self.hooks.fire(HookEvent::PreExec { cmdline: name.clone() });
+        self.hooks.fire(HookEvent::PreExec {
+            cmdline: name.clone(),
+        });
 
         // Check builtins first
         let status = if let Some(builtin) = builtins::lookup(name) {
@@ -108,7 +122,10 @@ impl Executor {
         };
 
         // Fire PostExec hook
-        self.hooks.fire(HookEvent::PostExec { cmdline: name.clone(), status });
+        self.hooks.fire(HookEvent::PostExec {
+            cmdline: name.clone(),
+            status,
+        });
 
         status
     }
@@ -119,7 +136,9 @@ impl Executor {
         match Command::new(name).args(args).status() {
             Ok(status) => ExitStatus(status.code().unwrap_or(1)),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                self.hooks.fire(HookEvent::CommandNotFound { name: name.to_owned() });
+                self.hooks.fire(HookEvent::CommandNotFound {
+                    name: name.to_owned(),
+                });
                 eprintln!("ferrite: {name}: command not found");
                 ExitStatus(127)
             }

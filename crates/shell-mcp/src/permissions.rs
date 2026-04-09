@@ -24,21 +24,21 @@ use std::collections::HashMap;
 
 #[derive(Debug, Clone)]
 pub struct Analysis {
-    pub original:     String,
-    pub rewritten:    String,
+    pub original: String,
+    pub rewritten: String,
     pub injected_env: HashMap<String, String>,
-    pub blockers:     Vec<Blocker>,
+    pub blockers: Vec<Blocker>,
     /// True when zero unresolved blockers remain after auto-fixes.
-    pub all_clear:    bool,
-    pub sudo_status:  SudoersStatus,
+    pub all_clear: bool,
+    pub sudo_status: SudoersStatus,
 }
 
 #[derive(Debug, Clone)]
 pub struct Blocker {
-    pub kind:          BlockerKind,
-    pub description:   String,
+    pub kind: BlockerKind,
+    pub description: String,
     pub auto_resolved: bool,
-    pub resolution:    String,
+    pub resolution: String,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -93,9 +93,22 @@ const SUDOERS_BINS: &[&str] = &[
 
 /// Short names (without path) — used for matching in command strings.
 const SUDOERS_SHORT: &[&str] = &[
-    "apt", "apt-get", "systemctl", "ufw", "snap", "dpkg",
-    "ldconfig", "tee", "chmod", "chown", "usermod", "groupmod",
-    "add-apt-repository", "update-alternatives", "install", "tailscale",
+    "apt",
+    "apt-get",
+    "systemctl",
+    "ufw",
+    "snap",
+    "dpkg",
+    "ldconfig",
+    "tee",
+    "chmod",
+    "chown",
+    "usermod",
+    "groupmod",
+    "add-apt-repository",
+    "update-alternatives",
+    "install",
+    "tailscale",
 ];
 
 // ── Error classification for exec auto-recovery ───────────────────────────────
@@ -126,7 +139,7 @@ pub fn classify_error(cmd: &str, stdout: &str, stderr: &str) -> Option<RecoveryA
         || combined.contains("e: unable to acquire the dpkg frontend lock")
     {
         return Some(RecoveryAction::RetryAfterDelay {
-            secs:   8,
+            secs: 8,
             reason: "dpkg/apt lock held by another process — waiting for it to release".to_owned(),
         });
     }
@@ -134,7 +147,7 @@ pub fn classify_error(cmd: &str, stdout: &str, stderr: &str) -> Option<RecoveryA
     // ── npm / yarn lock ───────────────────────────────────────────────────────
     if combined.contains("eacces: permission denied") && combined.contains("npm") {
         return Some(RecoveryAction::RetryWithFlag {
-            flag:   "--prefix ~/.local".to_owned(),
+            flag: "--prefix ~/.local".to_owned(),
             reason: "npm EACCES — retrying with user-local prefix".to_owned(),
         });
     }
@@ -142,8 +155,9 @@ pub fn classify_error(cmd: &str, stdout: &str, stderr: &str) -> Option<RecoveryA
     // ── pip: externally managed Python environment ────────────────────────────
     if combined.contains("externally-managed-environment") {
         return Some(RecoveryAction::RetryWithFlag {
-            flag:   "--break-system-packages".to_owned(),
-            reason: "pip externally-managed-environment — retrying with --break-system-packages".to_owned(),
+            flag: "--break-system-packages".to_owned(),
+            reason: "pip externally-managed-environment — retrying with --break-system-packages"
+                .to_owned(),
         });
     }
 
@@ -152,7 +166,9 @@ pub fn classify_error(cmd: &str, stdout: &str, stderr: &str) -> Option<RecoveryA
         let tool = first_token(cmd.trim_start_matches("sudo").trim_start());
         if is_in_sudoers_list(tool) && sudoers_status() == SudoersStatus::Active {
             return Some(RecoveryAction::RetryWithSudo {
-                reason: format!("permission denied — retrying with sudo ('{tool}' is in sudoers whitelist)"),
+                reason: format!(
+                    "permission denied — retrying with sudo ('{tool}' is in sudoers whitelist)"
+                ),
             });
         }
     }
@@ -164,7 +180,7 @@ pub fn classify_error(cmd: &str, stdout: &str, stderr: &str) -> Option<RecoveryA
         || combined.contains("network is unreachable")
     {
         return Some(RecoveryAction::RetryAfterDelay {
-            secs:   5,
+            secs: 5,
             reason: "transient network error — retrying after short delay".to_owned(),
         });
     }
@@ -185,7 +201,9 @@ pub fn classify_error(cmd: &str, stdout: &str, stderr: &str) -> Option<RecoveryA
 /// after the first whitespace-delimited token (the binary name).
 pub fn apply_flag(cmd: &str, flag: &str) -> String {
     let tokens = tokenize(cmd);
-    if tokens.is_empty() { return cmd.to_owned(); }
+    if tokens.is_empty() {
+        return cmd.to_owned();
+    }
     let mut out = tokens;
     out.insert(1, flag.to_owned());
     out.join(" ")
@@ -205,7 +223,7 @@ pub fn analyze(cmd: &str) -> Analysis {
     let all_clear = blockers.iter().all(|b| b.auto_resolved);
 
     Analysis {
-        original:     cmd.to_owned(),
+        original: cmd.to_owned(),
         rewritten,
         injected_env: env,
         blockers,
@@ -275,29 +293,33 @@ pub fn sudoers_status() -> SudoersStatus {
 ///
 /// Returns `Ok(())` on success, `Err(reason)` if both methods fail.
 pub fn try_install_sudoers() -> Result<(), String> {
-    let entry   = sudoers_entry_content();
-    let path    = sudoers_path();
-    let chmod   = "/usr/bin/chmod";
+    let entry = sudoers_entry_content();
+    let path = sudoers_path();
+    let chmod = "/usr/bin/chmod";
 
     // Helper: write entry via `<writer> /usr/bin/tee <path>` then chmod 440.
     let write_via = |writer: &str, extra_args: &[&str]| -> bool {
         use std::io::Write;
         let mut cmd = std::process::Command::new(writer);
-        for a in extra_args { cmd.arg(a); }
+        for a in extra_args {
+            cmd.arg(a);
+        }
         cmd.arg("/usr/bin/tee").arg(path);
         cmd.stdin(std::process::Stdio::piped())
-           .stdout(std::process::Stdio::null())
-           .stderr(std::process::Stdio::null());
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
 
         let mut child = match cmd.spawn() {
-            Ok(c)  => c,
+            Ok(c) => c,
             Err(_) => return false,
         };
         if let Some(mut stdin) = child.stdin.take() {
             let _ = stdin.write_all(entry.as_bytes());
         }
         let wrote_ok = child.wait().map(|s| s.success()).unwrap_or(false);
-        if !wrote_ok { return false; }
+        if !wrote_ok {
+            return false;
+        }
 
         // chmod 440
         std::process::Command::new("sudo")
@@ -378,7 +400,9 @@ fn rewrite_segment(
     env: &mut HashMap<String, String>,
     blockers: &mut Vec<Blocker>,
 ) -> String {
-    if seg.is_empty() { return seg.to_owned(); }
+    if seg.is_empty() {
+        return seg.to_owned();
+    }
 
     // Handle `sudo <cmd>` — strip sudo prefix for inner analysis, then re-add.
     let (has_sudo, inner) = strip_sudo_prefix(seg);
@@ -388,19 +412,19 @@ fn rewrite_segment(
 
     // Apply tool-specific rewrite.
     let (rewritten_inner, _changed) = match tool {
-        "apt" | "apt-get"            => rewrite_apt(inner, env),
-        "pip" | "pip3"               => rewrite_pip(inner, env),
-        "npm"                        => rewrite_npm(inner, env),
-        "yarn"                       => rewrite_yarn(inner, env),
-        "cargo"                      => rewrite_cargo(inner, env),
-        "git"                        => rewrite_git(inner, env),
-        "rustup"                     => rewrite_rustup(inner, env),
-        "snap"                       => rewrite_snap(inner, sudo_status, env),
-        "systemctl"                  => rewrite_systemctl(inner, sudo_status, env),
-        "ufw"                        => rewrite_ufw(inner, sudo_status, env),
-        "dpkg"                       => rewrite_dpkg(inner, env),
-        "curl" | "wget"              => rewrite_downloader(inner, env),
-        _                            => (inner.to_owned(), false),
+        "apt" | "apt-get" => rewrite_apt(inner, env),
+        "pip" | "pip3" => rewrite_pip(inner, env),
+        "npm" => rewrite_npm(inner, env),
+        "yarn" => rewrite_yarn(inner, env),
+        "cargo" => rewrite_cargo(inner, env),
+        "git" => rewrite_git(inner, env),
+        "rustup" => rewrite_rustup(inner, env),
+        "snap" => rewrite_snap(inner, sudo_status, env),
+        "systemctl" => rewrite_systemctl(inner, sudo_status, env),
+        "ufw" => rewrite_ufw(inner, sudo_status, env),
+        "dpkg" => rewrite_dpkg(inner, env),
+        "curl" | "wget" => rewrite_downloader(inner, env),
+        _ => (inner.to_owned(), false),
     };
 
     // Check if sudo is needed and whether it's covered.
@@ -444,15 +468,25 @@ fn rewrite_apt(cmd: &str, env: &mut HashMap<String, String>) -> (String, bool) {
 
     // Subcommands that accept -y
     let interactive_verbs = [
-        "install", "remove", "purge", "autoremove", "upgrade",
-        "full-upgrade", "dist-upgrade", "reinstall",
+        "install",
+        "remove",
+        "purge",
+        "autoremove",
+        "upgrade",
+        "full-upgrade",
+        "dist-upgrade",
+        "reinstall",
     ];
 
     let tokens = tokenize(cmd);
-    if tokens.len() < 2 { return (cmd.to_owned(), false); }
+    if tokens.len() < 2 {
+        return (cmd.to_owned(), false);
+    }
 
     let verb = tokens[1].as_str();
-    if !interactive_verbs.contains(&verb) { return (cmd.to_owned(), false); }
+    if !interactive_verbs.contains(&verb) {
+        return (cmd.to_owned(), false);
+    }
     if tokens.iter().any(|t| t == "-y" || t == "--yes") {
         return (cmd.to_owned(), false); // already non-interactive
     }
@@ -472,9 +506,16 @@ fn rewrite_pip(cmd: &str, env: &mut HashMap<String, String>) -> (String, bool) {
     env.insert("PIP_DISABLE_PIP_VERSION_CHECK".into(), "1".into());
 
     let tokens = tokenize(cmd);
-    if tokens.len() < 2 { return (cmd.to_owned(), false); }
-    if tokens[1] != "install" { return (cmd.to_owned(), false); }
-    if tokens.iter().any(|t| t == "--no-input" || t == "-q" || t == "--quiet") {
+    if tokens.len() < 2 {
+        return (cmd.to_owned(), false);
+    }
+    if tokens[1] != "install" {
+        return (cmd.to_owned(), false);
+    }
+    if tokens
+        .iter()
+        .any(|t| t == "--no-input" || t == "-q" || t == "--quiet")
+    {
         return (cmd.to_owned(), false);
     }
 
@@ -512,11 +553,16 @@ fn rewrite_rustup(cmd: &str, env: &mut HashMap<String, String>) -> (String, bool
     // and most subcommands are quiet. But toolchain/component install can ask.
     env.insert("RUSTUP_TOOLCHAIN".into(), "".into()); // prevent default toolchain prompt
     let tokens = tokenize(cmd);
-    if tokens.iter().any(|t| t == "-y") { return (cmd.to_owned(), false); }
+    if tokens.iter().any(|t| t == "-y") {
+        return (cmd.to_owned(), false);
+    }
     // For `rustup update` / `rustup install`, the --no-modify-path is useful
     // but -y is the key non-interactive flag
     if tokens.len() >= 2 && matches!(tokens[1].as_str(), "update" | "install" | "toolchain") {
-        if !tokens.iter().any(|t| t == "-y" || t == "--no-update-default-toolchain") {
+        if !tokens
+            .iter()
+            .any(|t| t == "-y" || t == "--no-update-default-toolchain")
+        {
             let mut out = tokens;
             out.push("-y".to_owned());
             return (out.join(" "), true);
@@ -530,11 +576,12 @@ fn rewrite_snap(
     _sudo_status: &SudoersStatus,
     _env: &mut HashMap<String, String>,
 ) -> (String, bool) {
-
     // snap always needs root; if sudoers active, auto-prefix sudo
     // (caller re-adds sudo if has_sudo, so this just returns inner unchanged)
     let tokens = tokenize(cmd);
-    if tokens.len() < 2 || tokens[1] != "install" { return (cmd.to_owned(), false); }
+    if tokens.len() < 2 || tokens[1] != "install" {
+        return (cmd.to_owned(), false);
+    }
 
     // Add --classic only if the package hints it (we can't know for sure, so don't)
     (cmd.to_owned(), false)
@@ -557,7 +604,9 @@ fn rewrite_ufw(
 ) -> (String, bool) {
     // ufw can ask for confirmation on some commands; --force suppresses it
     let tokens = tokenize(cmd);
-    if tokens.iter().any(|t| t == "--force") { return (cmd.to_owned(), false); }
+    if tokens.iter().any(|t| t == "--force") {
+        return (cmd.to_owned(), false);
+    }
     // Only add --force for potentially confirming commands
     let confirming = ["enable", "disable", "reset", "delete"];
     if tokens.len() >= 2 && confirming.contains(&tokens[1].as_str()) {
@@ -571,7 +620,10 @@ fn rewrite_ufw(
 fn rewrite_dpkg(cmd: &str, env: &mut HashMap<String, String>) -> (String, bool) {
     env.insert("DEBIAN_FRONTEND".into(), "noninteractive".into());
     let tokens = tokenize(cmd);
-    if tokens.iter().any(|t| t == "--force-confdef" || t == "--force-confold") {
+    if tokens
+        .iter()
+        .any(|t| t == "--force-confdef" || t == "--force-confold")
+    {
         return (cmd.to_owned(), false);
     }
     // -i (install) can ask about config file diffs
@@ -595,14 +647,20 @@ fn rewrite_downloader(cmd: &str, env: &mut HashMap<String, String>) -> (String, 
 
 fn inject_baseline_env(env: &mut HashMap<String, String>) {
     // Always set — safe for any command, suppresses common interactive prompts.
-    env.entry("GIT_TERMINAL_PROMPT".into()).or_insert("0".into());
-    env.entry("DEBIAN_FRONTEND".into()).or_insert("noninteractive".into());
+    env.entry("GIT_TERMINAL_PROMPT".into())
+        .or_insert("0".into());
+    env.entry("DEBIAN_FRONTEND".into())
+        .or_insert("noninteractive".into());
     env.entry("PIP_NO_INPUT".into()).or_insert("1".into());
-    env.entry("PIP_DISABLE_PIP_VERSION_CHECK".into()).or_insert("1".into());
-    env.entry("CARGO_TERM_COLOR".into()).or_insert("never".into());
+    env.entry("PIP_DISABLE_PIP_VERSION_CHECK".into())
+        .or_insert("1".into());
+    env.entry("CARGO_TERM_COLOR".into())
+        .or_insert("never".into());
     env.entry("NPM_CONFIG_YES".into()).or_insert("true".into());
-    env.entry("YARN_ENABLE_INTERACTIVE".into()).or_insert("false".into());
-    env.entry("APT_LISTCHANGES_FRONTEND".into()).or_insert("none".into());
+    env.entry("YARN_ENABLE_INTERACTIVE".into())
+        .or_insert("false".into());
+    env.entry("APT_LISTCHANGES_FRONTEND".into())
+        .or_insert("none".into());
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -619,7 +677,7 @@ fn split_pipeline(cmd: &str) -> Vec<(String, String)> {
         let c = chars[i];
         // Check two-char operators first
         if i + 1 < chars.len() {
-            let two = format!("{}{}", c, chars[i+1]);
+            let two = format!("{}{}", c, chars[i + 1]);
             if two == "&&" || two == "||" {
                 result.push((current.trim().to_owned(), two));
                 current = String::new();
@@ -656,7 +714,9 @@ fn tokenize(cmd: &str) -> Vec<String> {
 /// Returns (had_sudo, remainder).
 fn strip_sudo_prefix(cmd: &str) -> (bool, &str) {
     let trimmed = cmd.trim_start();
-    if !trimmed.starts_with("sudo") { return (false, trimmed); }
+    if !trimmed.starts_with("sudo") {
+        return (false, trimmed);
+    }
     // Must be `sudo` followed by space or end
     let after = &trimmed[4..];
     if after.is_empty() || after.starts_with(' ') || after.starts_with('\t') {
@@ -673,12 +733,17 @@ fn skip_sudo_flags(s: &str) -> &str {
     let mut pos = s;
     loop {
         let t = pos.trim_start();
-        if t.starts_with("-n") || t.starts_with("-E") || t.starts_with("-i") || t.starts_with("-s") {
+        if t.starts_with("-n") || t.starts_with("-E") || t.starts_with("-i") || t.starts_with("-s")
+        {
             pos = &t[2..];
         } else if t.starts_with("-u ") || t.starts_with("-u\t") {
             // skip -u username
             pos = t[3..].trim_start();
-            pos = pos.split_whitespace().next().map(|w| &t[3 + t[3..].find(w).unwrap_or(0) + w.len()..]).unwrap_or("");
+            pos = pos
+                .split_whitespace()
+                .next()
+                .map(|w| &t[3 + t[3..].find(w).unwrap_or(0) + w.len()..])
+                .unwrap_or("");
         } else {
             break;
         }
@@ -693,7 +758,10 @@ fn is_in_sudoers_list(tool: &str) -> bool {
 /// Some tools conventionally require root even without an explicit `sudo` prefix
 /// (e.g. the agent might write `systemctl enable foo` expecting it to just work).
 fn requires_sudo_by_convention(tool: &str) -> bool {
-    matches!(tool, "systemctl" | "ufw" | "snap" | "dpkg" | "add-apt-repository" | "update-alternatives")
+    matches!(
+        tool,
+        "systemctl" | "ufw" | "snap" | "dpkg" | "add-apt-repository" | "update-alternatives"
+    )
 }
 
 fn current_username() -> String {

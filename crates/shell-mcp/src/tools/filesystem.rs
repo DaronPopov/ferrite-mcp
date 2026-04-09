@@ -16,25 +16,25 @@ use crate::tools::state::{resolve_or_cwd, resolve_path};
 const MAX_LINES: usize = 2_000;
 
 pub fn read_file(args: &Value, state: &Arc<Mutex<ServerState>>) -> Result<ToolResult, String> {
-    let path_str = args["path"].as_str().ok_or("read_file: 'path' is required")?;
+    let path_str = args["path"]
+        .as_str()
+        .ok_or("read_file: 'path' is required")?;
     let path_buf = resolve_path(state, path_str)?;
     let path = path_buf.to_str().unwrap_or(path_str);
 
-    let raw = std::fs::read_to_string(&path_buf)
-        .map_err(|e| format!("read_file: {path}: {e}"))?;
+    let raw = std::fs::read_to_string(&path_buf).map_err(|e| format!("read_file: {path}: {e}"))?;
 
     let all_lines: Vec<&str> = raw.lines().collect();
     let total_lines = all_lines.len();
 
     // 1-indexed, inclusive range — both optional
     let start = (args["start_line"].as_u64().unwrap_or(1) as usize).max(1);
-    let end   = (args["end_line"].as_u64().unwrap_or(total_lines as u64) as usize)
-                    .min(total_lines);
+    let end = (args["end_line"].as_u64().unwrap_or(total_lines as u64) as usize).min(total_lines);
 
     // Clamp window to MAX_LINES
     let end = end.min(start.saturating_add(MAX_LINES).saturating_sub(1));
-    let truncated = end < (args["end_line"].as_u64().unwrap_or(total_lines as u64) as usize)
-                    .min(total_lines);
+    let truncated =
+        end < (args["end_line"].as_u64().unwrap_or(total_lines as u64) as usize).min(total_lines);
 
     let content: String = if start <= end && start <= total_lines {
         all_lines[(start - 1)..end].join("\n")
@@ -55,23 +55,35 @@ pub fn read_file(args: &Value, state: &Arc<Mutex<ServerState>>) -> Result<ToolRe
 // ── list_dir ──────────────────────────────────────────────────────────────────
 
 pub fn list_dir(args: &Value, state: &Arc<Mutex<ServerState>>) -> Result<ToolResult, String> {
-    let path        = args["path"].as_str();
-    let depth       = (args["depth"].as_u64().unwrap_or(1) as usize).min(5);
+    let path = args["path"].as_str();
+    let depth = (args["depth"].as_u64().unwrap_or(1) as usize).min(5);
     let show_hidden = args["show_hidden"].as_bool().unwrap_or(false);
     let max_cap: Option<usize> = args["max_entries"].as_u64().map(|n| n as usize);
     let limit = max_cap.unwrap_or(usize::MAX);
 
     let root = resolve_or_cwd(state, path)?;
     if !root.exists() {
-        return Ok(ToolResult::error(format!("list_dir: {}: no such directory", root.display())));
+        return Ok(ToolResult::error(format!(
+            "list_dir: {}: no such directory",
+            root.display()
+        )));
     }
-    let canonical = root.canonicalize()
+    let canonical = root
+        .canonicalize()
         .map(|p| p.display().to_string())
         .unwrap_or_else(|_| root.display().to_string());
 
     let mut count = 0usize;
     let mut truncated = false;
-    let entries = list_recursive(&root, depth, show_hidden, 0, limit, &mut count, &mut truncated);
+    let entries = list_recursive(
+        &root,
+        depth,
+        show_hidden,
+        0,
+        limit,
+        &mut count,
+        &mut truncated,
+    );
     let total = count_entries(&entries);
 
     Ok(ToolResult::json(&json!({
@@ -92,7 +104,9 @@ fn list_recursive(
     count: &mut usize,
     truncated: &mut bool,
 ) -> Vec<Value> {
-    let Ok(read) = std::fs::read_dir(dir) else { return vec![] };
+    let Ok(read) = std::fs::read_dir(dir) else {
+        return vec![];
+    };
 
     let mut entries: Vec<_> = read.filter_map(|e| e.ok()).collect();
     // Sort: dirs first, then alphabetical
@@ -127,7 +141,8 @@ fn list_recursive(
         };
 
         let size_bytes = meta.as_ref().map(|m| m.len());
-        let modified_secs = meta.as_ref()
+        let modified_secs = meta
+            .as_ref()
             .and_then(|m| m.modified().ok())
             .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
             .map(|d| d.as_secs());
@@ -136,7 +151,15 @@ fn list_recursive(
         let children = if kind == "dir" && current_depth < max_depth.saturating_sub(1) {
             // Skip noisy dirs
             if name != "target" && name != "node_modules" && name != ".git" {
-                Some(list_recursive(&path, max_depth, show_hidden, current_depth + 1, max_entries, count, truncated))
+                Some(list_recursive(
+                    &path,
+                    max_depth,
+                    show_hidden,
+                    current_depth + 1,
+                    max_entries,
+                    count,
+                    truncated,
+                ))
             } else {
                 Some(vec![json!({ "note": format!("{name}/ skipped (noisy)") })])
             }
@@ -158,7 +181,10 @@ fn list_recursive(
 
 fn count_entries(entries: &[Value]) -> usize {
     entries.iter().fold(0, |acc, e| {
-        let children = e["children"].as_array().map(|c| count_entries(c)).unwrap_or(0);
+        let children = e["children"]
+            .as_array()
+            .map(|c| count_entries(c))
+            .unwrap_or(0);
         acc + 1 + children
     })
 }
@@ -166,7 +192,9 @@ fn count_entries(entries: &[Value]) -> usize {
 // ── glob ─────────────────────────────────────────────────────────────────────
 
 pub fn glob_files(args: &Value, state: &Arc<Mutex<ServerState>>) -> Result<ToolResult, String> {
-    let pattern = args["pattern"].as_str().ok_or("glob: 'pattern' is required")?;
+    let pattern = args["pattern"]
+        .as_str()
+        .ok_or("glob: 'pattern' is required")?;
     let max = args["max_results"].as_u64().unwrap_or(200) as usize;
 
     // If a cwd is provided and the pattern is relative, prepend it.
@@ -242,24 +270,29 @@ pub fn which_bin(args: &Value) -> Result<ToolResult, String> {
 /// Provide either `since_secs` (Unix timestamp) or `since_relative` ("10m", "2h", "1d", "30s").
 pub fn changed_since(args: &Value, state: &Arc<Mutex<ServerState>>) -> Result<ToolResult, String> {
     let root = resolve_or_cwd(state, args["path"].as_str())?;
-    let max  = args["max_results"].as_u64().unwrap_or(100) as usize;
+    let max = args["max_results"].as_u64().unwrap_or(100) as usize;
 
     let now_secs = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH).unwrap_or_default()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
         .as_secs();
 
     let since_secs = if let Some(ts) = args["since_secs"].as_u64() {
         ts
     } else if let Some(rel) = args["since_relative"].as_str() {
-        let delta = parse_relative_duration(rel)
-            .ok_or_else(|| format!("changed_since: bad since_relative '{rel}'. Use e.g. '10m', '2h', '1d'"))?;
+        let delta = parse_relative_duration(rel).ok_or_else(|| {
+            format!("changed_since: bad since_relative '{rel}'. Use e.g. '10m', '2h', '1d'")
+        })?;
         now_secs.saturating_sub(delta)
     } else {
         return Err("changed_since: provide 'since_secs' or 'since_relative'".into());
     };
 
     if !root.exists() {
-        return Ok(ToolResult::error(format!("changed_since: path '{}' not found", root.display())));
+        return Ok(ToolResult::error(format!(
+            "changed_since: path '{}' not found",
+            root.display()
+        )));
     }
 
     let mut changed: Vec<Value> = Vec::new();
@@ -292,21 +325,35 @@ fn collect_changed(
     max: usize,
     depth: usize,
 ) {
-    if depth > 20 || *truncated { return; }
-    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    if depth > 20 || *truncated {
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
 
     for entry in entries.filter_map(|e| e.ok()) {
-        if *truncated { break; }
+        if *truncated {
+            break;
+        }
         let path = entry.path();
-        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("").to_owned();
+        let name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("")
+            .to_owned();
 
         // Skip noise
-        if name.starts_with('.') || name == "target" || name == "node_modules" { continue; }
+        if name.starts_with('.') || name == "target" || name == "node_modules" {
+            continue;
+        }
 
         if path.is_dir() {
             collect_changed(&path, since, out, truncated, max, depth + 1);
         } else if path.is_file() {
-            let mtime = path.metadata().ok()
+            let mtime = path
+                .metadata()
+                .ok()
                 .and_then(|m| m.modified().ok())
                 .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
                 .map(|d: std::time::Duration| d.as_secs())
@@ -336,7 +383,7 @@ fn parse_relative_duration(s: &str) -> Option<u64> {
         "m" => Some(num * 60),
         "h" => Some(num * 3600),
         "d" => Some(num * 86400),
-        _   => None,
+        _ => None,
     }
 }
 
@@ -417,7 +464,9 @@ fn probe_version(bin: &str) -> Option<String> {
         let _ = fs::remove_file(&capture_path);
 
         let Some(st) = status else { continue };
-        if !st.success() { continue; }
+        if !st.success() {
+            continue;
+        }
 
         if let Some(line) = text.lines().find(|l| !l.trim().is_empty()) {
             return Some(line.trim().to_owned());
@@ -431,25 +480,28 @@ fn probe_version(bin: &str) -> Option<String> {
 /// Move or rename a file/directory. Optionally scans .rs files for mod/use
 /// references that mention the old path, returning them for manual update.
 pub fn move_file(args: &Value) -> Result<ToolResult, String> {
-    let src       = args["src"].as_str().ok_or("move_file: 'src' required")?;
-    let dst       = args["dst"].as_str().ok_or("move_file: 'dst' required")?;
+    let src = args["src"].as_str().ok_or("move_file: 'src' required")?;
+    let dst = args["dst"].as_str().ok_or("move_file: 'dst' required")?;
     let find_refs = args["find_refs"].as_bool().unwrap_or(true);
 
     let src_path = PathBuf::from(src);
     let dst_path = PathBuf::from(dst);
 
     if !src_path.exists() {
-        return Ok(ToolResult::error(format!("move_file: source not found: {src}")));
+        return Ok(ToolResult::error(format!(
+            "move_file: source not found: {src}"
+        )));
     }
     if dst_path.exists() {
-        return Ok(ToolResult::error(format!("move_file: destination already exists: {dst}")));
+        return Ok(ToolResult::error(format!(
+            "move_file: destination already exists: {dst}"
+        )));
     }
 
     // Create parent dirs of destination if needed
     if let Some(parent) = dst_path.parent() {
         if !parent.exists() {
-            std::fs::create_dir_all(parent)
-                .map_err(|e| format!("move_file: mkdir: {e}"))?;
+            std::fs::create_dir_all(parent).map_err(|e| format!("move_file: mkdir: {e}"))?;
         }
     }
 
@@ -460,8 +512,7 @@ pub fn move_file(args: &Value) -> Result<ToolResult, String> {
         vec![]
     };
 
-    std::fs::rename(&src_path, &dst_path)
-        .map_err(|e| format!("move_file: {e}"))?;
+    std::fs::rename(&src_path, &dst_path).map_err(|e| format!("move_file: {e}"))?;
 
     Ok(ToolResult::json(&json!({
         "moved":       true,
@@ -481,7 +532,9 @@ fn find_rust_references(src: &str) -> Vec<Value> {
         .unwrap_or("")
         .to_owned();
 
-    if stem.is_empty() { return vec![]; }
+    if stem.is_empty() {
+        return vec![];
+    }
 
     let mut results = Vec::new();
     let search_root = PathBuf::from(".");
@@ -491,22 +544,32 @@ fn find_rust_references(src: &str) -> Vec<Value> {
 }
 
 fn search_rs_refs(dir: &PathBuf, stem: &str, out: &mut Vec<Value>, depth: usize) {
-    if depth > 10 { return; }
-    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    if depth > 10 {
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
 
     for entry in entries.filter_map(|e| e.ok()) {
         let path = entry.path();
         let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-        if name == "target" || name == ".git" { continue; }
+        if name == "target" || name == ".git" {
+            continue;
+        }
 
         if path.is_dir() {
             search_rs_refs(&path, stem, out, depth + 1);
         } else if path.extension().and_then(|e| e.to_str()) == Some("rs") {
-            let Ok(content) = std::fs::read_to_string(&path) else { continue };
+            let Ok(content) = std::fs::read_to_string(&path) else {
+                continue;
+            };
             for (i, line) in content.lines().enumerate() {
                 let t = line.trim();
-                if (t.starts_with("mod ") || t.starts_with("pub mod ")
-                    || t.starts_with("use ") || t.starts_with("pub use "))
+                if (t.starts_with("mod ")
+                    || t.starts_with("pub mod ")
+                    || t.starts_with("use ")
+                    || t.starts_with("pub use "))
                     && t.contains(stem)
                 {
                     out.push(serde_json::json!({
@@ -524,7 +587,7 @@ fn search_rs_refs(dir: &PathBuf, stem: &str, out: &mut Vec<Value>, depth: usize)
 
 /// Create a directory. With parents=true (default), creates all intermediate dirs.
 pub fn make_dir(args: &Value) -> Result<ToolResult, String> {
-    let path    = args["path"].as_str().ok_or("mkdir: 'path' required")?;
+    let path = args["path"].as_str().ok_or("mkdir: 'path' required")?;
     let parents = args["parents"].as_bool().unwrap_or(true);
 
     let p = PathBuf::from(path);
@@ -552,16 +615,18 @@ pub fn make_dir(args: &Value) -> Result<ToolResult, String> {
 
 /// Delete a single file. Refuses to delete directories (use exec for that).
 pub fn delete_file(args: &Value) -> Result<ToolResult, String> {
-    let path = args["path"].as_str().ok_or("delete_file: 'path' required")?;
-    let p    = PathBuf::from(path);
+    let path = args["path"]
+        .as_str()
+        .ok_or("delete_file: 'path' required")?;
+    let p = PathBuf::from(path);
 
     if !p.exists() {
         return Ok(ToolResult::error(format!("delete_file: not found: {path}")));
     }
     if p.is_dir() {
-        return Ok(ToolResult::error(
-            format!("delete_file: '{path}' is a directory — use exec('rm -rf ...') explicitly")
-        ));
+        return Ok(ToolResult::error(format!(
+            "delete_file: '{path}' is a directory — use exec('rm -rf ...') explicitly"
+        )));
     }
 
     std::fs::remove_file(&p).map_err(|e| format!("delete_file: {e}"))?;

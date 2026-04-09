@@ -19,9 +19,9 @@ use std::path::PathBuf;
 #[serde(default)]
 pub struct TerminalConfig {
     /// "auto" | "kitty" | "xterm" | "gnome-terminal" | "alacritty"
-    pub emulator:  String,
+    pub emulator: String,
     /// "always" | "never"
-    pub mode:      String,
+    pub mode: String,
     /// Keep window open after command finishes (read -r pause)
     pub keep_open: bool,
 }
@@ -29,8 +29,8 @@ pub struct TerminalConfig {
 impl Default for TerminalConfig {
     fn default() -> Self {
         Self {
-            emulator:  "auto".to_owned(),
-            mode:      "never".to_owned(),
+            emulator: "auto".to_owned(),
+            mode: "never".to_owned(),
             keep_open: true,
         }
     }
@@ -79,8 +79,8 @@ impl Default for GitConfig {
 #[serde(default)]
 pub struct FerriteConfig {
     pub terminal: TerminalConfig,
-    pub paths:    PathsConfig,
-    pub git:      GitConfig,
+    pub paths: PathsConfig,
+    pub git: GitConfig,
 }
 
 impl FerriteConfig {
@@ -125,13 +125,10 @@ impl FerriteConfig {
     pub fn save(&self) -> Result<(), String> {
         let path = config_path();
         if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)
-                .map_err(|e| format!("config: create dir: {e}"))?;
+            std::fs::create_dir_all(parent).map_err(|e| format!("config: create dir: {e}"))?;
         }
-        let text = toml::to_string_pretty(self)
-            .map_err(|e| format!("config: serialize: {e}"))?;
-        std::fs::write(&path, text)
-            .map_err(|e| format!("config: write {}: {e}", path.display()))
+        let text = toml::to_string_pretty(self).map_err(|e| format!("config: serialize: {e}"))?;
+        std::fs::write(&path, text).map_err(|e| format!("config: write {}: {e}", path.display()))
     }
 
     /// Set a value using dot-notation key, e.g. "terminal.mode".
@@ -178,32 +175,50 @@ impl FerriteConfig {
     /// Get a value by dot-notation key.
     pub fn get(&self, key: &str) -> Option<String> {
         match key {
-            "terminal.emulator"  => Some(self.terminal.emulator.clone()),
-            "terminal.mode"      => Some(self.terminal.mode.clone()),
+            "terminal.emulator" => Some(self.terminal.emulator.clone()),
+            "terminal.mode" => Some(self.terminal.mode.clone()),
             "terminal.keep_open" => Some(self.terminal.keep_open.to_string()),
-            "paths.vivado"       => Some(self.paths.vivado.clone()),
+            "paths.vivado" => Some(self.paths.vivado.clone()),
             "git.auto_checkpoint" => Some(self.git.auto_checkpoint.to_string()),
-            "git.strict"          => Some(self.git.strict.to_string()),
-            "git.before_write"    => Some(self.git.before_write.to_string()),
-            "git.before_build"    => Some(self.git.before_build.to_string()),
-            "git.before_deploy"   => Some(self.git.before_deploy.to_string()),
-            "git.add_mode"        => Some(self.git.add_mode.clone()),
-            _                    => None,
+            "git.strict" => Some(self.git.strict.to_string()),
+            "git.before_write" => Some(self.git.before_write.to_string()),
+            "git.before_build" => Some(self.git.before_build.to_string()),
+            "git.before_deploy" => Some(self.git.before_deploy.to_string()),
+            "git.add_mode" => Some(self.git.add_mode.clone()),
+            _ => None,
         }
     }
 
     /// Return all key-value pairs.
     pub fn list(&self) -> Vec<(String, String)> {
         vec![
-            ("terminal.emulator".to_owned(),  self.terminal.emulator.clone()),
-            ("terminal.mode".to_owned(),      self.terminal.mode.clone()),
-            ("terminal.keep_open".to_owned(), self.terminal.keep_open.to_string()),
-            ("paths.vivado".to_owned(),       self.paths.vivado.clone()),
-            ("git.auto_checkpoint".to_owned(), self.git.auto_checkpoint.to_string()),
+            (
+                "terminal.emulator".to_owned(),
+                self.terminal.emulator.clone(),
+            ),
+            ("terminal.mode".to_owned(), self.terminal.mode.clone()),
+            (
+                "terminal.keep_open".to_owned(),
+                self.terminal.keep_open.to_string(),
+            ),
+            ("paths.vivado".to_owned(), self.paths.vivado.clone()),
+            (
+                "git.auto_checkpoint".to_owned(),
+                self.git.auto_checkpoint.to_string(),
+            ),
             ("git.strict".to_owned(), self.git.strict.to_string()),
-            ("git.before_write".to_owned(), self.git.before_write.to_string()),
-            ("git.before_build".to_owned(), self.git.before_build.to_string()),
-            ("git.before_deploy".to_owned(), self.git.before_deploy.to_string()),
+            (
+                "git.before_write".to_owned(),
+                self.git.before_write.to_string(),
+            ),
+            (
+                "git.before_build".to_owned(),
+                self.git.before_build.to_string(),
+            ),
+            (
+                "git.before_deploy".to_owned(),
+                self.git.before_deploy.to_string(),
+            ),
             ("git.add_mode".to_owned(), self.git.add_mode.clone()),
         ]
     }

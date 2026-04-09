@@ -52,7 +52,10 @@ fn last_word(s: &str) -> &str {
 
 fn is_command_position(prefix: &str) -> bool {
     let trimmed = prefix.trim_start();
-    !trimmed.contains(' ') || trimmed.ends_with("| ") || trimmed.ends_with("&& ") || trimmed.ends_with("|| ")
+    !trimmed.contains(' ')
+        || trimmed.ends_with("| ")
+        || trimmed.ends_with("&& ")
+        || trimmed.ends_with("|| ")
 }
 
 fn complete_path(prefix: &str) -> Vec<String> {
@@ -92,7 +95,9 @@ fn complete_commands(prefix: &str, state: &ShellState) -> Vec<String> {
     let mut results = Vec::new();
 
     for dir in path_var.split(':') {
-        let Ok(entries) = std::fs::read_dir(dir) else { continue };
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            continue;
+        };
         for entry in entries.filter_map(|e| e.ok()) {
             let name = entry.file_name().to_string_lossy().into_owned();
             if name.starts_with(prefix) {

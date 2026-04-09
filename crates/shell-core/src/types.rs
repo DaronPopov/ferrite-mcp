@@ -28,7 +28,10 @@ pub struct Word {
 
 impl Word {
     pub fn new(value: impl Into<String>, span: Span) -> Self {
-        Self { value: value.into(), span }
+        Self {
+            value: value.into(),
+            span,
+        }
     }
 
     pub fn as_str(&self) -> &str {

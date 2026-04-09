@@ -20,10 +20,17 @@ pub fn session_status(_args: &Value) -> Result<ToolResult, String> {
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"));
 
     // ── tmux session ──────────────────────────────────────────────────────────
-    let session_name = std::env::var("FERRITE_SESSION").unwrap_or_else(|_| "claude-remote".to_owned());
+    let session_name =
+        std::env::var("FERRITE_SESSION").unwrap_or_else(|_| "claude-remote".to_owned());
     let tmux_raw = run(
-        &format!("tmux has-session -t '{}' 2>/dev/null && echo alive || echo dead", session_name),
-        &cwd, &[], "", Duration::from_secs(5),
+        &format!(
+            "tmux has-session -t '{}' 2>/dev/null && echo alive || echo dead",
+            session_name
+        ),
+        &cwd,
+        &[],
+        "",
+        Duration::from_secs(5),
     );
     let tmux_alive = tmux_raw["stdout"].as_str().unwrap_or("").trim() == "alive";
 
@@ -34,7 +41,8 @@ pub fn session_status(_args: &Value) -> Result<ToolResult, String> {
             .unwrap_or_default()
             .trim()
             .to_owned();
-        let age = url_file.metadata()
+        let age = url_file
+            .metadata()
             .and_then(|m| m.modified())
             .ok()
             .and_then(|t| t.elapsed().ok())
@@ -50,7 +58,10 @@ pub fn session_status(_args: &Value) -> Result<ToolResult, String> {
     let log_tail = if log_file.exists() {
         let raw = run(
             &format!("tail -10 '{}'", log_file.display()),
-            &cwd, &[], "", Duration::from_secs(3),
+            &cwd,
+            &[],
+            "",
+            Duration::from_secs(3),
         );
         raw["stdout"].as_str().unwrap_or("").trim().to_owned()
     } else {
@@ -60,9 +71,16 @@ pub fn session_status(_args: &Value) -> Result<ToolResult, String> {
     // ── systemd unit status ───────────────────────────────────────────────────
     let systemd_raw = run(
         "systemctl --user is-active ferrite-session 2>/dev/null || echo inactive",
-        &cwd, &[], "", Duration::from_secs(5),
+        &cwd,
+        &[],
+        "",
+        Duration::from_secs(5),
     );
-    let systemd_state = systemd_raw["stdout"].as_str().unwrap_or("unknown").trim().to_owned();
+    let systemd_state = systemd_raw["stdout"]
+        .as_str()
+        .unwrap_or("unknown")
+        .trim()
+        .to_owned();
 
     // ── ntfy config ───────────────────────────────────────────────────────────
     let ntfy_configured = std::env::var("NTFY_TOPIC")
@@ -109,8 +127,8 @@ pub fn session_status(_args: &Value) -> Result<ToolResult, String> {
 /// response may not be delivered — that is expected. The watchdog detects the
 /// dead session within 30 s and calls run_boot_sequence() automatically.
 pub fn session_restart(_args: &Value) -> Result<ToolResult, String> {
-    let session_name = std::env::var("FERRITE_SESSION")
-        .unwrap_or_else(|_| "claude-remote".to_owned());
+    let session_name =
+        std::env::var("FERRITE_SESSION").unwrap_or_else(|_| "claude-remote".to_owned());
     let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("/"));
 
     // Spawn the kill in a detached subprocess so the response can be flushed
@@ -120,7 +138,10 @@ pub fn session_restart(_args: &Value) -> Result<ToolResult, String> {
             "nohup bash -c 'sleep 1; tmux kill-session -t {:?}' >/dev/null 2>&1 &",
             session_name
         ),
-        &cwd, &[], "", Duration::from_secs(3),
+        &cwd,
+        &[],
+        "",
+        Duration::from_secs(3),
     );
 
     let launched = result["exit_code"].as_i64().unwrap_or(1) == 0;

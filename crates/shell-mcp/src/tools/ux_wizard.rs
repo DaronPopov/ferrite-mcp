@@ -1,6 +1,6 @@
 //! ux_wizard — step-by-step interactive config flow.
 //!
-//! Current workflow: `fercuda_authz_limits`
+//! Current workflow: `role_limits`
 //!   start  -> question 1
 //!   answer -> stores answer, returns next question
 //!   status -> current answers + pending question
@@ -40,12 +40,14 @@ pub fn ux_wizard(args: &Value) -> Result<ToolResult, String> {
         "start" => {
             let workflow = args["workflow"]
                 .as_str()
-                .unwrap_or("fercuda_authz_limits")
+                .unwrap_or("role_limits")
                 .to_owned();
-            if workflow != "fercuda_authz_limits" {
+            if workflow != "role_limits" {
                 return Err(format!("ux_wizard: unknown workflow '{workflow}'"));
             }
-            let mut g = wizards().lock().map_err(|e| format!("wizard lock poisoned: {e}"))?;
+            let mut g = wizards()
+                .lock()
+                .map_err(|e| format!("wizard lock poisoned: {e}"))?;
             g.insert(
                 p.clone(),
                 WizardState {
@@ -65,7 +67,9 @@ pub fn ux_wizard(args: &Value) -> Result<ToolResult, String> {
                 .as_str()
                 .ok_or("ux_wizard answer: 'question_id' is required")?;
             let value = &args["value"];
-            let mut g = wizards().lock().map_err(|e| format!("wizard lock poisoned: {e}"))?;
+            let mut g = wizards()
+                .lock()
+                .map_err(|e| format!("wizard lock poisoned: {e}"))?;
             let st = g
                 .get_mut(&p)
                 .ok_or("ux_wizard: no active wizard; call start first")?;
@@ -102,7 +106,9 @@ pub fn ux_wizard(args: &Value) -> Result<ToolResult, String> {
             })))
         }
         "status" => {
-            let g = wizards().lock().map_err(|e| format!("wizard lock poisoned: {e}"))?;
+            let g = wizards()
+                .lock()
+                .map_err(|e| format!("wizard lock poisoned: {e}"))?;
             let st = g.get(&p).ok_or("ux_wizard: no active wizard")?;
             Ok(ToolResult::json(&json!({
                 "ok": true,
@@ -113,7 +119,9 @@ pub fn ux_wizard(args: &Value) -> Result<ToolResult, String> {
             })))
         }
         "apply" => {
-            let g = wizards().lock().map_err(|e| format!("wizard lock poisoned: {e}"))?;
+            let g = wizards()
+                .lock()
+                .map_err(|e| format!("wizard lock poisoned: {e}"))?;
             let st = g.get(&p).ok_or("ux_wizard: no active wizard")?;
             let role = st.role.clone().ok_or("ux_wizard: role not answered")?;
             let max_bytes = st
@@ -138,7 +146,9 @@ pub fn ux_wizard(args: &Value) -> Result<ToolResult, String> {
             })))
         }
         "reset" => {
-            let mut g = wizards().lock().map_err(|e| format!("wizard lock poisoned: {e}"))?;
+            let mut g = wizards()
+                .lock()
+                .map_err(|e| format!("wizard lock poisoned: {e}"))?;
             let removed = g.remove(&p).is_some();
             Ok(ToolResult::json(&json!({
                 "ok": true,
@@ -206,8 +216,8 @@ fn policy_path() -> PathBuf {
 fn apply_role_limits(role: &str, max_bytes: u64, max_jobs: u64) -> Result<(), String> {
     let path = policy_path();
     let mut root: toml::Value = if path.exists() {
-        let txt = std::fs::read_to_string(&path)
-            .map_err(|e| format!("read {}: {e}", path.display()))?;
+        let txt =
+            std::fs::read_to_string(&path).map_err(|e| format!("read {}: {e}", path.display()))?;
         toml::from_str(&txt).map_err(|e| format!("parse {}: {e}", path.display()))?
     } else {
         toml::Value::Table(toml::map::Map::new())
@@ -218,7 +228,10 @@ fn apply_role_limits(role: &str, max_bytes: u64, max_jobs: u64) -> Result<(), St
         .as_table_mut()
         .ok_or("policy root must be a TOML table")?;
     if !table.contains_key("roles") {
-        table.insert("roles".to_owned(), toml::Value::Table(toml::map::Map::new()));
+        table.insert(
+            "roles".to_owned(),
+            toml::Value::Table(toml::map::Map::new()),
+        );
     }
     let roles = table
         .get_mut("roles")
@@ -232,7 +245,10 @@ fn apply_role_limits(role: &str, max_bytes: u64, max_jobs: u64) -> Result<(), St
         .and_then(|v| v.as_table_mut())
         .ok_or("policy role must be table")?;
     if !role_tbl.contains_key("limits") {
-        role_tbl.insert("limits".to_owned(), toml::Value::Table(toml::map::Map::new()));
+        role_tbl.insert(
+            "limits".to_owned(),
+            toml::Value::Table(toml::map::Map::new()),
+        );
     }
     let limits = role_tbl
         .get_mut("limits")
@@ -249,16 +265,15 @@ fn apply_role_limits(role: &str, max_bytes: u64, max_jobs: u64) -> Result<(), St
     );
 
     // Ensure allow/deny keys exist minimally for role sanity.
-    role_tbl
-        .entry("allow".to_owned())
-        .or_insert_with(|| toml::Value::Array(vec![toml::Value::String("fercuda_runtime.*".to_owned())]));
+    role_tbl.entry("allow".to_owned()).or_insert_with(|| {
+        toml::Value::Array(vec![])
+    });
     role_tbl
         .entry("deny".to_owned())
         .or_insert_with(|| toml::Value::Array(vec![]));
 
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|e| format!("create {}: {e}", parent.display()))?;
+        std::fs::create_dir_all(parent).map_err(|e| format!("create {}: {e}", parent.display()))?;
     }
     let out = toml::to_string_pretty(&root).map_err(|e| format!("serialize policy: {e}"))?;
     std::fs::write(&path, out).map_err(|e| format!("write {}: {e}", path.display()))?;

@@ -30,7 +30,10 @@ impl Parser {
     // ── Primitive helpers ────────────────────────────────────────────────────
 
     fn peek(&self) -> &TokenKind {
-        self.tokens.get(self.pos).map(|t| &t.kind).unwrap_or(&TokenKind::Eof)
+        self.tokens
+            .get(self.pos)
+            .map(|t| &t.kind)
+            .unwrap_or(&TokenKind::Eof)
     }
 
     fn advance(&mut self) -> &TokenKind {
@@ -57,7 +60,10 @@ impl Parser {
             let pipeline = self.parse_pipeline()?;
             let separator = self.parse_separator();
             let is_eof = separator == Separator::Eof;
-            items.push(ListItem { pipeline, separator });
+            items.push(ListItem {
+                pipeline,
+                separator,
+            });
             if is_eof {
                 break;
             }

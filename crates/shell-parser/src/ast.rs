@@ -68,7 +68,9 @@ pub struct Word {
 
 impl Word {
     pub fn literal(s: impl Into<String>) -> Self {
-        Self { parts: vec![WordPart::Literal(s.into())] }
+        Self {
+            parts: vec![WordPart::Literal(s.into())],
+        }
     }
 }
 

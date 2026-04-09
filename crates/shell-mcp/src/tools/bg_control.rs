@@ -6,12 +6,16 @@ use serde_json::{json, Value};
 
 use crate::job_store::{JobStatus, JobStore};
 use crate::protocol::ToolResult;
+use crate::tools::state::lock_mutex;
 
 pub fn bg_kill(args: &Value, store: &Arc<JobStore>) -> Result<ToolResult, String> {
-    let job_id = args["job_id"].as_str().ok_or("bg_kill: 'job_id' is required")?;
-    let signal  = args["signal"].as_str().unwrap_or("TERM");
+    let job_id = args["job_id"]
+        .as_str()
+        .ok_or("bg_kill: 'job_id' is required")?;
+    let signal = args["signal"].as_str().unwrap_or("TERM");
 
-    let job = store.get(job_id)
+    let job = store
+        .get(job_id)
         .ok_or_else(|| format!("bg_kill: job '{job_id}' not found"))?;
 
     // Don't kill a job that's already done.
@@ -29,13 +33,13 @@ pub fn bg_kill(args: &Value, store: &Arc<JobStore>) -> Result<ToolResult, String
 
     let sig = match signal {
         "KILL" => Signal::SIGKILL,
-        _      => Signal::SIGTERM,
+        _ => Signal::SIGTERM,
     };
 
     let pid = Pid::from_raw(job.pid as i32);
     match kill(pid, sig) {
         Ok(()) => {
-            *job.status.lock().unwrap() = JobStatus::Killed;
+            *lock_mutex(&job.status, "job status") = JobStatus::Killed;
             Ok(ToolResult::json(&json!({
                 "ok":      true,
                 "job_id":  job_id,

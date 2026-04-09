@@ -3,8 +3,8 @@
 //! Tools:
 //!   tailscale_status — Tailscale IP, peers, and connectivity summary.
 
-use std::time::Duration;
 use serde_json::{json, Value};
+use std::time::Duration;
 
 use crate::protocol::ToolResult;
 use crate::tools::execution::run;
@@ -26,20 +26,26 @@ pub fn tailscale_status(_args: &Value) -> Result<ToolResult, String> {
     // Prefer unprivileged status first; fallback to sudo -n when needed.
     let mut raw = run(
         &format!("{ts_bin} status --json"),
-        &cwd, &[], "", Duration::from_secs(10),
+        &cwd,
+        &[],
+        "",
+        Duration::from_secs(10),
     );
 
     // Parse JSON from stdout regardless of exit code — tailscale exits 1
     // on health warnings (e.g. DNS issues) even when fully running.
-    let mut ts: Value = serde_json::from_str(raw["stdout"].as_str().unwrap_or("{}"))
-        .unwrap_or(json!({}));
+    let mut ts: Value =
+        serde_json::from_str(raw["stdout"].as_str().unwrap_or("{}")).unwrap_or(json!({}));
     if ts.as_object().map(|o| o.is_empty()).unwrap_or(true) {
         let raw_sudo = run(
             &format!("sudo -n {ts_bin} status --json"),
-            &cwd, &[], "", Duration::from_secs(10),
+            &cwd,
+            &[],
+            "",
+            Duration::from_secs(10),
         );
-        let ts_sudo: Value = serde_json::from_str(raw_sudo["stdout"].as_str().unwrap_or("{}"))
-            .unwrap_or(json!({}));
+        let ts_sudo: Value =
+            serde_json::from_str(raw_sudo["stdout"].as_str().unwrap_or("{}")).unwrap_or(json!({}));
         if !ts_sudo.as_object().map(|o| o.is_empty()).unwrap_or(true) {
             raw = raw_sudo;
             ts = ts_sudo;
@@ -67,7 +73,10 @@ pub fn tailscale_status(_args: &Value) -> Result<ToolResult, String> {
         // Attempt to bring tailscale up (sudoers should allow this without password)
         let up = run(
             &format!("sudo -n {ts_bin} up"),
-            &cwd, &[], "", Duration::from_secs(15),
+            &cwd,
+            &[],
+            "",
+            Duration::from_secs(15),
         );
         let up_ok = up["exit_code"].as_i64().unwrap_or(1) == 0;
 
@@ -75,7 +84,10 @@ pub fn tailscale_status(_args: &Value) -> Result<ToolResult, String> {
             // Try without sudo (may work if already in tailscale group)
             let up2 = run(
                 &format!("{ts_bin} up"),
-                &cwd, &[], "", Duration::from_secs(15),
+                &cwd,
+                &[],
+                "",
+                Duration::from_secs(15),
             );
             let up2_ok = up2["exit_code"].as_i64().unwrap_or(1) == 0;
             if !up2_ok {
@@ -93,14 +105,20 @@ pub fn tailscale_status(_args: &Value) -> Result<ToolResult, String> {
         // Re-query status after bringing up
         let raw = run(
             &format!("{ts_bin} status --json"),
-            &cwd, &[], "", Duration::from_secs(10),
+            &cwd,
+            &[],
+            "",
+            Duration::from_secs(10),
         );
-        let mut ts: Value = serde_json::from_str(raw["stdout"].as_str().unwrap_or("{}"))
-            .unwrap_or(json!({}));
+        let mut ts: Value =
+            serde_json::from_str(raw["stdout"].as_str().unwrap_or("{}")).unwrap_or(json!({}));
         if ts.as_object().map(|o| o.is_empty()).unwrap_or(true) {
             let raw_sudo = run(
                 &format!("sudo -n {ts_bin} status --json"),
-                &cwd, &[], "", Duration::from_secs(10),
+                &cwd,
+                &[],
+                "",
+                Duration::from_secs(10),
             );
             let ts_sudo: Value = serde_json::from_str(raw_sudo["stdout"].as_str().unwrap_or("{}"))
                 .unwrap_or(json!({}));
@@ -159,25 +177,30 @@ pub fn tailscale_status(_args: &Value) -> Result<ToolResult, String> {
     let peers: Vec<Value> = ts["Peer"]
         .as_object()
         .map(|m| {
-            m.values().map(|p| {
-                let ip = p["TailscaleIPs"]
-                    .as_array()
-                    .and_then(|a| a.first())
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_owned();
-                json!({
-                    "name":    p["HostName"].as_str().unwrap_or(""),
-                    "ip":      ip,
-                    "online":  p["Online"].as_bool().unwrap_or(false),
-                    "os":      p["OS"].as_str().unwrap_or(""),
-                    "last_seen": p["LastSeen"].as_str().unwrap_or(""),
+            m.values()
+                .map(|p| {
+                    let ip = p["TailscaleIPs"]
+                        .as_array()
+                        .and_then(|a| a.first())
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_owned();
+                    json!({
+                        "name":    p["HostName"].as_str().unwrap_or(""),
+                        "ip":      ip,
+                        "online":  p["Online"].as_bool().unwrap_or(false),
+                        "os":      p["OS"].as_str().unwrap_or(""),
+                        "last_seen": p["LastSeen"].as_str().unwrap_or(""),
+                    })
                 })
-            }).collect()
+                .collect()
         })
         .unwrap_or_default();
 
-    let online_peers = peers.iter().filter(|p| p["online"].as_bool().unwrap_or(false)).count();
+    let online_peers = peers
+        .iter()
+        .filter(|p| p["online"].as_bool().unwrap_or(false))
+        .count();
 
     Ok(ToolResult::json(&json!({
         "running":       true,

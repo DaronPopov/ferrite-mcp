@@ -4,8 +4,8 @@
 //!   gdb_run — run a binary under GDB in batch mode; returns structured
 //!              backtrace, locals, signal info, breakpoint hits.
 
-use serde_json::{json, Value};
 use crate::protocol::ToolResult;
+use serde_json::{json, Value};
 
 // ── gdb_run ───────────────────────────────────────────────────────────────────
 
@@ -16,9 +16,11 @@ use crate::protocol::ToolResult;
 ///   - Core analysis:   binary + core file → bt, registers
 ///   - Custom commands: pass `commands` array for full control
 pub fn gdb_run(args: &Value) -> Result<ToolResult, String> {
-    let binary  = args["binary"].as_str().ok_or("gdb_run: 'binary' required")?;
+    let binary = args["binary"]
+        .as_str()
+        .ok_or("gdb_run: 'binary' required")?;
     let run_args = args["args"].as_str().unwrap_or("");
-    let core    = args["core"].as_str().unwrap_or("");
+    let core = args["core"].as_str().unwrap_or("");
     let timeout = args["timeout_secs"].as_u64().unwrap_or(30);
 
     let breakpoints: Vec<&str> = args["breakpoints"]
@@ -32,23 +34,32 @@ pub fn gdb_run(args: &Value) -> Result<ToolResult, String> {
         .unwrap_or_default();
 
     if !std::path::Path::new(binary).exists() {
-        return Ok(ToolResult::error(format!("gdb_run: binary not found: {binary}")));
+        return Ok(ToolResult::error(format!(
+            "gdb_run: binary not found: {binary}"
+        )));
     }
 
     // ── build GDB command sequence ────────────────────────────────────────────
     let mut cmd = std::process::Command::new("gdb");
     cmd.arg("--batch")
-       .arg("--quiet")
-       .arg("-ex").arg("set print pretty on")
-       .arg("-ex").arg("set pagination off")
-       .arg("-ex").arg("set confirm off");
+        .arg("--quiet")
+        .arg("-ex")
+        .arg("set print pretty on")
+        .arg("-ex")
+        .arg("set pagination off")
+        .arg("-ex")
+        .arg("set confirm off");
 
     if !core.is_empty() {
         // Core dump analysis
-        cmd.arg("-ex").arg(format!("core-file {core}"))
-           .arg("-ex").arg("bt full")
-           .arg("-ex").arg("info registers")
-           .arg("-ex").arg("info threads");
+        cmd.arg("-ex")
+            .arg(format!("core-file {core}"))
+            .arg("-ex")
+            .arg("bt full")
+            .arg("-ex")
+            .arg("info registers")
+            .arg("-ex")
+            .arg("info threads");
     } else {
         // Live execution
         for bp in &breakpoints {
@@ -64,9 +75,12 @@ pub fn gdb_run(args: &Value) -> Result<ToolResult, String> {
 
         if !breakpoints.is_empty() {
             // After hitting breakpoint: print context
-            cmd.arg("-ex").arg("bt")
-               .arg("-ex").arg("info locals")
-               .arg("-ex").arg("info args");
+            cmd.arg("-ex")
+                .arg("bt")
+                .arg("-ex")
+                .arg("info locals")
+                .arg("-ex")
+                .arg("info args");
         } else {
             cmd.arg("-ex").arg("bt");
         }
@@ -78,13 +92,15 @@ pub fn gdb_run(args: &Value) -> Result<ToolResult, String> {
     }
 
     cmd.arg(binary);
-    if !core.is_empty() { cmd.arg(core); }
+    if !core.is_empty() {
+        cmd.arg(core);
+    }
 
     cmd.stdout(std::process::Stdio::piped())
-       .stderr(std::process::Stdio::piped());
+        .stderr(std::process::Stdio::piped());
 
     // ── run with timeout ─────────────────────────────────────────────────────
-    let start    = std::time::Instant::now();
+    let start = std::time::Instant::now();
     let deadline = start + std::time::Duration::from_secs(timeout);
 
     let mut child = cmd.spawn().map_err(|e| format!("gdb_run: {e}"))?;
@@ -95,7 +111,9 @@ pub fn gdb_run(args: &Value) -> Result<ToolResult, String> {
             None => {
                 if std::time::Instant::now() > deadline {
                     child.kill().ok();
-                    return Ok(ToolResult::error(format!("gdb_run: timed out after {timeout}s")));
+                    return Ok(ToolResult::error(format!(
+                        "gdb_run: timed out after {timeout}s"
+                    )));
                 }
                 std::thread::sleep(std::time::Duration::from_millis(50));
             }
@@ -103,7 +121,9 @@ pub fn gdb_run(args: &Value) -> Result<ToolResult, String> {
     }
 
     let duration_ms = start.elapsed().as_millis() as u64;
-    let out = child.wait_with_output().map_err(|e| format!("wait_with_output: {e}"))?;
+    let out = child
+        .wait_with_output()
+        .map_err(|e| format!("wait_with_output: {e}"))?;
 
     let stdout = String::from_utf8_lossy(&out.stdout).to_string();
     let stderr = String::from_utf8_lossy(&out.stderr).to_string();
@@ -127,30 +147,30 @@ pub fn gdb_run(args: &Value) -> Result<ToolResult, String> {
 }
 
 struct GdbParsed {
-    exit_normal:     bool,
-    signal:          Option<String>,
-    signal_addr:     Option<String>,
+    exit_normal: bool,
+    signal: Option<String>,
+    signal_addr: Option<String>,
     breakpoints_hit: Vec<Value>,
-    backtrace:       Vec<Value>,
-    locals:          Vec<Value>,
-    registers:       Vec<Value>,
+    backtrace: Vec<Value>,
+    locals: Vec<Value>,
+    registers: Vec<Value>,
 }
 
 fn parse_gdb_output(output: &str) -> GdbParsed {
     let mut p = GdbParsed {
-        exit_normal:     false,
-        signal:          None,
-        signal_addr:     None,
+        exit_normal: false,
+        signal: None,
+        signal_addr: None,
         breakpoints_hit: Vec::new(),
-        backtrace:       Vec::new(),
-        locals:          Vec::new(),
-        registers:       Vec::new(),
+        backtrace: Vec::new(),
+        locals: Vec::new(),
+        registers: Vec::new(),
     };
 
-    let mut in_bt      = false;
-    let mut in_locals  = false;
-    let mut in_regs    = false;
-    let mut frame_idx  = 0usize;
+    let mut in_bt = false;
+    let mut in_locals = false;
+    let mut in_regs = false;
+    let mut frame_idx = 0usize;
 
     for line in output.lines() {
         let t = line.trim();
@@ -177,17 +197,27 @@ fn parse_gdb_output(output: &str) -> GdbParsed {
         // Breakpoint hits: "Breakpoint 1, function (args) at file:line"
         if t.starts_with("Breakpoint ") && t.contains(" at ") {
             let loc = t.split(" at ").nth(1).unwrap_or("").to_owned();
-            let func = t.split(',').nth(1).map(|s| s.trim().to_owned()).unwrap_or_default();
-            p.breakpoints_hit.push(json!({ "function": func, "location": loc }));
-            in_bt     = false;
+            let func = t
+                .split(',')
+                .nth(1)
+                .map(|s| s.trim().to_owned())
+                .unwrap_or_default();
+            p.breakpoints_hit
+                .push(json!({ "function": func, "location": loc }));
+            in_bt = false;
             in_locals = false;
         }
 
         // Backtrace frames: "#0  function (args) at file:line"
-        if t.starts_with('#') && t.chars().nth(1).map(|c| c.is_ascii_digit()).unwrap_or(false) {
-            in_bt     = true;
+        if t.starts_with('#')
+            && t.chars()
+                .nth(1)
+                .map(|c| c.is_ascii_digit())
+                .unwrap_or(false)
+        {
+            in_bt = true;
             in_locals = false;
-            in_regs   = false;
+            in_regs = false;
 
             let frame = parse_bt_frame(t);
             frame_idx = frame["frame"].as_u64().unwrap_or(0) as usize;
@@ -196,7 +226,9 @@ fn parse_gdb_output(output: &str) -> GdbParsed {
         }
 
         // Locals / args
-        if t.starts_with("No locals") || t.starts_with("No arguments") { continue; }
+        if t.starts_with("No locals") || t.starts_with("No arguments") {
+            continue;
+        }
 
         // register lines from "info registers": "rax            0x0   0"
         if in_regs {
@@ -211,19 +243,22 @@ fn parse_gdb_output(output: &str) -> GdbParsed {
 
         if t == "Registers:" || t.starts_with("(gdb)") && in_bt {
             in_regs = true;
-            in_bt   = false;
+            in_bt = false;
         }
 
         // Variable assignments in locals/args: "var = value"
         if in_locals || (in_bt && frame_idx == 0) {
             if let Some((name, val)) = t.split_once(" = ") {
                 if !name.contains('(') && !name.is_empty() {
-                    p.locals.push(json!({ "name": name.trim(), "value": val.trim() }));
+                    p.locals
+                        .push(json!({ "name": name.trim(), "value": val.trim() }));
                 }
             }
         }
 
-        if t == "Locals:" || t.contains("Local variables:") { in_locals = true; }
+        if t == "Locals:" || t.contains("Local variables:") {
+            in_locals = true;
+        }
     }
 
     p
@@ -231,13 +266,16 @@ fn parse_gdb_output(output: &str) -> GdbParsed {
 
 fn parse_bt_frame(line: &str) -> Value {
     // "#N  function (args) at file:line"  or  "#N  0xADDR in function () at file:line"
-    let frame_no: u64 = line.trim_start_matches('#')
-        .split_whitespace().next()
+    let frame_no: u64 = line
+        .trim_start_matches('#')
+        .split_whitespace()
+        .next()
         .and_then(|n| n.parse().ok())
         .unwrap_or(0);
 
     let at_part = line.split(" at ").nth(1).unwrap_or("").to_owned();
-    let (file, lineno) = at_part.rsplit_once(':')
+    let (file, lineno) = at_part
+        .rsplit_once(':')
         .map(|(f, l)| (f.to_owned(), l.parse::<u32>().unwrap_or(0)))
         .unwrap_or((at_part, 0));
 
@@ -245,7 +283,8 @@ fn parse_bt_frame(line: &str) -> Value {
     let rest = line.splitn(2, ' ').nth(1).unwrap_or("").trim();
     let func = if rest.starts_with("0x") {
         // "0xADDR in function_name ("
-        rest.split(" in ").nth(1)
+        rest.split(" in ")
+            .nth(1)
             .and_then(|s| s.split('(').next())
             .unwrap_or("")
             .trim()

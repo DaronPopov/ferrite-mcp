@@ -5,8 +5,8 @@
 //!   port_list     — listening TCP/UDP ports
 //!   journal_query — system log entries
 
-use serde_json::{json, Value};
 use crate::protocol::ToolResult;
+use serde_json::{json, Value};
 
 // ── process_tree ──────────────────────────────────────────────────────────────
 
@@ -14,21 +14,22 @@ use crate::protocol::ToolResult;
 #[cfg(target_os = "linux")]
 pub fn process_tree(args: &Value) -> Result<ToolResult, String> {
     let filter = args["filter"].as_str().unwrap_or("").to_lowercase();
-    let limit  = args["limit"].as_u64().unwrap_or(200) as usize;
+    let limit = args["limit"].as_u64().unwrap_or(200) as usize;
 
     let mut procs: Vec<Value> = Vec::new();
 
-    let proc_dir = std::fs::read_dir("/proc")
-        .map_err(|e| format!("process_tree: /proc: {e}"))?;
+    let proc_dir = std::fs::read_dir("/proc").map_err(|e| format!("process_tree: /proc: {e}"))?;
 
     for entry in proc_dir.filter_map(|e| e.ok()) {
-        if procs.len() >= limit { break; }
+        if procs.len() >= limit {
+            break;
+        }
         let name = entry.file_name();
         let pid_str = name.to_string_lossy();
 
         // Only numeric entries are PIDs
         let pid: u32 = match pid_str.parse() {
-            Ok(n)  => n,
+            Ok(n) => n,
             Err(_) => continue,
         };
 
@@ -43,9 +44,10 @@ pub fn process_tree(args: &Value) -> Result<ToolResult, String> {
             continue;
         }
 
-        let ppid:   u32  = status.get("PPid").and_then(|v| v.parse().ok()).unwrap_or(0);
-        let state:  &str = status.get("State").map(String::as_str).unwrap_or("?");
-        let vm_rss: u64  = status.get("VmRSS")
+        let ppid: u32 = status.get("PPid").and_then(|v| v.parse().ok()).unwrap_or(0);
+        let state: &str = status.get("State").map(String::as_str).unwrap_or("?");
+        let vm_rss: u64 = status
+            .get("VmRSS")
             .and_then(|v| v.split_whitespace().next())
             .and_then(|v| v.parse().ok())
             .unwrap_or(0);
@@ -53,7 +55,8 @@ pub fn process_tree(args: &Value) -> Result<ToolResult, String> {
         // Read cmdline (null-byte separated)
         let cmdline = std::fs::read(proc_path.join("cmdline"))
             .map(|bytes| {
-                bytes.split(|&b| b == 0)
+                bytes
+                    .split(|&b| b == 0)
                     .filter(|s| !s.is_empty())
                     .map(|s| String::from_utf8_lossy(s).into_owned())
                     .collect::<Vec<_>>()
@@ -98,7 +101,7 @@ fn read_proc_status(proc_path: &std::path::Path) -> std::collections::HashMap<St
 #[cfg(not(target_os = "linux"))]
 pub fn process_tree(args: &Value) -> Result<ToolResult, String> {
     let filter = args["filter"].as_str().unwrap_or("").to_lowercase();
-    let limit  = args["limit"].as_u64().unwrap_or(200) as usize;
+    let limit = args["limit"].as_u64().unwrap_or(200) as usize;
 
     let out = std::process::Command::new("ps")
         .args(["axww", "-o", "pid=,ppid=,stat=,rss=,command="])
@@ -109,9 +112,9 @@ pub fn process_tree(args: &Value) -> Result<ToolResult, String> {
         .lines()
         .filter_map(|line| {
             let mut cols = line.split_whitespace();
-            let pid:    u32 = cols.next()?.parse().ok()?;
-            let ppid:   u32 = cols.next()?.parse().ok()?;
-            let state       = cols.next().unwrap_or("?").to_owned();
+            let pid: u32 = cols.next()?.parse().ok()?;
+            let ppid: u32 = cols.next()?.parse().ok()?;
+            let state = cols.next().unwrap_or("?").to_owned();
             let mem_kb: u64 = cols.next()?.parse().ok()?;
             let cmdline: String = cols.collect::<Vec<_>>().join(" ");
             let name = std::path::Path::new(cmdline.split_whitespace().next().unwrap_or(""))
@@ -161,17 +164,28 @@ pub fn port_list(args: &Value) -> Result<ToolResult, String> {
     let stdout = String::from_utf8_lossy(&out.stdout);
     let mut ports: Vec<Value> = Vec::new();
 
-    for line in stdout.lines().skip(1) { // skip header
+    for line in stdout.lines().skip(1) {
+        // skip header
         let cols: Vec<&str> = line.split_whitespace().collect();
-        if cols.len() < 5 { continue; }
+        if cols.len() < 5 {
+            continue;
+        }
 
         let netid = cols[0]; // "tcp", "udp", "tcp6", "udp6"
-        let proto = if netid.starts_with("tcp") { "tcp" }
-                    else if netid.starts_with("udp") { "udp" }
-                    else { continue };
+        let proto = if netid.starts_with("tcp") {
+            "tcp"
+        } else if netid.starts_with("udp") {
+            "udp"
+        } else {
+            continue;
+        };
 
-        if !proto_filter.is_empty() && proto != proto_filter { continue; }
-        if cols[1] != "LISTEN" && proto == "tcp" { continue; }
+        if !proto_filter.is_empty() && proto != proto_filter {
+            continue;
+        }
+        if cols[1] != "LISTEN" && proto == "tcp" {
+            continue;
+        }
 
         // Local address is col 4: "0.0.0.0:8080" or "[::]:22" or "*:68"
         let local = cols[4];
@@ -218,13 +232,17 @@ pub fn port_list(args: &Value) -> Result<ToolResult, String> {
         .skip(1) // skip header
         .filter_map(|line| {
             let cols: Vec<&str> = line.split_whitespace().collect();
-            if cols.len() < 9 { return None; }
+            if cols.len() < 9 {
+                return None;
+            }
             let proc_name = cols[0].to_owned();
-            let pid: u64  = cols[1].parse().ok()?;
+            let pid: u64 = cols[1].parse().ok()?;
             // NAME column: "*:8080" or "127.0.0.1:3000 (LISTEN)"
             let addr_raw = cols[8].trim_end_matches(" (LISTEN)");
             let (addr, port) = split_addr_port(addr_raw);
-            if !proto_filter.is_empty() && proto_filter != "tcp" { return None; }
+            if !proto_filter.is_empty() && proto_filter != "tcp" {
+                return None;
+            }
             Some(json!({
                 "proto":   "tcp",
                 "addr":    addr,
@@ -248,14 +266,14 @@ fn split_addr_port(s: &str) -> (String, u64) {
     if s.starts_with('[') {
         if let Some(bracket_end) = s.find(']') {
             let addr = s[1..bracket_end].to_owned();
-            let port = s[bracket_end+2..].parse().unwrap_or(0);
+            let port = s[bracket_end + 2..].parse().unwrap_or(0);
             return (addr, port);
         }
     }
     // IPv4: "0.0.0.0:80" or "*:80"
     if let Some(colon) = s.rfind(':') {
         let addr = s[..colon].to_owned();
-        let port = s[colon+1..].parse().unwrap_or(0);
+        let port = s[colon + 1..].parse().unwrap_or(0);
         return (addr, port);
     }
     (s.to_owned(), 0)
@@ -264,12 +282,20 @@ fn split_addr_port(s: &str) -> (String, u64) {
 #[cfg(target_os = "linux")]
 fn parse_ss_process(s: &str) -> (String, Option<u64>) {
     // Format: users:(("name",pid=N,fd=M))
-    if !s.starts_with("users:") { return (String::new(), None); }
-    let name = s.find('"')
-        .and_then(|start| s[start+1..].find('"').map(|end| s[start+1..start+1+end].to_owned()))
+    if !s.starts_with("users:") {
+        return (String::new(), None);
+    }
+    let name = s
+        .find('"')
+        .and_then(|start| {
+            s[start + 1..]
+                .find('"')
+                .map(|end| s[start + 1..start + 1 + end].to_owned())
+        })
         .unwrap_or_default();
-    let pid = s.find("pid=")
-        .and_then(|i| s[i+4..].split(',').next())
+    let pid = s
+        .find("pid=")
+        .and_then(|i| s[i + 4..].split(',').next())
         .and_then(|n| n.parse().ok());
     (name, pid)
 }
@@ -279,23 +305,34 @@ fn parse_ss_process(s: &str) -> (String, Option<u64>) {
 /// Query systemd journal via journalctl on Linux.
 #[cfg(target_os = "linux")]
 pub fn journal_query(args: &Value) -> Result<ToolResult, String> {
-    let unit    = args["unit"].as_str().unwrap_or("");
-    let since   = args["since"].as_str().unwrap_or("1h ago");
-    let grep    = args["grep"].as_str().unwrap_or("");
-    let limit   = args["limit"].as_u64().unwrap_or(50);
-    let boot    = args["boot"].as_bool().unwrap_or(false);
+    let unit = args["unit"].as_str().unwrap_or("");
+    let since = args["since"].as_str().unwrap_or("1h ago");
+    let grep = args["grep"].as_str().unwrap_or("");
+    let limit = args["limit"].as_u64().unwrap_or(50);
+    let boot = args["boot"].as_bool().unwrap_or(false);
 
     let mut cmd = std::process::Command::new("journalctl");
     cmd.arg("--no-pager")
-       .arg("-n").arg(limit.to_string())
-       .arg("--output=short-iso");
+        .arg("-n")
+        .arg(limit.to_string())
+        .arg("--output=short-iso");
 
-    if !unit.is_empty()  { cmd.args(["-u", unit]); }
-    if !since.is_empty() { cmd.args(["--since", since]); }
-    if !grep.is_empty()  { cmd.args(["--grep", grep]); }
-    if boot              { cmd.arg("-b"); }
+    if !unit.is_empty() {
+        cmd.args(["-u", unit]);
+    }
+    if !since.is_empty() {
+        cmd.args(["--since", since]);
+    }
+    if !grep.is_empty() {
+        cmd.args(["--grep", grep]);
+    }
+    if boot {
+        cmd.arg("-b");
+    }
 
-    let out = cmd.output().map_err(|e| format!("journal_query: journalctl: {e}"))?;
+    let out = cmd
+        .output()
+        .map_err(|e| format!("journal_query: journalctl: {e}"))?;
 
     if !out.status.success() {
         let err = String::from_utf8_lossy(&out.stderr);
@@ -316,7 +353,8 @@ pub fn journal_query(args: &Value) -> Result<ToolResult, String> {
 /// "2024-01-01T10:00:00+0000 hostname unit[pid]: message"
 #[cfg(target_os = "linux")]
 fn parse_journal_output(output: &str) -> Vec<Value> {
-    output.lines()
+    output
+        .lines()
         .filter(|l| !l.is_empty() && !l.starts_with("--"))
         .map(|line| {
             // Split on first space: timestamp
@@ -328,7 +366,7 @@ fn parse_journal_output(output: &str) -> Vec<Value> {
 
             let (unit, pid) = if let Some(b) = unit_pid.find('[') {
                 let u = unit_pid[..b].to_owned();
-                let p = unit_pid[b+1..].trim_end_matches(']').to_owned();
+                let p = unit_pid[b + 1..].trim_end_matches(']').to_owned();
                 (u, p)
             } else {
                 (unit_pid.to_owned(), String::new())
@@ -349,15 +387,19 @@ fn parse_journal_output(output: &str) -> Vec<Value> {
 #[cfg(not(target_os = "linux"))]
 pub fn journal_query(args: &Value) -> Result<ToolResult, String> {
     let since = args["since"].as_str().unwrap_or("1h");
-    let grep  = args["grep"].as_str().unwrap_or("");
+    let grep = args["grep"].as_str().unwrap_or("");
     let limit = args["limit"].as_u64().unwrap_or(50) as usize;
-    let proc  = args["unit"].as_str().unwrap_or(""); // 'unit' reused as process name
+    let proc = args["unit"].as_str().unwrap_or(""); // 'unit' reused as process name
 
     let mut cmd = std::process::Command::new("log");
     cmd.args(["show", "--last", since, "--style", "compact"]);
-    if !proc.is_empty() { cmd.args(["--process", proc]); }
+    if !proc.is_empty() {
+        cmd.args(["--process", proc]);
+    }
 
-    let out = cmd.output().map_err(|e| format!("journal_query: log show: {e}"))?;
+    let out = cmd
+        .output()
+        .map_err(|e| format!("journal_query: log show: {e}"))?;
 
     if !out.status.success() {
         let err = String::from_utf8_lossy(&out.stderr);

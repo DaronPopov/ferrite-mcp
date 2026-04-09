@@ -11,7 +11,11 @@ use crate::tools::state::resolve_or_cwd;
 
 // ── bg_spawn ──────────────────────────────────────────────────────────────────
 
-pub fn bg_spawn(args: &Value, store: &Arc<JobStore>, state: &Arc<Mutex<ServerState>>) -> Result<ToolResult, String> {
+pub fn bg_spawn(
+    args: &Value,
+    store: &Arc<JobStore>,
+    state: &Arc<Mutex<ServerState>>,
+) -> Result<ToolResult, String> {
     let cmd = args["cmd"].as_str().ok_or("bg_spawn: 'cmd' is required")?;
 
     // Resolve cwd: caller-supplied → ferrite's state → process cwd.

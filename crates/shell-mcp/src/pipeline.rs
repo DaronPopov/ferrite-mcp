@@ -14,6 +14,7 @@ use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::job_store::JobStore;
+use crate::tools::state::lock_mutex;
 
 // ── Step state ────────────────────────────────────────────────────────────────
 
@@ -30,11 +31,11 @@ pub enum StepStatus {
 impl StepStatus {
     pub fn label(&self) -> &'static str {
         match self {
-            StepStatus::Pending    => "pending",
-            StepStatus::Running    => "running",
-            StepStatus::Done(_)    => "done",
-            StepStatus::Failed(_)  => "failed",
-            StepStatus::Skipped    => "skipped",
+            StepStatus::Pending => "pending",
+            StepStatus::Running => "running",
+            StepStatus::Done(_) => "done",
+            StepStatus::Failed(_) => "failed",
+            StepStatus::Skipped => "skipped",
         }
     }
     pub fn exit_code(&self) -> Option<i32> {
@@ -44,7 +45,10 @@ impl StepStatus {
         }
     }
     pub fn is_terminal(&self) -> bool {
-        matches!(self, StepStatus::Done(_) | StepStatus::Failed(_) | StepStatus::Skipped)
+        matches!(
+            self,
+            StepStatus::Done(_) | StepStatus::Failed(_) | StepStatus::Skipped
+        )
     }
     pub fn is_successful(&self) -> bool {
         matches!(self, StepStatus::Done(_))
@@ -55,14 +59,14 @@ impl StepStatus {
 
 pub struct PipelineStep {
     /// Caller-supplied ID (e.g. "build", "test").
-    pub id:         String,
-    pub cmd:        String,
-    pub cwd:        Option<PathBuf>,
-    pub label:      String,
+    pub id: String,
+    pub cmd: String,
+    pub cwd: Option<PathBuf>,
+    pub label: String,
     pub depends_on: Vec<String>,
     /// Set when the step spawns a bg job.
-    pub job_id:     Mutex<Option<String>>,
-    pub status:     Arc<Mutex<StepStatus>>,
+    pub job_id: Mutex<Option<String>>,
+    pub status: Arc<Mutex<StepStatus>>,
 }
 
 // ── Pipeline ──────────────────────────────────────────────────────────────────
@@ -78,21 +82,21 @@ pub enum PipelineStatus {
 impl PipelineStatus {
     pub fn label(&self) -> &'static str {
         match self {
-            PipelineStatus::Running   => "running",
-            PipelineStatus::Done      => "done",
-            PipelineStatus::Failed    => "failed",
+            PipelineStatus::Running => "running",
+            PipelineStatus::Done => "done",
+            PipelineStatus::Failed => "failed",
             PipelineStatus::Cancelled => "cancelled",
         }
     }
 }
 
 pub struct Pipeline {
-    pub pipeline_id:     String,
-    pub label:           String,
-    pub steps:           Vec<Arc<PipelineStep>>,
-    pub status:          Arc<Mutex<PipelineStatus>>,
+    pub pipeline_id: String,
+    pub label: String,
+    pub steps: Vec<Arc<PipelineStep>>,
+    pub status: Arc<Mutex<PipelineStatus>>,
     pub stop_on_failure: bool,
-    pub started_secs:    u64,
+    pub started_secs: u64,
 }
 
 impl Pipeline {
@@ -105,7 +109,7 @@ impl Pipeline {
     }
 
     pub fn current_status(&self) -> PipelineStatus {
-        self.status.lock().unwrap().clone()
+        lock_mutex(&self.status, "pipeline status").clone()
     }
 
     pub fn step_by_id(&self, id: &str) -> Option<&Arc<PipelineStep>> {
@@ -117,7 +121,7 @@ impl Pipeline {
 
 pub struct PipelineStore {
     pipelines: Mutex<HashMap<String, Arc<Pipeline>>>,
-    counter:   AtomicUsize,
+    counter: AtomicUsize,
     job_store: Arc<JobStore>,
 }
 
@@ -125,7 +129,7 @@ impl PipelineStore {
     pub fn new(job_store: Arc<JobStore>) -> Self {
         Self {
             pipelines: Mutex::new(HashMap::new()),
-            counter:   AtomicUsize::new(1),
+            counter: AtomicUsize::new(1),
             job_store,
         }
     }
@@ -136,12 +140,17 @@ impl PipelineStore {
     }
 
     pub fn get(&self, id: &str) -> Option<Arc<Pipeline>> {
-        self.pipelines.lock().unwrap().get(id).cloned()
+        lock_mutex(&self.pipelines, "pipeline store")
+            .get(id)
+            .cloned()
     }
 
     #[allow(dead_code)]
     pub fn all(&self) -> Vec<Arc<Pipeline>> {
-        let mut ps: Vec<Arc<Pipeline>> = self.pipelines.lock().unwrap().values().cloned().collect();
+        let mut ps: Vec<Arc<Pipeline>> = lock_mutex(&self.pipelines, "pipeline store")
+            .values()
+            .cloned()
+            .collect();
         ps.sort_by_key(|p| p.started_secs);
         ps
     }
@@ -150,9 +159,9 @@ impl PipelineStore {
 
     pub fn run(
         &self,
-        step_defs:       Vec<StepDef>,
-        default_cwd:     PathBuf,
-        label:           Option<&str>,
+        step_defs: Vec<StepDef>,
+        default_cwd: PathBuf,
+        label: Option<&str>,
         stop_on_failure: bool,
     ) -> Result<Arc<Pipeline>, String> {
         // Validate: no unknown depends_on IDs.
@@ -180,18 +189,21 @@ impl PipelineStore {
         let pipeline_id = self.next_id();
         let label = label.unwrap_or(&pipeline_id).to_string();
 
-        let steps: Vec<Arc<PipelineStep>> = step_defs.into_iter().map(|sd| {
-            let step_label = sd.label.unwrap_or_else(|| sd.id.clone());
-            Arc::new(PipelineStep {
-                id:         sd.id,
-                cmd:        sd.cmd,
-                cwd:        sd.cwd.map(PathBuf::from),
-                label:      step_label,
-                depends_on: sd.depends_on,
-                job_id:     Mutex::new(None),
-                status:     Arc::new(Mutex::new(StepStatus::Pending)),
+        let steps: Vec<Arc<PipelineStep>> = step_defs
+            .into_iter()
+            .map(|sd| {
+                let step_label = sd.label.unwrap_or_else(|| sd.id.clone());
+                Arc::new(PipelineStep {
+                    id: sd.id,
+                    cmd: sd.cmd,
+                    cwd: sd.cwd.map(PathBuf::from),
+                    label: step_label,
+                    depends_on: sd.depends_on,
+                    job_id: Mutex::new(None),
+                    status: Arc::new(Mutex::new(StepStatus::Pending)),
+                })
             })
-        }).collect();
+            .collect();
 
         let started_secs = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -207,10 +219,10 @@ impl PipelineStore {
             started_secs,
         });
 
-        self.pipelines.lock().unwrap().insert(pipeline_id, Arc::clone(&pipeline));
+        lock_mutex(&self.pipelines, "pipeline store").insert(pipeline_id, Arc::clone(&pipeline));
 
         // Spawn coordinator thread.
-        let pipeline_t  = Arc::clone(&pipeline);
+        let pipeline_t = Arc::clone(&pipeline);
         let job_store_t = Arc::clone(&self.job_store);
         thread::spawn(move || coordinator(pipeline_t, job_store_t, default_cwd));
 
@@ -221,18 +233,19 @@ impl PipelineStore {
 
     /// Cancel a running pipeline: kill all running step jobs, mark rest Skipped.
     pub fn cancel(&self, pipeline_id: &str) -> Result<Vec<String>, String> {
-        let pipeline = self.get(pipeline_id)
+        let pipeline = self
+            .get(pipeline_id)
             .ok_or_else(|| format!("pipeline '{pipeline_id}' not found"))?;
 
-        *pipeline.status.lock().unwrap() = PipelineStatus::Cancelled;
+        *lock_mutex(&pipeline.status, "pipeline status") = PipelineStatus::Cancelled;
 
         let mut killed_jobs = Vec::new();
         for step in &pipeline.steps {
-            let mut st = step.status.lock().unwrap();
+            let mut st = lock_mutex(&step.status, "pipeline step status");
             if matches!(*st, StepStatus::Running) {
                 *st = StepStatus::Skipped;
                 // Kill the associated job if any.
-                let job_id = step.job_id.lock().unwrap().clone();
+                let job_id = lock_mutex(&step.job_id, "pipeline step job id").clone();
                 if let Some(jid) = job_id {
                     use nix::sys::signal::{kill, Signal};
                     use nix::unistd::Pid;
@@ -256,21 +269,21 @@ fn coordinator(pipeline: Arc<Pipeline>, job_store: Arc<JobStore>, default_cwd: P
     loop {
         // ── 1. Update statuses of running steps from their jobs ───────────────
         for step in &pipeline.steps {
-            let step_status = step.status.lock().unwrap().clone();
+            let step_status = lock_mutex(&step.status, "pipeline step status").clone();
             if let StepStatus::Running = step_status {
-                let job_id = step.job_id.lock().unwrap().clone();
+                let job_id = lock_mutex(&step.job_id, "pipeline step job id").clone();
                 if let Some(jid) = job_id {
                     if let Some(job) = job_store.get(&jid) {
                         let js = job.current_status();
                         use crate::job_store::JobStatus;
                         let new_step_status = match js {
-                            JobStatus::Done(0)    => Some(StepStatus::Done(0)),
+                            JobStatus::Done(0) => Some(StepStatus::Done(0)),
                             JobStatus::Done(code) => Some(StepStatus::Failed(code)),
-                            JobStatus::Killed     => Some(StepStatus::Failed(-1)),
-                            _                     => None,
+                            JobStatus::Killed => Some(StepStatus::Failed(-1)),
+                            _ => None,
                         };
                         if let Some(nss) = new_step_status {
-                            *step.status.lock().unwrap() = nss;
+                            *lock_mutex(&step.status, "pipeline step status") = nss;
                         }
                     }
                 }
@@ -280,11 +293,14 @@ fn coordinator(pipeline: Arc<Pipeline>, job_store: Arc<JobStore>, default_cwd: P
         // ── 2. Check for failure propagation ─────────────────────────────────
         if pipeline.stop_on_failure {
             let any_failed = pipeline.steps.iter().any(|s| {
-                matches!(*s.status.lock().unwrap(), StepStatus::Failed(_))
+                matches!(
+                    *lock_mutex(&s.status, "pipeline step status"),
+                    StepStatus::Failed(_)
+                )
             });
             if any_failed {
                 for step in &pipeline.steps {
-                    let mut st = step.status.lock().unwrap();
+                    let mut st = lock_mutex(&step.status, "pipeline step status");
                     if matches!(*st, StepStatus::Pending) {
                         *st = StepStatus::Skipped;
                     }
@@ -299,57 +315,68 @@ fn coordinator(pipeline: Arc<Pipeline>, job_store: Arc<JobStore>, default_cwd: P
 
         // ── 4. Launch steps whose dependencies are all successfully Done ──────
         for step in &pipeline.steps {
-            if !matches!(*step.status.lock().unwrap(), StepStatus::Pending) {
+            if !matches!(
+                *lock_mutex(&step.status, "pipeline step status"),
+                StepStatus::Pending
+            ) {
                 continue;
             }
 
             // Check that every dependency is Done (success) or skip if failed.
             let all_deps_ok = step.depends_on.iter().all(|dep_id| {
-                pipeline.step_by_id(dep_id)
-                    .map(|s| s.status.lock().unwrap().is_successful())
+                pipeline
+                    .step_by_id(dep_id)
+                    .map(|s| lock_mutex(&s.status, "pipeline step status").is_successful())
                     .unwrap_or(true)
             });
 
             let any_dep_blocked = step.depends_on.iter().any(|dep_id| {
-                pipeline.step_by_id(dep_id)
+                pipeline
+                    .step_by_id(dep_id)
                     .map(|s| {
-                        let st = s.status.lock().unwrap();
+                        let st = lock_mutex(&s.status, "pipeline step status");
                         matches!(*st, StepStatus::Failed(_) | StepStatus::Skipped)
                     })
                     .unwrap_or(false)
             });
 
             if any_dep_blocked {
-                *step.status.lock().unwrap() = StepStatus::Skipped;
+                *lock_mutex(&step.status, "pipeline step status") = StepStatus::Skipped;
                 continue;
             }
 
-            if !all_deps_ok { continue; }
+            if !all_deps_ok {
+                continue;
+            }
 
             // Launch.
             let cwd = step.cwd.clone().unwrap_or_else(|| default_cwd.clone());
             match job_store.spawn(&step.cmd, cwd, Some(&step.label), vec![]) {
                 Ok(job) => {
-                    *step.job_id.lock().unwrap() = Some(job.job_id.clone());
-                    *step.status.lock().unwrap() = StepStatus::Running;
+                    *lock_mutex(&step.job_id, "pipeline step job id") = Some(job.job_id.clone());
+                    *lock_mutex(&step.status, "pipeline step status") = StepStatus::Running;
                 }
                 Err(e) => {
                     eprintln!("ferrite pipeline: failed to spawn step '{}': {e}", step.id);
-                    *step.status.lock().unwrap() = StepStatus::Failed(-1);
+                    *lock_mutex(&step.status, "pipeline step status") = StepStatus::Failed(-1);
                 }
             }
         }
 
         // ── 5. Check if all steps have reached a terminal state ───────────────
-        let all_terminal = pipeline.steps.iter().all(|s| {
-            s.status.lock().unwrap().is_terminal()
-        });
+        let all_terminal = pipeline
+            .steps
+            .iter()
+            .all(|s| lock_mutex(&s.status, "pipeline step status").is_terminal());
 
         if all_terminal {
             let any_failed = pipeline.steps.iter().any(|s| {
-                matches!(*s.status.lock().unwrap(), StepStatus::Failed(_))
+                matches!(
+                    *lock_mutex(&s.status, "pipeline step status"),
+                    StepStatus::Failed(_)
+                )
             });
-            *pipeline.status.lock().unwrap() = if any_failed {
+            *lock_mutex(&pipeline.status, "pipeline status") = if any_failed {
                 PipelineStatus::Failed
             } else {
                 PipelineStatus::Done
@@ -365,9 +392,9 @@ fn coordinator(pipeline: Arc<Pipeline>, job_store: Arc<JobStore>, default_cwd: P
 
 /// Input definition for a single pipeline step, parsed from the MCP call.
 pub struct StepDef {
-    pub id:         String,
-    pub cmd:        String,
-    pub cwd:        Option<String>,
-    pub label:      Option<String>,
+    pub id: String,
+    pub cmd: String,
+    pub cwd: Option<String>,
+    pub label: Option<String>,
     pub depends_on: Vec<String>,
 }

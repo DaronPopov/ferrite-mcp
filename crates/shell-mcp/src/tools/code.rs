@@ -19,8 +19,12 @@ use crate::tools::state::{resolve_or_cwd, resolve_path};
 // ── read_context ──────────────────────────────────────────────────────────────
 
 pub fn read_context(args: &Value, state: &Arc<Mutex<ServerState>>) -> Result<ToolResult, String> {
-    let file   = args["file"].as_str().ok_or("read_context: 'file' is required")?;
-    let target = args["line"].as_u64().ok_or("read_context: 'line' is required")? as usize;
+    let file = args["file"]
+        .as_str()
+        .ok_or("read_context: 'file' is required")?;
+    let target = args["line"]
+        .as_u64()
+        .ok_or("read_context: 'line' is required")? as usize;
     let radius = args["radius"].as_u64().unwrap_or(10) as usize;
     let file_path = resolve_path(state, file)?;
 
@@ -32,15 +36,17 @@ pub fn read_context(args: &Value, state: &Arc<Mutex<ServerState>>) -> Result<Too
 
     // target is 1-indexed; clamp to valid range
     let target = target.max(1).min(total);
-    let start  = target.saturating_sub(radius).max(1);
-    let end    = (target + radius).min(total);
+    let start = target.saturating_sub(radius).max(1);
+    let end = (target + radius).min(total);
 
     let lines: Vec<Value> = (start..=end)
-        .map(|n| json!({
-            "num":       n,
-            "content":   all_lines[n - 1],
-            "is_target": n == target,
-        }))
+        .map(|n| {
+            json!({
+                "num":       n,
+                "content":   all_lines[n - 1],
+                "is_target": n == target,
+            })
+        })
         .collect();
 
     Ok(ToolResult::json(&json!({
@@ -56,20 +62,38 @@ pub fn read_context(args: &Value, state: &Arc<Mutex<ServerState>>) -> Result<Too
 // ── grep_code ─────────────────────────────────────────────────────────────────
 
 pub fn grep_code(args: &Value, state: &Arc<Mutex<ServerState>>) -> Result<ToolResult, String> {
-    let pattern     = args["pattern"].as_str().ok_or("grep_code: 'pattern' is required")?;
-    let root        = resolve_or_cwd(state, args["path"].as_str())?;
-    let file_glob   = args["glob"].as_str().unwrap_or("**/*.{rs,cu,c,cpp,h,cuh,py,toml}");
+    let pattern = args["pattern"]
+        .as_str()
+        .ok_or("grep_code: 'pattern' is required")?;
+    let root = resolve_or_cwd(state, args["path"].as_str())?;
+    let file_glob = args["glob"]
+        .as_str()
+        .unwrap_or("**/*.{rs,cu,c,cpp,h,cuh,py,toml}");
     let max_results = args["max_results"].as_u64().unwrap_or(50) as usize;
-    let ctx_lines   = args["context_lines"].as_u64().unwrap_or(2) as usize;
+    let ctx_lines = args["context_lines"].as_u64().unwrap_or(2) as usize;
     let case_insensitive = args["case_insensitive"].as_bool().unwrap_or(false);
 
     // Try rg first — much faster on large trees
-    if let Some(result) = try_ripgrep(pattern, &root, file_glob, max_results, ctx_lines, case_insensitive) {
+    if let Some(result) = try_ripgrep(
+        pattern,
+        &root,
+        file_glob,
+        max_results,
+        ctx_lines,
+        case_insensitive,
+    ) {
         return Ok(result);
     }
 
     // Pure-Rust fallback
-    rust_grep(pattern, &root, file_glob, max_results, ctx_lines, case_insensitive)
+    rust_grep(
+        pattern,
+        &root,
+        file_glob,
+        max_results,
+        ctx_lines,
+        case_insensitive,
+    )
 }
 
 fn try_ripgrep(
@@ -85,24 +109,34 @@ fn try_ripgrep(
 
     let mut cmd = std::process::Command::new(&rg);
     cmd.arg("--json")
-       .arg("--max-count").arg("1")           // matches per file (rg counts differently)
-       .arg("--glob").arg(file_glob)
-       .arg("--context").arg(ctx_lines.to_string())
-       .arg("--max-filesize").arg("1M");
+        .arg("--max-count")
+        .arg("1") // matches per file (rg counts differently)
+        .arg("--glob")
+        .arg(file_glob)
+        .arg("--context")
+        .arg(ctx_lines.to_string())
+        .arg("--max-filesize")
+        .arg("1M");
 
-    if case_insensitive { cmd.arg("--ignore-case"); }
+    if case_insensitive {
+        cmd.arg("--ignore-case");
+    }
     cmd.arg(pattern).arg(root);
 
     let out = cmd.output().ok()?;
     // rg exit 1 = no matches (not an error), exit 2 = real error
-    if out.status.code() == Some(2) { return None; }
+    if out.status.code() == Some(2) {
+        return None;
+    }
 
     let stdout = String::from_utf8_lossy(&out.stdout);
     let mut matches: Vec<Value> = Vec::new();
     let mut truncated = false;
 
     for line in stdout.lines() {
-        let Ok(msg) = serde_json::from_str::<Value>(line) else { continue };
+        let Ok(msg) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
         if msg["type"] == "match" {
             if matches.len() >= max_results {
                 truncated = true;
@@ -111,7 +145,11 @@ fn try_ripgrep(
             let m = &msg["data"];
             let path = m["path"]["text"].as_str().unwrap_or("").to_owned();
             let line_num = m["line_number"].as_u64().unwrap_or(0);
-            let content  = m["lines"]["text"].as_str().unwrap_or("").trim_end_matches('\n').to_owned();
+            let content = m["lines"]["text"]
+                .as_str()
+                .unwrap_or("")
+                .trim_end_matches('\n')
+                .to_owned();
 
             // Extract submatch column
             let col = m["submatches"][0]["start"].as_u64();
@@ -171,7 +209,9 @@ fn rust_grep(
     'outer: for path in &paths {
         files_searched += 1;
 
-        let Ok(content) = std::fs::read_to_string(path) else { continue };
+        let Ok(content) = std::fs::read_to_string(path) else {
+            continue;
+        };
         let all_lines: Vec<&str> = content.lines().collect();
 
         for (idx, line) in all_lines.iter().enumerate() {
@@ -185,7 +225,7 @@ fn rust_grep(
                 let before: Vec<Value> = (idx.saturating_sub(ctx_lines)..idx)
                     .map(|i| json!({"num": i+1, "content": all_lines[i]}))
                     .collect();
-                let after: Vec<Value> = ((idx+1)..(idx+1+ctx_lines).min(all_lines.len()))
+                let after: Vec<Value> = ((idx + 1)..(idx + 1 + ctx_lines).min(all_lines.len()))
                     .map(|i| json!({"num": i+1, "content": all_lines[i]}))
                     .collect();
 
@@ -219,14 +259,20 @@ fn collect_files(root: &Path, allowed: &[&str]) -> Vec<PathBuf> {
 }
 
 fn collect_recursive(dir: &Path, allowed: &[&str], out: &mut Vec<PathBuf>, depth: usize) {
-    if depth > 20 { return; } // guard against deep symlink loops
-    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    if depth > 20 {
+        return;
+    } // guard against deep symlink loops
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
     for entry in entries.filter_map(|e| e.ok()) {
         let path = entry.path();
         if path.is_dir() {
             // Skip hidden dirs and common noise dirs
             let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-            if name.starts_with('.') || name == "target" || name == "node_modules" { continue; }
+            if name.starts_with('.') || name == "target" || name == "node_modules" {
+                continue;
+            }
             collect_recursive(&path, allowed, out, depth + 1);
         } else if path.is_file() {
             let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
@@ -240,11 +286,15 @@ fn collect_recursive(dir: &Path, allowed: &[&str], out: &mut Vec<PathBuf>, depth
 
 fn which_bin(name: &str) -> Option<String> {
     let path_var = std::env::var("PATH").unwrap_or_default();
-    path_var.split(':').filter(|d| !d.is_empty())
+    path_var
+        .split(':')
+        .filter(|d| !d.is_empty())
         .map(|d| Path::new(d).join(name))
         .find(|p| {
             use std::os::unix::fs::PermissionsExt;
-            p.metadata().map(|m| m.is_file() && m.permissions().mode() & 0o111 != 0).unwrap_or(false)
+            p.metadata()
+                .map(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+                .unwrap_or(false)
         })
         .map(|p| p.display().to_string())
 }

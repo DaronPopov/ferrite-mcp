@@ -37,11 +37,11 @@ pub fn launch_terminal(title: &str, shell_cmd: &str, emulator: &str) -> Result<u
 
 fn do_spawn(title: &str, shell_cmd: &str, name: &str, bin: &str) -> Result<u32, String> {
     let args: Vec<&str> = match name {
-        "kitty"          => vec!["--title", title, "--", "/bin/sh", "-c", shell_cmd],
-        "xterm"          => vec!["-title", title, "-e", "/bin/sh", "-c", shell_cmd],
-        "alacritty"      => vec!["--title", title, "-e", "/bin/sh", "-c", shell_cmd],
+        "kitty" => vec!["--title", title, "--", "/bin/sh", "-c", shell_cmd],
+        "xterm" => vec!["-title", title, "-e", "/bin/sh", "-c", shell_cmd],
+        "alacritty" => vec!["--title", title, "-e", "/bin/sh", "-c", shell_cmd],
         "gnome-terminal" => vec!["--title", title, "--", "/bin/sh", "-c", shell_cmd],
-        _                => vec!["-e", "/bin/sh", "-c", shell_cmd],
+        _ => vec!["-e", "/bin/sh", "-c", shell_cmd],
     };
 
     spawn_detached(bin, &args)
@@ -63,7 +63,8 @@ pub fn spawn_detached(bin: &str, args: &[&str]) -> Result<u32, String> {
 
 pub fn which_bin(name: &str) -> Option<String> {
     let path_var = std::env::var("PATH").unwrap_or_default();
-    path_var.split(':')
+    path_var
+        .split(':')
         .filter(|d| !d.is_empty())
         .map(|d| std::path::PathBuf::from(d).join(name))
         .find(|p| {
@@ -124,7 +125,7 @@ pub fn colorized_watch_cmd(log: &Path, keep_open: bool) -> String {
 }
 { print }"#;
 
-    let log_str  = log.display();
+    let log_str = log.display();
     let pid_file = format!("{log_str}.pid");
 
     let pause = if keep_open {
@@ -162,8 +163,8 @@ pub fn colorized_watch_cmd(log: &Path, keep_open: bool) -> String {
          awk '{awk}' < \"$_C_F\"\
          {pause}\n\
          rm -f '{pid_file}'",
-        awk        = awk,
-        pause      = pause,
+        awk = awk,
+        pause = pause,
         tail_flags = tail_flags,
     )
 }

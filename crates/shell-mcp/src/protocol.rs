@@ -37,7 +37,12 @@ pub struct Response {
 
 impl Response {
     pub fn ok(id: Value, result: Value) -> Self {
-        Self { jsonrpc: "2.0", id, result: Some(result), error: None }
+        Self {
+            jsonrpc: "2.0",
+            id,
+            result: Some(result),
+            error: None,
+        }
     }
 
     pub fn err(id: Value, code: i32, message: impl Into<String>) -> Self {
@@ -45,7 +50,10 @@ impl Response {
             jsonrpc: "2.0",
             id,
             result: None,
-            error: Some(RpcError { code, message: message.into() }),
+            error: Some(RpcError {
+                code,
+                message: message.into(),
+            }),
         }
     }
 }
@@ -76,14 +84,20 @@ pub struct ToolResult {
 impl ToolResult {
     pub fn text(s: impl Into<String>) -> Self {
         Self {
-            content: vec![ContentItem { content_type: "text", text: s.into() }],
+            content: vec![ContentItem {
+                content_type: "text",
+                text: s.into(),
+            }],
             is_error: false,
         }
     }
 
     pub fn error(s: impl Into<String>) -> Self {
         Self {
-            content: vec![ContentItem { content_type: "text", text: s.into() }],
+            content: vec![ContentItem {
+                content_type: "text",
+                text: s.into(),
+            }],
             is_error: true,
         }
     }
@@ -102,7 +116,7 @@ pub struct ContentItem {
 
 // ── Standard RPC error codes ──────────────────────────────────────────────────
 
-pub const ERR_PARSE:      i32 = -32700;
-pub const ERR_METHOD:     i32 = -32601;
-pub const ERR_INVALID:    i32 = -32600;
-pub const ERR_INTERNAL:   i32 = -32603;
+pub const ERR_PARSE: i32 = -32700;
+pub const ERR_METHOD: i32 = -32601;
+pub const ERR_INVALID: i32 = -32600;
+pub const ERR_INTERNAL: i32 = -32603;

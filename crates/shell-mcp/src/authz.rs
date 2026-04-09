@@ -1,8 +1,7 @@
 //! Authorization + audit layer for MCP tool calls.
 //!
-//! Phase 1 scope:
-//! - Enforce deny-by-default for `fercuda_runtime` actions.
-//! - Leave non-feRcuda tools unchanged for compatibility.
+//! Current scope:
+//! - Optionally gate tool-specific actions when configured.
 //! - Emit audit records to ~/.local/share/ferrite/authz_audit.jsonl.
 
 use std::collections::HashMap;
@@ -57,46 +56,24 @@ pub fn authorize(tool: &str, args: &Value) -> Decision {
     let action = action_for(tool, args);
     let principal = principal();
 
-    if tool != "fercuda_runtime" {
-        return Decision {
-            allowed: true,
-            principal,
-            role: "n/a".to_owned(),
-            action,
-            reason: "outside_authz_scope".to_owned(),
-        };
-    }
-
-    // Always allow read-only bootstrap/discovery ops so setup is possible
-    // even before an authz policy file exists.
-    if matches!(args["op"].as_str(), Some("status" | "guide")) {
-        return Decision {
-            allowed: true,
-            principal,
-            role: "bootstrap".to_owned(),
-            action,
-            reason: "bootstrap_read_only_allow".to_owned(),
-        };
-    }
-
     let policy = match load_policy() {
         Ok(Some(p)) => p,
         Ok(None) => {
             return Decision {
-                allowed: false,
+                allowed: true,
                 principal,
-                role: "unknown".to_owned(),
+                role: "n/a".to_owned(),
                 action,
-                reason: "policy_missing_deny_by_default".to_owned(),
+                reason: "policy_missing_allow".to_owned(),
             };
         }
         Err(e) => {
             return Decision {
-                allowed: false,
+                allowed: true,
                 principal,
-                role: "unknown".to_owned(),
+                role: "n/a".to_owned(),
                 action,
-                reason: format!("policy_parse_error:{e}"),
+                reason: format!("policy_parse_error_allow:{e}"),
             };
         }
     };
@@ -120,7 +97,11 @@ pub fn authorize(tool: &str, args: &Value) -> Decision {
         }
     };
 
-    if role_policy.deny.iter().any(|pat| matches_action(pat, &action)) {
+    if role_policy
+        .deny
+        .iter()
+        .any(|pat| matches_action(pat, &action))
+    {
         return Decision {
             allowed: false,
             principal,
@@ -130,7 +111,11 @@ pub fn authorize(tool: &str, args: &Value) -> Decision {
         };
     }
 
-    if role_policy.allow.iter().any(|pat| matches_action(pat, &action)) {
+    if role_policy
+        .allow
+        .iter()
+        .any(|pat| matches_action(pat, &action))
+    {
         return Decision {
             allowed: true,
             principal,
@@ -202,8 +187,11 @@ fn load_policy() -> Result<Option<AuthzPolicy>, String> {
     if !path.exists() {
         return Ok(None);
     }
-    let text = std::fs::read_to_string(&path).map_err(|e| format!("read {}: {e}", path.display()))?;
-    toml::from_str::<AuthzPolicy>(&text).map(Some).map_err(|e| format!("parse {}: {e}", path.display()))
+    let text =
+        std::fs::read_to_string(&path).map_err(|e| format!("read {}: {e}", path.display()))?;
+    toml::from_str::<AuthzPolicy>(&text)
+        .map(Some)
+        .map_err(|e| format!("parse {}: {e}", path.display()))
 }
 
 fn action_for(tool: &str, args: &Value) -> String {

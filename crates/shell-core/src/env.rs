@@ -15,7 +15,10 @@ impl ShellEnv {
     /// Populate from the process environment.
     pub fn from_process_env() -> Self {
         let exported: HashMap<String, String> = std::env::vars().collect();
-        Self { vars: HashMap::new(), exported }
+        Self {
+            vars: HashMap::new(),
+            exported,
+        }
     }
 
     pub fn get(&self, key: &str) -> Option<&str> {

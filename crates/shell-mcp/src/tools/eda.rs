@@ -16,6 +16,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 use crate::protocol::ToolResult;
+use crate::tools::state::lock_mutex;
 
 const VIVADO: &str = "/opt/2025.2/Vivado/bin/vivado";
 const XVLOG: &str = "/opt/2025.2/Vivado/bin/xvlog";
@@ -30,20 +31,26 @@ const XILINX_XPM_MEMORY_SV: &str = "/opt/2025.2/Vivado/data/ip/xpm/xpm_memory/hd
 /// Returns structured diagnostics: [{severity, file, line, message}].
 pub fn verilog_lint(args: &Value) -> Result<ToolResult, String> {
     let files = collect_str_array(args, "files", "verilog_lint")?;
-    let top          = args["top"].as_str().unwrap_or("");
+    let top = args["top"].as_str().unwrap_or("");
     let include_dirs = collect_str_array(args, "include_dirs", "verilog_lint").unwrap_or_default();
-    let libraries    = collect_optional_str_array(args, "libraries", "verilog_lint")?;
-    let standard     = args["standard"].as_str().unwrap_or("2012");
+    let libraries = collect_optional_str_array(args, "libraries", "verilog_lint")?;
+    let standard = args["standard"].as_str().unwrap_or("2012");
 
     let mut cmd = std::process::Command::new("iverilog");
     cmd.arg("-tnull").arg(format!("-g{standard}"));
-    if !top.is_empty() { cmd.args(["-s", top]); }
-    for d in &include_dirs { cmd.args(["-I", d]); }
+    if !top.is_empty() {
+        cmd.args(["-s", top]);
+    }
+    for d in &include_dirs {
+        cmd.args(["-I", d]);
+    }
     let resolved_libraries = apply_iverilog_libraries(&mut cmd, &libraries, "verilog_lint")?;
     if uses_xilinx_glbl(&libraries) {
         cmd.args(["-s", "glbl"]);
     }
-    for f in &files        { cmd.arg(f); }
+    for f in &files {
+        cmd.arg(f);
+    }
 
     let out = cmd.output().map_err(|e| format!("iverilog: {e}"))?;
     let combined = format!(
@@ -53,8 +60,14 @@ pub fn verilog_lint(args: &Value) -> Result<ToolResult, String> {
     );
 
     let diagnostics = parse_iverilog_diag(&combined);
-    let error_count   = diagnostics.iter().filter(|d| d["severity"] == "error").count();
-    let warning_count = diagnostics.iter().filter(|d| d["severity"] == "warning").count();
+    let error_count = diagnostics
+        .iter()
+        .filter(|d| d["severity"] == "error")
+        .count();
+    let warning_count = diagnostics
+        .iter()
+        .filter(|d| d["severity"] == "warning")
+        .count();
 
     Ok(ToolResult::json(&json!({
         "success":       out.status.success(),
@@ -71,7 +84,9 @@ fn parse_iverilog_diag(output: &str) -> Vec<Value> {
     let mut results = Vec::new();
     for line in output.lines() {
         let line = line.trim();
-        if line.is_empty() { continue; }
+        if line.is_empty() {
+            continue;
+        }
 
         let severity = if line.contains(": error:") {
             "error"
@@ -113,7 +128,8 @@ fn combine_output(out: &std::process::Output) -> String {
 }
 
 fn collect_prefixed_lines(output: &str, prefixes: &[&str]) -> Vec<String> {
-    output.lines()
+    output
+        .lines()
         .map(str::trim)
         .filter(|line| prefixes.iter().any(|prefix| line.starts_with(prefix)))
         .map(str::to_owned)
@@ -125,20 +141,24 @@ fn collect_prefixed_lines(output: &str, prefixes: &[&str]) -> Vec<String> {
 /// Compile Verilog with iverilog then simulate with vvp.
 /// Returns {success, finished, assertion_failures, stdout, stderr, duration_ms}.
 pub fn verilog_sim(args: &Value) -> Result<ToolResult, String> {
-    let files        = collect_str_array(args, "files", "verilog_sim")?;
-    let top          = args["top"].as_str().unwrap_or("tb");
+    let files = collect_str_array(args, "files", "verilog_sim")?;
+    let top = args["top"].as_str().unwrap_or("tb");
     let include_dirs = collect_str_array(args, "include_dirs", "verilog_sim").unwrap_or_default();
-    let libraries    = collect_optional_str_array(args, "libraries", "verilog_sim")?;
-    let vcd_out      = args["vcd_out"].as_str();
-    let standard     = args["standard"].as_str().unwrap_or("2012");
+    let libraries = collect_optional_str_array(args, "libraries", "verilog_sim")?;
+    let vcd_out = args["vcd_out"].as_str();
+    let standard = args["standard"].as_str().unwrap_or("2012");
     let timeout_secs = args["timeout_secs"].as_u64().unwrap_or(30);
 
     let bin = format!("/tmp/ferrite_sim_{}", std::process::id());
 
     // ── Compile ──────────────────────────────────────────────────────────────
     let mut compile = std::process::Command::new("iverilog");
-    compile.arg(format!("-g{standard}")).args(["-s", top, "-o", &bin]);
-    for d in &include_dirs { compile.args(["-I", d]); }
+    compile
+        .arg(format!("-g{standard}"))
+        .args(["-s", top, "-o", &bin]);
+    for d in &include_dirs {
+        compile.args(["-I", d]);
+    }
     let resolved_libraries = apply_iverilog_libraries(&mut compile, &libraries, "verilog_sim")?;
     if uses_xilinx_glbl(&libraries) {
         compile.args(["-s", "glbl"]);
@@ -148,9 +168,13 @@ pub fn verilog_sim(args: &Value) -> Result<ToolResult, String> {
         // but we pass the preferred path via plusarg
         compile.arg(format!("+FERRITE_VCD={vcd}"));
     }
-    for f in &files { compile.arg(f); }
+    for f in &files {
+        compile.arg(f);
+    }
 
-    let compile_out = compile.output().map_err(|e| format!("iverilog compile: {e}"))?;
+    let compile_out = compile
+        .output()
+        .map_err(|e| format!("iverilog compile: {e}"))?;
     let compile_diag = format!(
         "{}{}",
         String::from_utf8_lossy(&compile_out.stdout),
@@ -169,7 +193,7 @@ pub fn verilog_sim(args: &Value) -> Result<ToolResult, String> {
     }
 
     // ── Simulate ─────────────────────────────────────────────────────────────
-    let start    = std::time::Instant::now();
+    let start = std::time::Instant::now();
     let deadline = start + std::time::Duration::from_secs(timeout_secs);
 
     let mut child = std::process::Command::new("vvp")
@@ -186,7 +210,9 @@ pub fn verilog_sim(args: &Value) -> Result<ToolResult, String> {
                 if std::time::Instant::now() > deadline {
                     child.kill().ok();
                     let _ = std::fs::remove_file(&bin);
-                    return Ok(ToolResult::error(format!("verilog_sim: timed out after {timeout_secs}s")));
+                    return Ok(ToolResult::error(format!(
+                        "verilog_sim: timed out after {timeout_secs}s"
+                    )));
                 }
                 std::thread::sleep(std::time::Duration::from_millis(50));
             }
@@ -194,14 +220,17 @@ pub fn verilog_sim(args: &Value) -> Result<ToolResult, String> {
     }
 
     let duration_ms = start.elapsed().as_millis() as u64;
-    let out = child.wait_with_output().map_err(|e| format!("wait_with_output: {e}"))?;
+    let out = child
+        .wait_with_output()
+        .map_err(|e| format!("wait_with_output: {e}"))?;
     let _ = std::fs::remove_file(&bin);
 
     let stdout = String::from_utf8_lossy(&out.stdout).to_string();
     let stderr = String::from_utf8_lossy(&out.stderr).to_string();
 
-    let finished  = stdout.contains("$finish") || stderr.contains("$finish");
-    let asserts: Vec<&str> = stdout.lines()
+    let finished = stdout.contains("$finish") || stderr.contains("$finish");
+    let asserts: Vec<&str> = stdout
+        .lines()
         .filter(|l| {
             let low = l.to_lowercase();
             low.contains("assertion failed") || low.contains("assert fail")
@@ -267,7 +296,9 @@ pub fn xsim_elab(args: &Value) -> Result<ToolResult, String> {
         xvlog.arg(file);
     }
 
-    let xvlog_out = xvlog.output().map_err(|e| format!("xsim_elab xvlog: {e}"))?;
+    let xvlog_out = xvlog
+        .output()
+        .map_err(|e| format!("xsim_elab xvlog: {e}"))?;
     let xvlog_text = combine_output(&xvlog_out);
     if !xvlog_out.status.success() {
         return Ok(ToolResult::json(&json!({
@@ -282,7 +313,9 @@ pub fn xsim_elab(args: &Value) -> Result<ToolResult, String> {
     }
 
     let mut xelab = std::process::Command::new(XELAB);
-    xelab.current_dir(&workdir).args(["--nolog", "--relax", "-mt", "off"]);
+    xelab
+        .current_dir(&workdir)
+        .args(["--nolog", "--relax", "-mt", "off"]);
     for lib in xsim_search_libraries(&libraries) {
         xelab.args(["-L", &lib]);
     }
@@ -291,7 +324,9 @@ pub fn xsim_elab(args: &Value) -> Result<ToolResult, String> {
     }
     xelab.args(["-s", snapshot]);
 
-    let xelab_out = xelab.output().map_err(|e| format!("xsim_elab xelab: {e}"))?;
+    let xelab_out = xelab
+        .output()
+        .map_err(|e| format!("xsim_elab xelab: {e}"))?;
     let xelab_text = combine_output(&xelab_out);
 
     Ok(ToolResult::json(&json!({
@@ -311,14 +346,16 @@ pub fn xsim_elab(args: &Value) -> Result<ToolResult, String> {
 /// Run cocotb 2.x tests via pytest in the given directory.
 /// cocotb 2.0 uses pytest natively; Makefile fallback also supported.
 pub fn cocotb_run(args: &Value) -> Result<ToolResult, String> {
-    let dir         = args["dir"].as_str().ok_or("cocotb_run: 'dir' required")?;
-    let simulator   = args["simulator"].as_str().unwrap_or("icarus");
+    let dir = args["dir"].as_str().ok_or("cocotb_run: 'dir' required")?;
+    let simulator = args["simulator"].as_str().unwrap_or("icarus");
     let test_module = args["module"].as_str().unwrap_or("");
-    let timeout     = args["timeout_secs"].as_u64().unwrap_or(120);
+    let timeout = args["timeout_secs"].as_u64().unwrap_or(120);
 
     let dir_path = PathBuf::from(dir);
     if !dir_path.exists() {
-        return Ok(ToolResult::error(format!("cocotb_run: dir not found: {dir}")));
+        return Ok(ToolResult::error(format!(
+            "cocotb_run: dir not found: {dir}"
+        )));
     }
 
     let makefile_mode = cocotb_makefile_mode(&dir_path);
@@ -329,27 +366,31 @@ pub fn cocotb_run(args: &Value) -> Result<ToolResult, String> {
         .unwrap_or(false);
     let use_pytest = !makefile_mode && pytest_available;
 
-    let start    = std::time::Instant::now();
+    let start = std::time::Instant::now();
     let deadline = start + std::time::Duration::from_secs(timeout);
 
     let mut cmd = if use_pytest {
         let mut c = std::process::Command::new("python3");
         c.args(["-m", "pytest", "-v", "--tb=short"]);
-        if !test_module.is_empty() { c.arg(test_module); }
+        if !test_module.is_empty() {
+            c.arg(test_module);
+        }
         c.current_dir(&dir_path)
-         .env("SIM", simulator)
-         .env("COCOTB_REDUCED_LOG_FMT", "1")
-         .stdout(std::process::Stdio::piped())
-         .stderr(std::process::Stdio::piped());
+            .env("SIM", simulator)
+            .env("COCOTB_REDUCED_LOG_FMT", "1")
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
         c
     } else {
         let mut c = std::process::Command::new("make");
         c.current_dir(&dir_path)
-         .env("SIM", simulator)
-         .env("COCOTB_REDUCED_LOG_FMT", "1");
-        if !test_module.is_empty() { c.env("MODULE", test_module); }
+            .env("SIM", simulator)
+            .env("COCOTB_REDUCED_LOG_FMT", "1");
+        if !test_module.is_empty() {
+            c.env("MODULE", test_module);
+        }
         c.stdout(std::process::Stdio::piped())
-         .stderr(std::process::Stdio::piped());
+            .stderr(std::process::Stdio::piped());
         c
     };
 
@@ -361,7 +402,9 @@ pub fn cocotb_run(args: &Value) -> Result<ToolResult, String> {
             None => {
                 if std::time::Instant::now() > deadline {
                     child.kill().ok();
-                    return Ok(ToolResult::error(format!("cocotb_run: timed out after {timeout}s")));
+                    return Ok(ToolResult::error(format!(
+                        "cocotb_run: timed out after {timeout}s"
+                    )));
                 }
                 std::thread::sleep(std::time::Duration::from_millis(100));
             }
@@ -369,7 +412,9 @@ pub fn cocotb_run(args: &Value) -> Result<ToolResult, String> {
     }
 
     let duration_ms = start.elapsed().as_millis() as u64;
-    let out = child.wait_with_output().map_err(|e| format!("wait_with_output: {e}"))?;
+    let out = child
+        .wait_with_output()
+        .map_err(|e| format!("wait_with_output: {e}"))?;
 
     let stdout = String::from_utf8_lossy(&out.stdout).to_string();
     let stderr = String::from_utf8_lossy(&out.stderr).to_string();
@@ -473,7 +518,11 @@ fn parse_results_xml(path: &Path) -> Option<(Vec<Value>, Vec<Value>)> {
     let cases = if !suites.testcases.is_empty() {
         suites.testcases
     } else {
-        suites.testsuites.into_iter().flat_map(|suite| suite.testcases).collect()
+        suites
+            .testsuites
+            .into_iter()
+            .flat_map(|suite| suite.testcases)
+            .collect()
     };
     for case in cases {
         let name = match (case.classname.as_deref(), case.name.as_deref()) {
@@ -502,8 +551,8 @@ fn parse_results_xml(path: &Path) -> Option<(Vec<Value>, Vec<Value>)> {
 /// This is the universal EDA escape hatch: synthesis, impl, bitstream, queries.
 pub fn vivado_tcl(args: &Value) -> Result<ToolResult, String> {
     let script_file = args["script"].as_str();
-    let inline_cmd  = args["cmd"].as_str();
-    let timeout     = args["timeout_secs"].as_u64().unwrap_or(600);
+    let inline_cmd = args["cmd"].as_str();
+    let timeout = args["timeout_secs"].as_u64().unwrap_or(600);
 
     if script_file.is_none() && inline_cmd.is_none() {
         return Err("vivado_tcl: provide 'script' (file path) or 'cmd' (inline Tcl)".into());
@@ -519,11 +568,18 @@ pub fn vivado_tcl(args: &Value) -> Result<ToolResult, String> {
         tmp_path.clone()
     };
 
-    let start    = std::time::Instant::now();
+    let start = std::time::Instant::now();
     let deadline = start + std::time::Duration::from_secs(timeout);
 
     let mut child = std::process::Command::new(VIVADO)
-        .args(["-mode", "batch", "-nolog", "-nojournal", "-source", &script_path])
+        .args([
+            "-mode",
+            "batch",
+            "-nolog",
+            "-nojournal",
+            "-source",
+            &script_path,
+        ])
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()
@@ -535,26 +591,36 @@ pub fn vivado_tcl(args: &Value) -> Result<ToolResult, String> {
             None => {
                 if std::time::Instant::now() > deadline {
                     child.kill().ok();
-                    if script_file.is_none() { let _ = std::fs::remove_file(&tmp_path); }
-                    return Ok(ToolResult::error(format!("vivado_tcl: timed out after {timeout}s")));
+                    if script_file.is_none() {
+                        let _ = std::fs::remove_file(&tmp_path);
+                    }
+                    return Ok(ToolResult::error(format!(
+                        "vivado_tcl: timed out after {timeout}s"
+                    )));
                 }
                 std::thread::sleep(std::time::Duration::from_millis(200));
             }
         }
     }
 
-    if script_file.is_none() { let _ = std::fs::remove_file(&tmp_path); }
+    if script_file.is_none() {
+        let _ = std::fs::remove_file(&tmp_path);
+    }
 
     let duration_ms = start.elapsed().as_millis() as u64;
-    let out = child.wait_with_output().map_err(|e| format!("wait_with_output: {e}"))?;
+    let out = child
+        .wait_with_output()
+        .map_err(|e| format!("wait_with_output: {e}"))?;
 
     let stdout = String::from_utf8_lossy(&out.stdout).to_string();
     let stderr = String::from_utf8_lossy(&out.stderr).to_string();
 
-    let errors: Vec<&str> = stdout.lines()
+    let errors: Vec<&str> = stdout
+        .lines()
         .filter(|l| l.starts_with("ERROR:") || l.starts_with("FATAL:"))
         .collect();
-    let warnings: Vec<&str> = stdout.lines()
+    let warnings: Vec<&str> = stdout
+        .lines()
         .filter(|l| l.starts_with("WARNING:") || l.starts_with("CRITICAL WARNING:"))
         .collect();
 
@@ -632,7 +698,7 @@ fn parse_hw_targets(output: &str) -> Vec<Value> {
         } else if let Some(rest) = line.trim().strip_prefix("DEVICE|||") {
             let parts: Vec<&str> = rest.split("|||").collect();
             let device = parts.get(0).copied().unwrap_or("").to_owned();
-            let part   = parts.get(1).copied().unwrap_or("").to_owned();
+            let part = parts.get(1).copied().unwrap_or("").to_owned();
             let status = parts.get(2).copied().unwrap_or("").to_owned();
             boards.push(json!({
                 "target": current_target,
@@ -644,7 +710,7 @@ fn parse_hw_targets(output: &str) -> Vec<Value> {
             // Backward-compat parser for older "DEVICE: ... PART: ... STATUS: ..." format.
             let tokens: Vec<&str> = line.trim().split_whitespace().collect();
             let device = tokens.get(1).copied().unwrap_or("").to_owned();
-            let part   = tokens.get(3).copied().unwrap_or("").to_owned();
+            let part = tokens.get(3).copied().unwrap_or("").to_owned();
             let status = tokens.get(5).copied().unwrap_or("").to_owned();
             boards.push(json!({
                 "target": current_target,
@@ -661,12 +727,16 @@ fn parse_hw_targets(output: &str) -> Vec<Value> {
 
 /// Program a bitstream (.bit) to a connected FPGA via Vivado hw_manager.
 pub fn fpga_program(args: &Value) -> Result<ToolResult, String> {
-    let bitfile = args["bitfile"].as_str().ok_or("fpga_program: 'bitfile' required")?;
-    let target  = args["target"].as_str().unwrap_or("");
+    let bitfile = args["bitfile"]
+        .as_str()
+        .ok_or("fpga_program: 'bitfile' required")?;
+    let target = args["target"].as_str().unwrap_or("");
     let timeout = args["timeout_secs"].as_u64().unwrap_or(120);
 
     if !Path::new(bitfile).exists() {
-        return Ok(ToolResult::error(format!("fpga_program: bitfile not found: {bitfile}")));
+        return Ok(ToolResult::error(format!(
+            "fpga_program: bitfile not found: {bitfile}"
+        )));
     }
 
     // Build the target-selection snippet.
@@ -678,7 +748,8 @@ pub fn fpga_program(args: &Value) -> Result<ToolResult, String> {
         format!("get_hw_targets {{{target}}}")
     };
 
-    let tcl = format!(r#"
+    let tcl = format!(
+        r#"
 open_hw_manager
 connect_hw_server -allow_non_jtag -url TCP:127.0.0.1:3121
 refresh_hw_server
@@ -693,12 +764,13 @@ puts "PROGRAMMED: [get_property PART $dev] on $t"
 close_hw_target
 disconnect_hw_server
 close_hw_manager
-"#);
+"#
+    );
 
     let tmp = format!("/tmp/ferrite_prog_{}.tcl", std::process::id());
     std::fs::write(&tmp, &tcl).map_err(|e| format!("fpga_program: write tmp: {e}"))?;
 
-    let start    = std::time::Instant::now();
+    let start = std::time::Instant::now();
     let deadline = start + std::time::Duration::from_secs(timeout);
 
     let mut child = std::process::Command::new(VIVADO)
@@ -719,12 +791,16 @@ close_hw_manager
     let stdout_t = {
         let buf = Arc::clone(&stdout_buf);
         let mut pipe = child.stdout.take().unwrap();
-        std::thread::spawn(move || { let _ = pipe.read_to_end(&mut buf.lock().unwrap()); })
+        std::thread::spawn(move || {
+            let _ = pipe.read_to_end(&mut lock_mutex(&buf, "fpga program stdout"));
+        })
     };
     let stderr_t = {
         let buf = Arc::clone(&stderr_buf);
         let mut pipe = child.stderr.take().unwrap();
-        std::thread::spawn(move || { let _ = pipe.read_to_end(&mut buf.lock().unwrap()); })
+        std::thread::spawn(move || {
+            let _ = pipe.read_to_end(&mut lock_mutex(&buf, "fpga program stderr"));
+        })
     };
 
     // Poll for completion with timeout.
@@ -747,16 +823,21 @@ close_hw_manager
     let duration_ms = start.elapsed().as_millis() as u64;
 
     if timed_out {
-        return Ok(ToolResult::error(format!("fpga_program: timed out after {timeout}s")));
+        return Ok(ToolResult::error(format!(
+            "fpga_program: timed out after {timeout}s"
+        )));
     }
 
-    let stdout = String::from_utf8_lossy(&stdout_buf.lock().unwrap()).to_string();
-    let stderr = String::from_utf8_lossy(&stderr_buf.lock().unwrap()).to_string();
+    let stdout =
+        String::from_utf8_lossy(&lock_mutex(&stdout_buf, "fpga program stdout")).to_string();
+    let stderr =
+        String::from_utf8_lossy(&lock_mutex(&stderr_buf, "fpga program stderr")).to_string();
     let exit_ok = child.wait().map(|s| s.success()).unwrap_or(false);
     let success = exit_ok && stdout.contains("PROGRAMMED:");
 
     // Extract the programmed device/target line for a clean summary.
-    let programmed_line = stdout.lines()
+    let programmed_line = stdout
+        .lines()
         .find(|l| l.starts_with("PROGRAMMED:"))
         .unwrap_or("")
         .to_owned();
@@ -776,8 +857,8 @@ close_hw_manager
 /// Parse Vivado timing_summary.rpt and utilization.rpt into structured JSON.
 /// Auto-locates report files under a project directory, or accepts explicit paths.
 pub fn synth_report(args: &Value) -> Result<ToolResult, String> {
-    let project_dir    = args["project_dir"].as_str();
-    let timing_rpt     = args["timing_rpt"].as_str();
+    let project_dir = args["project_dir"].as_str();
+    let timing_rpt = args["timing_rpt"].as_str();
     let utilization_rpt = args["utilization_rpt"].as_str();
 
     // Resolve report paths
@@ -798,7 +879,9 @@ pub fn synth_report(args: &Value) -> Result<ToolResult, String> {
     };
 
     if timing_path.is_none() && util_path.is_none() {
-        return Err("synth_report: provide 'project_dir', 'timing_rpt', or 'utilization_rpt'".into());
+        return Err(
+            "synth_report: provide 'project_dir', 'timing_rpt', or 'utilization_rpt'".into(),
+        );
     }
 
     let timing_result = timing_path.as_ref().map(|p| {
@@ -840,19 +923,27 @@ fn find_rpt_recursive(dir: &Path, keyword: &str) -> Option<PathBuf> {
                     Some(prev) => {
                         let p_time = std::fs::metadata(&p).and_then(|m| m.modified()).ok();
                         let prev_time = std::fs::metadata(prev).and_then(|m| m.modified()).ok();
-                        if p_time > prev_time { best = Some(p); }
+                        if p_time > prev_time {
+                            best = Some(p);
+                        }
                     }
                 }
             }
         } else if path.extension().map(|e| e == "rpt").unwrap_or(false) {
-            let fname = path.file_name().unwrap_or_default().to_string_lossy().to_lowercase();
+            let fname = path
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_lowercase();
             if fname.contains(keyword) {
                 match &best {
                     None => best = Some(path),
                     Some(prev) => {
                         let p_time = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
                         let prev_time = std::fs::metadata(prev).and_then(|m| m.modified()).ok();
-                        if p_time > prev_time { best = Some(path); }
+                        if p_time > prev_time {
+                            best = Some(path);
+                        }
                     }
                 }
             }
@@ -865,10 +956,10 @@ fn find_rpt_recursive(dir: &Path, keyword: &str) -> Option<PathBuf> {
 ///   - WNS (worst negative slack), TNS, failing endpoints per path group
 ///   - Setup/hold summary table rows
 fn parse_timing_report(content: &str) -> Value {
-    let mut wns: Option<f64>  = None;
-    let mut tns: Option<f64>  = None;
-    let mut whs: Option<f64>  = None;
-    let mut ths: Option<f64>  = None;
+    let mut wns: Option<f64> = None;
+    let mut tns: Option<f64> = None;
+    let mut whs: Option<f64> = None;
+    let mut ths: Option<f64> = None;
     let mut failing_endpoints: Option<i64> = None;
     let mut timing_met = false;
     let mut path_groups: Vec<Value> = Vec::new();
@@ -896,7 +987,9 @@ fn parse_timing_report(content: &str) -> Value {
         }
         // Separator rows
         if in_summary_data && (t.starts_with("---") || t.is_empty()) {
-            if t.is_empty() && wns.is_some() { in_summary_data = false; }
+            if t.is_empty() && wns.is_some() {
+                in_summary_data = false;
+            }
             continue;
         }
 
@@ -916,7 +1009,11 @@ fn parse_timing_report(content: &str) -> Value {
 
         // Path group lines: "| clk_BUFG     | -2.345 |   -45.68 |      12 | ..."
         if t.starts_with('|') && !t.contains("Path Group") && !t.contains("---") {
-            let cols: Vec<&str> = t.split('|').map(|s| s.trim()).filter(|s| !s.is_empty()).collect();
+            let cols: Vec<&str> = t
+                .split('|')
+                .map(|s| s.trim())
+                .filter(|s| !s.is_empty())
+                .collect();
             if cols.len() >= 4 {
                 let name = cols[0];
                 if !name.is_empty() && !name.contains("WNS") {
@@ -977,29 +1074,41 @@ fn parse_utilization_report(content: &str) -> Value {
             continue;
         }
         if t.is_empty() || (t.starts_with('+') && !t.starts_with("+-")) {
-            if in_table && t.is_empty() { in_table = false; }
+            if in_table && t.is_empty() {
+                in_table = false;
+            }
             continue;
         }
-        if !in_table || !t.starts_with('|') { continue; }
+        if !in_table || !t.starts_with('|') {
+            continue;
+        }
 
-        let cols: Vec<&str> = t.split('|').map(|s| s.trim()).filter(|s| !s.is_empty()).collect();
-        if cols.len() < 5 { continue; }
+        let cols: Vec<&str> = t
+            .split('|')
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .collect();
+        if cols.len() < 5 {
+            continue;
+        }
 
         let name = cols[0];
         let used_str = cols[1].replace(',', "");
         let avail_str = cols.get(4).unwrap_or(&"0").replace(',', "");
-        let pct_str  = cols.get(5).unwrap_or(&"0").replace(',', "");
+        let pct_str = cols.get(5).unwrap_or(&"0").replace(',', "");
 
-        let used:  i64 = used_str.parse().unwrap_or(0);
+        let used: i64 = used_str.parse().unwrap_or(0);
         let avail: i64 = avail_str.parse().unwrap_or(0);
-        let pct:   f64 = pct_str.parse().unwrap_or(0.0);
+        let pct: f64 = pct_str.parse().unwrap_or(0.0);
 
         // Map Vivado row names to canonical keys
         let key: Option<&str> = if name.contains("Slice LUT") || name.contains("LUT as Logic") {
             Some("lut")
         } else if name.contains("Slice Register") || name.contains("Register as Flip Flop") {
             Some("ff")
-        } else if name.contains("Block RAM Tile") || name.contains("Block RAM") && !name.contains("18K") {
+        } else if name.contains("Block RAM Tile")
+            || name.contains("Block RAM") && !name.contains("18K")
+        {
             Some("bram36")
         } else if name.contains("RAMB18") || name.contains("18K") {
             Some("bram18")
@@ -1046,11 +1155,13 @@ fn parse_utilization_report(content: &str) -> Value {
 /// Parse a VCD waveform dump. Returns signal definitions and value-change events.
 /// Filter by signal name substring; limit total events with max_events.
 pub fn waveform_query(args: &Value) -> Result<ToolResult, String> {
-    let vcd_path   = args["vcd_file"].as_str().ok_or("waveform_query: 'vcd_file' required")?;
-    let signals    = collect_str_array(args, "signals", "waveform_query").unwrap_or_default();
+    let vcd_path = args["vcd_file"]
+        .as_str()
+        .ok_or("waveform_query: 'vcd_file' required")?;
+    let signals = collect_str_array(args, "signals", "waveform_query").unwrap_or_default();
     let max_events = args["max_events"].as_u64().unwrap_or(500) as usize;
     let time_start = args["time_start"].as_u64();
-    let time_end   = args["time_end"].as_u64();
+    let time_end = args["time_end"].as_u64();
 
     let content = std::fs::read_to_string(vcd_path)
         .map_err(|e| format!("waveform_query: {vcd_path}: {e}"))?;
@@ -1084,7 +1195,9 @@ fn parse_vcd(
 
     for line in content.lines() {
         let line = line.trim();
-        if line.is_empty() { continue; }
+        if line.is_empty() {
+            continue;
+        }
 
         // $timescale 1ns $end
         if line.starts_with("$timescale") {
@@ -1102,7 +1215,7 @@ fn parse_vcd(
             // [0]=$var [1]=kind [2]=width [3]=id [4]=name [5+]=range/$end
             if parts.len() >= 5 {
                 let width: u32 = parts[2].parse().unwrap_or(1);
-                let id   = parts[3].to_owned();
+                let id = parts[3].to_owned();
                 let name = parts[4].to_owned();
                 let include = filter_signals.is_empty()
                     || filter_signals.iter().any(|s| name.contains(s.as_str()));
@@ -1117,7 +1230,9 @@ fn parse_vcd(
             in_defs = false;
             continue;
         }
-        if in_defs { continue; }
+        if in_defs {
+            continue;
+        }
 
         // Timestamp: #12345
         if let Some(ts_str) = line.strip_prefix('#') {
@@ -1127,18 +1242,28 @@ fn parse_vcd(
             continue;
         }
 
-        if events.len() >= max_events { continue; }
+        if events.len() >= max_events {
+            continue;
+        }
 
         // Time filter
-        if let Some(ts) = time_start { if current_time < ts { continue; } }
-        if let Some(te) = time_end   { if current_time > te { continue; } }
+        if let Some(ts) = time_start {
+            if current_time < ts {
+                continue;
+            }
+        }
+        if let Some(te) = time_end {
+            if current_time > te {
+                continue;
+            }
+        }
 
         // Scalar change: "0!" / "1#" / "xA" / "zA"
         if line.len() >= 2 {
             let first = line.chars().next().unwrap_or(' ');
             if matches!(first, '0' | '1' | 'x' | 'z' | 'X' | 'Z') && !line.starts_with("b") {
                 let val = &line[..1];
-                let id  = &line[1..];
+                let id = &line[1..];
                 if let Some((name, _)) = vars.get(id) {
                     events.push(json!({
                         "time":   current_time,
@@ -1155,7 +1280,7 @@ fn parse_vcd(
             let parts: Vec<&str> = line.split_whitespace().collect();
             if parts.len() >= 2 {
                 let bits = &parts[0][1..];
-                let id   = parts[1];
+                let id = parts[1];
                 if let Some((name, _)) = vars.get(id) {
                     let hex = bits_to_hex(bits);
                     events.push(json!({
@@ -1198,19 +1323,24 @@ fn bits_to_hex(bits: &str) -> String {
 /// Low-level UART send/receive for FPGA communication.
 /// send: hex string e.g. "52 01" or "5201". read_bytes: how many to read back.
 pub fn fpga_serial(args: &Value) -> Result<ToolResult, String> {
-    let port_arg   = args["port"].as_str().unwrap_or("").to_owned();
-    let baud       = args["baud"].as_u64().unwrap_or(921600);
-    let send_hex   = args["send"].as_str().unwrap_or("");
-    let read_n     = args["read_bytes"].as_u64().unwrap_or(0) as usize;
+    let port_arg = args["port"].as_str().unwrap_or("").to_owned();
+    let baud = args["baud"].as_u64().unwrap_or(921600);
+    let send_hex = args["send"].as_str().unwrap_or("");
+    let read_n = args["read_bytes"].as_u64().unwrap_or(0) as usize;
     let timeout_ms = args["timeout_ms"].as_u64().unwrap_or(500);
 
-    let port = if port_arg.is_empty() { find_uart_port()? } else { port_arg };
+    let port = if port_arg.is_empty() {
+        find_uart_port()?
+    } else {
+        port_arg
+    };
     let send_bytes = parse_hex_bytes(send_hex)?;
     let mut f = open_serial(&port, baud, timeout_ms)?;
 
     if !send_bytes.is_empty() {
         use std::io::Write;
-        f.write_all(&send_bytes).map_err(|e| format!("fpga_serial: write: {e}"))?;
+        f.write_all(&send_bytes)
+            .map_err(|e| format!("fpga_serial: write: {e}"))?;
     }
 
     let received = if read_n > 0 {
@@ -1237,11 +1367,15 @@ pub fn fpga_serial(args: &Value) -> Result<ToolResult, String> {
 /// STATUS layout: bit0=busy, bit1=converged, bit2=done_sticky
 pub fn fpga_tcfp_status(args: &Value) -> Result<ToolResult, String> {
     let port_arg = args["port"].as_str().unwrap_or("").to_owned();
-    let baud     = args["baud"].as_u64().unwrap_or(921600);
-    let port = if port_arg.is_empty() { find_uart_port()? } else { port_arg };
+    let baud = args["baud"].as_u64().unwrap_or(921600);
+    let port = if port_arg.is_empty() {
+        find_uart_port()?
+    } else {
+        port_arg
+    };
     let mut f = open_serial(&port, baud, 500)?;
 
-    let status     = uart_read_reg(&mut f, 0x01)?;
+    let status = uart_read_reg(&mut f, 0x01)?;
     let step_count = uart_read_reg(&mut f, 0x02)?;
 
     Ok(ToolResult::json(&json!({
@@ -1261,15 +1395,19 @@ pub fn fpga_tcfp_status(args: &Value) -> Result<ToolResult, String> {
 /// Returns phase/field/coupling/bias as raw int32 + float (Q16.16).
 pub fn fpga_tcfp_tile_read(args: &Value) -> Result<ToolResult, String> {
     let port_arg = args["port"].as_str().unwrap_or("").to_owned();
-    let baud     = args["baud"].as_u64().unwrap_or(921600);
-    let port = if port_arg.is_empty() { find_uart_port()? } else { port_arg };
+    let baud = args["baud"].as_u64().unwrap_or(921600);
+    let port = if port_arg.is_empty() {
+        find_uart_port()?
+    } else {
+        port_arg
+    };
 
     let tile_addrs: Vec<(u8, u8)> = if let Some(arr) = args["tiles"].as_array() {
         arr.iter()
             .filter_map(|t| Some((t["row"].as_u64()? as u8, t["col"].as_u64()? as u8)))
             .collect()
     } else {
-        vec![(0,0),(0,1),(1,0),(1,1)]   // default: all 4 tiles of 2×2
+        vec![(0, 0), (0, 1), (1, 0), (1, 1)] // default: all 4 tiles of 2×2
     };
 
     if tile_addrs.is_empty() {
@@ -1283,7 +1421,8 @@ pub fn fpga_tcfp_tile_read(args: &Value) -> Result<ToolResult, String> {
 
     let mut f = open_serial(&port, baud, 1000)?;
     use std::io::Write;
-    f.write_all(&cmd).map_err(|e| format!("fpga_tcfp_tile_read: write: {e}"))?;
+    f.write_all(&cmd)
+        .map_err(|e| format!("fpga_tcfp_tile_read: write: {e}"))?;
 
     // Response: ACK(1) + count * 16 bytes (phase|field|coupling|bias, each 32-bit BE)
     let resp = uart_read_n(&mut f, 1 + count as usize * 16, 1000)?;
@@ -1298,26 +1437,30 @@ pub fn fpga_tcfp_tile_read(args: &Value) -> Result<ToolResult, String> {
     }
 
     let payload = &resp[1..];
-    let scale = 65536.0f64;   // Q16.16
+    let scale = 65536.0f64; // Q16.16
 
-    let tiles: Vec<serde_json::Value> = tile_addrs.iter().enumerate().map(|(i, (row, col))| {
-        let base = i * 16;
-        if base + 16 > payload.len() {
-            return json!({ "row": row, "col": col, "error": "truncated" });
-        }
-        let phase    = i32::from_be_bytes(payload[base   ..base+ 4].try_into().unwrap());
-        let field    = i32::from_be_bytes(payload[base+ 4..base+ 8].try_into().unwrap());
-        let coupling = i32::from_be_bytes(payload[base+ 8..base+12].try_into().unwrap());
-        let bias     = i32::from_be_bytes(payload[base+12..base+16].try_into().unwrap());
-        json!({
-            "row": row, "col": col,
-            "addr": format!("0x{:02X}", (row << 4) | col),
-            "phase":    { "raw": phase,    "f": phase    as f64 / scale },
-            "field":    { "raw": field,    "f": field    as f64 / scale },
-            "coupling": { "raw": coupling, "f": coupling as f64 / scale },
-            "bias":     { "raw": bias,     "f": bias     as f64 / scale },
+    let tiles: Vec<serde_json::Value> = tile_addrs
+        .iter()
+        .enumerate()
+        .map(|(i, (row, col))| {
+            let base = i * 16;
+            if base + 16 > payload.len() {
+                return json!({ "row": row, "col": col, "error": "truncated" });
+            }
+            let phase = i32::from_be_bytes(payload[base..base + 4].try_into().unwrap());
+            let field = i32::from_be_bytes(payload[base + 4..base + 8].try_into().unwrap());
+            let coupling = i32::from_be_bytes(payload[base + 8..base + 12].try_into().unwrap());
+            let bias = i32::from_be_bytes(payload[base + 12..base + 16].try_into().unwrap());
+            json!({
+                "row": row, "col": col,
+                "addr": format!("0x{:02X}", (row << 4) | col),
+                "phase":    { "raw": phase,    "f": phase    as f64 / scale },
+                "field":    { "raw": field,    "f": field    as f64 / scale },
+                "coupling": { "raw": coupling, "f": coupling as f64 / scale },
+                "bias":     { "raw": bias,     "f": bias     as f64 / scale },
+            })
         })
-    }).collect();
+        .collect();
 
     Ok(ToolResult::json(&json!({
         "success":    true,
@@ -1342,22 +1485,40 @@ fn find_uart_port() -> Result<String, String> {
         .collect();
     ports.sort();
     // Basys3: ttyUSB0=JTAG, ttyUSB1=UART — take last
-    ports.last().cloned()
+    ports
+        .last()
+        .cloned()
         .ok_or_else(|| "find_uart_port: no /dev/ttyUSB* found".to_owned())
 }
 
 fn open_serial(port: &str, baud: u64, timeout_ms: u64) -> Result<std::fs::File, String> {
     let vtime = ((timeout_ms / 100).max(1).min(255)).to_string();
     let out = std::process::Command::new("stty")
-        .args(["-F", port, &baud.to_string(),
-               "raw", "cs8", "-parenb", "-cstopb", "-echo", "min", "0", "time", &vtime])
+        .args([
+            "-F",
+            port,
+            &baud.to_string(),
+            "raw",
+            "cs8",
+            "-parenb",
+            "-cstopb",
+            "-echo",
+            "min",
+            "0",
+            "time",
+            &vtime,
+        ])
         .output()
         .map_err(|e| format!("open_serial: stty: {e}"))?;
     if !out.status.success() {
-        return Err(format!("open_serial: stty failed on {port}: {}",
-            String::from_utf8_lossy(&out.stderr)));
+        return Err(format!(
+            "open_serial: stty failed on {port}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        ));
     }
-    std::fs::OpenOptions::new().read(true).write(true)
+    std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
         .open(port)
         .map_err(|e| format!("open_serial: open {port}: {e}"))
 }
@@ -1379,10 +1540,14 @@ fn uart_read_n(f: &mut std::fs::File, n: usize, timeout_ms: u64) -> Result<Vec<u
 
 fn uart_read_reg(f: &mut std::fs::File, addr: u8) -> Result<u32, String> {
     use std::io::Write;
-    f.write_all(&[0x52, addr]).map_err(|e| format!("uart_read_reg 0x{addr:02X}: {e}"))?;
+    f.write_all(&[0x52, addr])
+        .map_err(|e| format!("uart_read_reg 0x{addr:02X}: {e}"))?;
     let bytes = uart_read_n(f, 4, 500)?;
     if bytes.len() < 4 {
-        return Err(format!("uart_read_reg 0x{addr:02X}: timeout ({}/4 bytes)", bytes.len()));
+        return Err(format!(
+            "uart_read_reg 0x{addr:02X}: timeout ({}/4 bytes)",
+            bytes.len()
+        ));
     }
     Ok(u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
 }
@@ -1394,15 +1559,20 @@ fn parse_hex_bytes(s: &str) -> Result<Vec<u8>, String> {
     if clean.len() % 2 != 0 {
         return Err(format!("parse_hex_bytes: odd nibble count in '{s}'"));
     }
-    clean.as_bytes().chunks(2)
-        .map(|c| u8::from_str_radix(std::str::from_utf8(c).unwrap(), 16)
-            .map_err(|e| format!("parse_hex_bytes: {e}")))
+    clean
+        .as_bytes()
+        .chunks(2)
+        .map(|c| {
+            u8::from_str_radix(std::str::from_utf8(c).unwrap(), 16)
+                .map_err(|e| format!("parse_hex_bytes: {e}"))
+        })
         .collect()
 }
 
 fn collect_str_array(args: &Value, key: &str, tool: &str) -> Result<Vec<String>, String> {
     match &args[key] {
-        Value::Array(arr) => Ok(arr.iter()
+        Value::Array(arr) => Ok(arr
+            .iter()
             .filter_map(|v| v.as_str().map(str::to_owned))
             .collect()),
         Value::Null => Err(format!("{tool}: '{key}' array required")),
@@ -1412,7 +1582,8 @@ fn collect_str_array(args: &Value, key: &str, tool: &str) -> Result<Vec<String>,
 
 fn collect_optional_str_array(args: &Value, key: &str, tool: &str) -> Result<Vec<String>, String> {
     match &args[key] {
-        Value::Array(arr) => Ok(arr.iter()
+        Value::Array(arr) => Ok(arr
+            .iter()
             .filter_map(|v| v.as_str().map(str::to_owned))
             .collect()),
         Value::Null => Ok(Vec::new()),
@@ -1431,18 +1602,25 @@ fn apply_iverilog_libraries(
         match lib.as_str() {
             "xilinx_unisims" | "xilinx_unisims_7series" => {
                 if !Path::new(XILINX_UNISIMS_DIR).exists() {
-                    return Err(format!("{tool}: missing Xilinx unisims dir: {XILINX_UNISIMS_DIR}"));
+                    return Err(format!(
+                        "{tool}: missing Xilinx unisims dir: {XILINX_UNISIMS_DIR}"
+                    ));
                 }
                 if !Path::new(XILINX_GLBL_V).exists() {
                     return Err(format!("{tool}: missing Xilinx glbl.v: {XILINX_GLBL_V}"));
                 }
                 cmd.args(["-y", XILINX_UNISIMS_DIR]);
                 cmd.arg(XILINX_GLBL_V);
-                resolved.push(format!("{} (dir:{}, glbl:{})", lib, XILINX_UNISIMS_DIR, XILINX_GLBL_V));
+                resolved.push(format!(
+                    "{} (dir:{}, glbl:{})",
+                    lib, XILINX_UNISIMS_DIR, XILINX_GLBL_V
+                ));
             }
             "xilinx_xpm_memory" => {
                 if !Path::new(XILINX_XPM_MEMORY_SV).exists() {
-                    return Err(format!("{tool}: missing Xilinx XPM source: {XILINX_XPM_MEMORY_SV}"));
+                    return Err(format!(
+                        "{tool}: missing Xilinx XPM source: {XILINX_XPM_MEMORY_SV}"
+                    ));
                 }
                 cmd.arg(XILINX_XPM_MEMORY_SV);
                 resolved.push(format!("{} (file:{})", lib, XILINX_XPM_MEMORY_SV));
@@ -1459,7 +1637,9 @@ fn apply_iverilog_libraries(
 }
 
 fn uses_xilinx_glbl(libraries: &[String]) -> bool {
-    libraries.iter().any(|lib| matches!(lib.as_str(), "xilinx_unisims" | "xilinx_unisims_7series"))
+    libraries
+        .iter()
+        .any(|lib| matches!(lib.as_str(), "xilinx_unisims" | "xilinx_unisims_7series"))
 }
 
 fn xsim_compile_flags(standard: &str) -> Vec<&'static str> {
@@ -1487,7 +1667,9 @@ fn resolve_xsim_libraries(libraries: &[String], tool: &str) -> Result<Vec<String
     for lib in libraries {
         match lib.as_str() {
             "xilinx_unisims" | "xilinx_unisims_7series" => {
-                resolved.push(format!("{lib} (xelab -L unisims_ver, glbl:{XILINX_GLBL_V})"));
+                resolved.push(format!(
+                    "{lib} (xelab -L unisims_ver, glbl:{XILINX_GLBL_V})"
+                ));
             }
             "xilinx_xpm_cdc" | "xilinx_xpm_fifo" | "xilinx_xpm_memory" => {
                 let mut detail = format!("{lib} (xelab -L xpm");
@@ -1536,7 +1718,12 @@ fn xsim_elab_tops(top: &str, libraries: &[String]) -> Vec<String> {
 }
 
 fn uses_xsim_glbl(libraries: &[String]) -> bool {
-    libraries.iter().any(|lib| matches!(lib.as_str(), "xilinx_unisims" | "xilinx_unisims_7series" | "xilinx_xpm_cdc"))
+    libraries.iter().any(|lib| {
+        matches!(
+            lib.as_str(),
+            "xilinx_unisims" | "xilinx_unisims_7series" | "xilinx_xpm_cdc"
+        )
+    })
 }
 
 #[cfg(test)]
@@ -1556,8 +1743,11 @@ mod tests {
 
     #[test]
     fn verilog_lint_accepts_xilinx_unisims_for_mmcm_design() {
-        let tmp = std::env::temp_dir().join(format!("ferrite_mcp_mmcm_{}_{}.sv", std::process::id(), 1));
-        fs::write(&tmp, r#"
+        let tmp =
+            std::env::temp_dir().join(format!("ferrite_mcp_mmcm_{}_{}.sv", std::process::id(), 1));
+        fs::write(
+            &tmp,
+            r#"
 `default_nettype none
 module mmcm_top(
     input  wire clk,
@@ -1585,7 +1775,9 @@ module mmcm_top(
     BUFG u_out (.I(clk_mmcm), .O(out_clk));
 endmodule
 `default_nettype wire
-"#).expect("write temp sv");
+"#,
+        )
+        .expect("write temp sv");
 
         let args = json!({
             "files": [tmp.to_string_lossy().to_string()],
@@ -1599,16 +1791,29 @@ endmodule
         let _ = fs::remove_file(&tmp);
 
         assert_eq!(payload["success"], Value::Bool(true), "payload={payload}");
-        assert!(payload["error_count"].as_u64().unwrap_or(1) == 0, "payload={payload}");
-        let libs = payload["libraries_used"].as_array().expect("libraries_used array");
-        assert!(libs.iter().any(|v| v.as_str().unwrap_or("").contains("xilinx_unisims_7series")));
+        assert!(
+            payload["error_count"].as_u64().unwrap_or(1) == 0,
+            "payload={payload}"
+        );
+        let libs = payload["libraries_used"]
+            .as_array()
+            .expect("libraries_used array");
+        assert!(libs
+            .iter()
+            .any(|v| v.as_str().unwrap_or("").contains("xilinx_unisims_7series")));
     }
 
     #[test]
     fn xsim_elab_accepts_xilinx_xpm_cdc_single() {
         let _guard = xsim_test_lock().lock().expect("xsim test lock");
-        let tmp = std::env::temp_dir().join(format!("ferrite_mcp_xsim_xpm_cdc_{}_{}.sv", std::process::id(), 1));
-        fs::write(&tmp, r#"
+        let tmp = std::env::temp_dir().join(format!(
+            "ferrite_mcp_xsim_xpm_cdc_{}_{}.sv",
+            std::process::id(),
+            1
+        ));
+        fs::write(
+            &tmp,
+            r#"
 `default_nettype none
 module xpm_cdc_top(
     input  wire src_clk,
@@ -1627,7 +1832,9 @@ module xpm_cdc_top(
     );
 endmodule
 `default_nettype wire
-"#).expect("write temp sv");
+"#,
+        )
+        .expect("write temp sv");
 
         let args = json!({
             "files": [tmp.to_string_lossy().to_string()],
@@ -1641,15 +1848,25 @@ endmodule
         let _ = fs::remove_file(&tmp);
 
         assert_eq!(payload["success"], Value::Bool(true), "payload={payload}");
-        let libs = payload["libraries_used"].as_array().expect("libraries_used array");
-        assert!(libs.iter().any(|v| v.as_str().unwrap_or("").contains("xilinx_xpm_cdc")));
+        let libs = payload["libraries_used"]
+            .as_array()
+            .expect("libraries_used array");
+        assert!(libs
+            .iter()
+            .any(|v| v.as_str().unwrap_or("").contains("xilinx_xpm_cdc")));
     }
 
     #[test]
     fn xsim_elab_accepts_xilinx_xpm_fifo_sync() {
         let _guard = xsim_test_lock().lock().expect("xsim test lock");
-        let tmp = std::env::temp_dir().join(format!("ferrite_mcp_xsim_xpm_fifo_{}_{}.sv", std::process::id(), 1));
-        fs::write(&tmp, r#"
+        let tmp = std::env::temp_dir().join(format!(
+            "ferrite_mcp_xsim_xpm_fifo_{}_{}.sv",
+            std::process::id(),
+            1
+        ));
+        fs::write(
+            &tmp,
+            r#"
 `default_nettype none
 module xpm_fifo_top(
     input  wire       clk,
@@ -1711,7 +1928,9 @@ module xpm_fifo_top(
     );
 endmodule
 `default_nettype wire
-"#).expect("write temp sv");
+"#,
+        )
+        .expect("write temp sv");
 
         let args = json!({
             "files": [tmp.to_string_lossy().to_string()],
@@ -1725,7 +1944,11 @@ endmodule
         let _ = fs::remove_file(&tmp);
 
         assert_eq!(payload["success"], Value::Bool(true), "payload={payload}");
-        let libs = payload["libraries_used"].as_array().expect("libraries_used array");
-        assert!(libs.iter().any(|v| v.as_str().unwrap_or("").contains("xilinx_xpm_fifo")));
+        let libs = payload["libraries_used"]
+            .as_array()
+            .expect("libraries_used array");
+        assert!(libs
+            .iter()
+            .any(|v| v.as_str().unwrap_or("").contains("xilinx_xpm_fifo")));
     }
 }

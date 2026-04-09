@@ -1,14 +1,74 @@
 # ferrite-mcp
 
-> **Copyright Daron Popov. All rights reserved.**  \
-> This source is viewable for reference only.  \
+> **Copyright Daron Popov. All rights reserved.**  
+> This source is viewable for reference only.  
 > No license is granted for use, copying, modification, redistribution, sublicensing, or commercial use without prior written permission.
 
-An MCP server that gives Claude Code, OpenAI Codex, and other MCP clients deep access to your local machine — hardware, builds, EDA tools, GPU profiling, and background job orchestration.
+`ferrite-mcp` is a local stdio MCP server plus shell runtime. It is aimed at coding agents that need direct access to the machine they are running on: files, builds, git, background jobs, hardware/EDA tools, profiling, and project-specific automation.
 
-Works on **macOS** and **Linux**.
+It is not a cloud service and not a language-model wrapper. The core design is:
 
----
+- `shell-mcp`: MCP server and tool surface
+- `shell-bin`: `ferrite` CLI entrypoint
+- `shell-runtime`, `shell-parser`, `shell-lexer`, `shell-core`, `shell-hooks`, `shell-tui`: local shell/runtime support
+
+## Current State
+
+The current system is a generic MCP server.
+
+- No `fercuda` attachment remains.
+- The deleted `ferrite-notify` crate is no longer part of the workspace.
+- Request handling is selectively parallelized:
+  - read-only MCP tool calls can run concurrently
+  - stateful or conflicting operations remain serialized
+  - stdout response emission stays single-owner and ordered by completion
+- Shared server state is split internally:
+  - `cwd` behind an `RwLock`
+  - `config` behind an `RwLock`
+  - session `notes` behind a separate `Mutex`
+
+That means the server can overlap safe inspection/probe calls without allowing races in git, filesystem mutation, job control, or hardware control paths.
+
+## Workspace
+
+Current workspace members:
+
+- `crates/shell-core`
+- `crates/shell-lexer`
+- `crates/shell-parser`
+- `crates/shell-runtime`
+- `crates/shell-hooks`
+- `crates/shell-tui`
+- `crates/shell-mcp`
+- `crates/shell-bin`
+
+## Main Capabilities
+
+The MCP surface is broad, but the tool families are straightforward:
+
+- Filesystem and code inspection: `read_file`, `list_dir`, `glob`, `grep_code`, `read_context`, `changed_since`
+- Command execution: `exec`, `build_check`, `task_run`, `launch`, `tty_exec`
+- Background jobs and orchestration: `bg_spawn`, `bg_status`, `bg_wait`, `bg_tail`, `bg_list`, `bg_kill`, `pipeline_run`, `pipeline_status`, `pipeline_cancel`
+- System and profiling: `process_tree`, `port_list`, `journal_query`, `gpu_info`, `gpu_live`, `cpu_info`, `perf_stat`, `flamegraph`, `ncu_profile`, `compute_sanitizer`, `ptx_inspect`
+- Git and project automation: `git_status`, `git_diff`, `git_log`, `git_checkpoint`, `git_commit`, `gh_clone`, `gh_sync`, `gh_status`, `project_new`, `project_context`, `orient`
+- FPGA / EDA: `verilog_lint`, `verilog_sim`, `xsim_elab`, `cocotb_run`, `vivado_tcl`, `synth_report`, `fpga_program`, `fpga_boards`, `board_status`, `waveform_query`, `rtl_regression_run`, `rtl_regression_report`, `fpga_triage`, `fpga_artifacts`
+- Session / workspace utilities: `shell_state`, `set_cwd`, `note`, `symbol_index`, `find_symbol`, `control_reconcile`, `health`
+
+## Concurrency Model
+
+The server does not blindly run everything in parallel.
+
+- `ParallelRead`: safe read-only requests may execute on worker threads.
+- `SerializedState`: requests that mutate shared server/process state stay globally serialized.
+- `SerializedResource`: requests that target a repo, file path, job, pipeline, or hardware endpoint are serialized per resource key.
+
+Examples:
+
+- `read_file`, `grep_code`, `health`, `process_tree`, `cargo_tree`: parallel-safe
+- `set_cwd`, `note`, `config_ux`, `ux_wizard`: serialized global state
+- `git_status`, `git_commit`, `move_file`, `bg_kill`, `fpga_program`: serialized by repo/path/job/hardware target
+
+This is the core rule set the server uses today. It is intentionally conservative around mutation.
 
 ## Install
 
@@ -16,19 +76,17 @@ Works on **macOS** and **Linux**.
 curl -fsSL https://raw.githubusercontent.com/DaronPopov/ferrite-mcp/main/install.sh | sh
 ```
 
-Safe to re-run — skips steps already done. Restart your AI client after install to activate.
+The installer builds `ferrite` from source.
 
-The installer:
-- Detects Rust/cargo, installs via rustup if missing
-- Builds and installs the `ferrite` binary from source
-- Registers `ferrite` in `~/.claude.json` (Claude Code)
-- Registers `ferrite` in `~/.codex/config.toml` (OpenAI Codex) if present
+Today, the `ferrite install` CLI path auto-registers both:
 
----
+- Claude Code via `~/.claude.json`
+- OpenAI Codex via `~/.codex/config.toml`
 
-## Manual registration
+Manual registration example:
 
-**Claude Code** — `~/.claude.json`:
+**Claude Code** `~/.claude.json`
+
 ```json
 {
   "mcpServers": {
@@ -42,141 +100,79 @@ The installer:
 }
 ```
 
-**OpenAI Codex** — `~/.codex/config.toml`:
+**OpenAI Codex** `~/.codex/config.toml`
+
 ```toml
 [mcp_servers.ferrite]
 command = "/home/you/.cargo/bin/ferrite"
-args    = ["--mcp"]
+args = ["--mcp"]
 ```
-
----
-
-## Tools
-
-| Category | Tools |
-|---|---|
-| **Filesystem** | `read_file`, `glob`, `grep_code`, `list_dir`, `move_file`, `mkdir`, `delete_file`, `changed_since` |
-| **Execution** | `exec`, `build_check`, `task_run`, `launch`, `tty_exec` |
-| **Background jobs** | `bg_spawn`, `bg_send`, `bg_status`, `bg_wait`, `bg_tail`, `bg_list`, `bg_kill`, `wait_for_pattern`, `wait_for_idle`, `output_summary`, `pipeline_run`, `pipeline_status`, `pipeline_cancel`, `live_window` |
-| **Hardware / GPU** | `gpu_info`, `gpu_live`, `cpu_info`, `health`, `occupancy_calc`, `ptx_inspect`, `cuda_env_doctor`, `cuda_artifacts`, `cuda_triage`, `cuda_regression_run`, `cuda_regression_report` |
-| **Profiling** | `ncu_profile`, `compute_sanitizer`, `perf_stat`, `flamegraph` |
-| **Git** | `git_log`, `git_diff`, `git_status`, `git_checkpoint`, `git_commit`, `gh_clone`, `gh_sync`, `gh_status` |
-| **EDA / FPGA** | `vivado_tcl`, `synth_report`, `fpga_program`, `fpga_boards`, `board_status`, `verilog_lint`, `verilog_sim`, `cocotb_run`, `rtl_regression_run`, `rtl_regression_report`, `fpga_triage`, `fpga_artifacts`, `waveform_query`, `fpga_serial`, `fpga_monitor` |
-| **ML** | `tensor_inspect`, `checkpoint_list` |
-| **Project** | `orient`, `project_context`, `chip_status`, `chip_build_pipeline`, `find_lib`, `discover` |
-| **System** | `process_tree`, `port_list`, `tmux_ctl`, `session_status`, `session_restart` |
-| **Workspace** | `shell_state`, `set_cwd`, `note`, `symbol_index`, `find_symbol`, `control_reconcile` |
-| **Dynamic tools** | `tool_define`, `tool_undefine`, `tool_list_dynamic` |
-| **Pre-flight** | `pre_validate`, `permissions_setup`, `env_doctor` |
-
----
 
 ## Config
 
-`~/.config/ferrite/config.toml`
+Primary config file:
 
-| Key | Effect |
-|---|---|
-| `terminal.mode` | `always` or `never` — open observer window on exec |
-| `terminal.emulator` | `kitty`, `xterm`, `auto`, … |
-| `paths.vivado` | Override Vivado bin directory |
-| `git.auto_checkpoint` | Auto-create checkpoint before write/build/deploy tools |
-| `git.strict` | Block tool execution if auto-checkpoint fails |
-| `git.before_write` | Enable checkpoint hook for write tools |
-| `git.before_build` | Enable checkpoint hook for build/test tools |
-| `git.before_deploy` | Enable checkpoint hook for deploy tools |
-| `git.add_mode` | Auto-checkpoint staging mode: `tracked` or `all` |
+```text
+~/.config/ferrite/config.toml
+```
 
-## MCP recycle thresholds
+Common settings:
 
-Set these env vars on the `ferrite --mcp` process to make the server exit cleanly after a response once a threshold is exceeded. The client can then spawn a fresh process.
+- `terminal.mode`: observer windows on command execution
+- `terminal.emulator`: terminal backend selection
+- `paths.vivado`: Vivado binary directory override
+- `git.auto_checkpoint`: automatic pre-tool checkpoints
+- `git.strict`: fail mutating calls when checkpointing fails
+- `git.before_write`
+- `git.before_build`
+- `git.before_deploy`
+- `git.add_mode`
+
+## Runtime Health And Recycling
+
+Optional environment variables on the `ferrite --mcp` process:
 
 - `FERRITE_MCP_MAX_CALLS`
 - `FERRITE_MCP_MAX_UPTIME_SECS`
 - `FERRITE_MCP_MAX_RSS_MB`
 
-Use the `health` tool to inspect current uptime, RSS, call count, job-buffer pressure, and whether restart is recommended.
+When configured, the server exits cleanly after a response once a threshold is exceeded so the client can start a fresh process.
 
----
+Use the `health` tool to inspect:
 
-## Remote SSH workflow
+- uptime
+- tool call count
+- RSS
+- note buffer size
+- background job buffer pressure
 
-For private remote hardware development, keep `ferrite` on the Linux workstation and reach it over SSH.
+## CLI
+
+The main entrypoint is:
 
 ```sh
-ferrite up
-ferrite-up
-ferrite remote doctor
-ferrite remote up
-ferrite remote login-shell
-ferrite remote mcp-config <host> [user]
+ferrite
 ```
 
-- `ferrite up` is the main installed command and works from any directory once `ferrite` is on `PATH`.
-- `ferrite-up` is the one-shot desktop command: it installs the SSH auto-attach hook, ensures the remote path is up, creates the tmux session, and prints the exact external login command.
-- `remote doctor` checks Tailscale, SSH, tmux, feRcuda, Vivado, and CUDA.
-- `remote up` prepares a tmux-backed session and prints the exact SSH attach command.
-- `remote login-shell` is intended for password-based SSH logins: it creates or reuses the tmux session and attaches immediately.
-- `remote mcp-config` prints the Mac-side Codex MCP stanza for `ssh ... ferrite --mcp`.
+Important modes:
 
-## Agent Compatibility
+- `ferrite --mcp`
+- `ferrite -c <cmd>`
+- `ferrite config list`
+- `ferrite config get <key>`
+- `ferrite config set <key> <value>`
+- `ferrite install`
+- `ferrite uninstall`
+- `ferrite status`
 
-`ferrite` is a plain stdio MCP server. The contract is agent-agnostic:
+## What This README Is Describing
 
-- no Claude-specific protocol extensions
-- no Codex-specific protocol extensions
-- workflow discovery happens through `tools/list`
-- high-level FPGA flows should be callable through explicit JSON arguments, not prompt-only conventions
+This README describes the system as it exists in this repo now:
 
-For FPGA projects, prefer manifest-backed flows so every MCP client can discover the same targets:
+- local MCP server
+- generic tool surface
+- selective request parallelism
+- no `fercuda` runtime coupling
+- no dependency on the removed `ferrite-notify` crate
 
-```toml
-[project]
-name = "attn"
-board = "basys3"
-
-[[cocotb]]
-name = "softmax"
-dir = "ip/softmax/sim"
-mode = "makefile"
-module = "test_softmax_lut"
-sim = "icarus"
-
-[[synth]]
-name = "basys3_n6"
-tcl = "top/basys3/tcl/build_n6_attn.tcl"
-bitstream = "build/basys3_n6/attn_basys3_top_n6.bit"
-```
-
-Example MCP call:
-
-```json
-{
-  "name": "rtl_regression_run",
-  "arguments": {
-    "chip": "attn",
-    "sim_target": "softmax",
-    "steps": ["lint", "sim"]
-  }
-}
-```
-
-For compact agent-facing analysis, use `rtl_regression_report`. It returns summary fields, failure classification, and artifact paths by default, with `include_logs=true` available when a client wants full stdout/stderr.
-
-For policy-oriented next steps, use `fpga_triage`. It returns:
-
-- severity
-- root-cause class
-- confidence
-- recommended next action
-- recommended next tool
-
-For read-only artifact discovery, use `fpga_artifacts`. It returns manifest-aware sim and synth assets including:
-
-- sim directories
-- `results.xml` paths and existence
-- discovered `.vcd` files
-- selected synth Tcl path
-- selected bitstream path and existence
-
-For password-based access from outside your home network, prefer Tailscale plus SSH password auth over exposing port `22` directly to the public internet.
+If the CLI surface changes again, the README should be updated from the current workspace and `shell-mcp` server behavior rather than from older deployment workflows.

@@ -1,8 +1,0 @@
-{
-  "name": "ferrite-mcp",
-  "description": "ferrite remote control and session management commands",
-  "version": "1.0.0",
-  "author": {
-    "name": "DaronPopov"
-  }
-}

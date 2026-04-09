@@ -37,7 +37,16 @@ impl JobTable {
     pub fn add(&mut self, cmdline: String, pids: Vec<Pid>, foreground: bool) -> usize {
         let id = self.next_id;
         self.next_id += 1;
-        self.jobs.insert(id, Job { id, cmdline, pids, status: JobStatus::Running, foreground });
+        self.jobs.insert(
+            id,
+            Job {
+                id,
+                cmdline,
+                pids,
+                status: JobStatus::Running,
+                foreground,
+            },
+        );
         id
     }
 

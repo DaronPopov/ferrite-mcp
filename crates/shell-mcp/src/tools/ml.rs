@@ -4,24 +4,28 @@
 //!   tensor_inspect   — load .pt/.pth file, return shape/dtype/stats per tensor
 //!   checkpoint_list  — enumerate checkpoint files in a directory with metadata
 
-use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
-use serde_json::{json, Value};
 use crate::protocol::ToolResult;
 use crate::server::ServerState;
 use crate::tools::state::resolve_or_cwd;
+use serde_json::{json, Value};
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 // ── tensor_inspect ────────────────────────────────────────────────────────────
 
 /// Inspect a PyTorch .pt/.pth file via a generated Python script.
 /// Returns tensor shapes, dtypes, and basic statistics (min/max/mean).
 pub fn tensor_inspect(args: &Value) -> Result<ToolResult, String> {
-    let path    = args["path"].as_str().ok_or("tensor_inspect: 'path' required")?;
-    let keys    = collect_str_array(args, "keys");
+    let path = args["path"]
+        .as_str()
+        .ok_or("tensor_inspect: 'path' required")?;
+    let keys = collect_str_array(args, "keys");
     let max_tensors = args["max_tensors"].as_u64().unwrap_or(50) as usize;
 
     if !Path::new(path).exists() {
-        return Ok(ToolResult::error(format!("tensor_inspect: file not found: {path}")));
+        return Ok(ToolResult::error(format!(
+            "tensor_inspect: file not found: {path}"
+        )));
     }
 
     let key_filter_py = if keys.is_empty() {
@@ -30,7 +34,8 @@ pub fn tensor_inspect(args: &Value) -> Result<ToolResult, String> {
         format!("{keys:?}")
     };
 
-    let script = format!(r#"
+    let script = format!(
+        r#"
 import sys, json
 try:
     import torch
@@ -91,7 +96,8 @@ def inspect(obj, path="", depth=0):
 
 result = inspect(data)
 print(json.dumps({{"path": "{path}", "tensor_count": tensor_count, "data": result}}))
-"#);
+"#
+    );
 
     run_python_script(&script, "tensor_inspect")
 }
@@ -100,13 +106,19 @@ print(json.dumps({{"path": "{path}", "tensor_count": tensor_count, "data": resul
 
 /// Enumerate PyTorch checkpoint files (.pt/.pth/.ckpt) in a directory.
 /// Returns basic metadata for each: size, mtime, and key listing if loadable.
-pub fn checkpoint_list(args: &Value, state: &Arc<Mutex<ServerState>>) -> Result<ToolResult, String> {
+pub fn checkpoint_list(
+    args: &Value,
+    state: &Arc<Mutex<ServerState>>,
+) -> Result<ToolResult, String> {
     let root_path = resolve_or_cwd(state, args["path"].as_str())?;
     let inspect = args["inspect"].as_bool().unwrap_or(true);
     let max_files = args["max_files"].as_u64().unwrap_or(20) as usize;
 
     if !root_path.exists() {
-        return Ok(ToolResult::error(format!("checkpoint_list: path not found: {}", root_path.display())));
+        return Ok(ToolResult::error(format!(
+            "checkpoint_list: path not found: {}",
+            root_path.display()
+        )));
     }
 
     // Collect checkpoint files
@@ -126,24 +138,32 @@ pub fn checkpoint_list(args: &Value, state: &Arc<Mutex<ServerState>>) -> Result<
     }
 
     if !inspect {
-        let listing: Vec<Value> = files.iter().map(|f| {
-            let meta = f.metadata().ok();
-            let size = meta.as_ref().map(|m| m.len()).unwrap_or(0);
-            let mtime = meta.and_then(|m| m.modified().ok())
-                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                .map(|d| d.as_secs());
-            json!({ "path": f.display().to_string(), "size_bytes": size, "mtime": mtime })
-        }).collect();
-        return Ok(ToolResult::json(&json!({ "path": root_path.display().to_string(), "count": listing.len(), "files": listing })));
+        let listing: Vec<Value> = files
+            .iter()
+            .map(|f| {
+                let meta = f.metadata().ok();
+                let size = meta.as_ref().map(|m| m.len()).unwrap_or(0);
+                let mtime = meta
+                    .and_then(|m| m.modified().ok())
+                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map(|d| d.as_secs());
+                json!({ "path": f.display().to_string(), "size_bytes": size, "mtime": mtime })
+            })
+            .collect();
+        return Ok(ToolResult::json(
+            &json!({ "path": root_path.display().to_string(), "count": listing.len(), "files": listing }),
+        ));
     }
 
     // Build Python script to inspect all files at once
-    let paths_py: Vec<String> = files.iter()
+    let paths_py: Vec<String> = files
+        .iter()
         .map(|f| format!("\"{}\"", f.display()))
         .collect();
     let paths_list = paths_py.join(", ");
 
-    let script = format!(r#"
+    let script = format!(
+        r#"
 import sys, json, os
 try:
     import torch
@@ -189,7 +209,9 @@ for p in paths:
     results.append(meta)
 
 print(json.dumps({{"path": "{}", "count": len(results), "files": results}}))
-"#, root_path.display());
+"#,
+        root_path.display()
+    );
 
     run_python_script(&script, "checkpoint_list")
 }
@@ -220,12 +242,18 @@ fn run_python_script(script: &str, tool: &str) -> Result<ToolResult, String> {
 }
 
 fn collect_checkpoints(dir: &Path, out: &mut Vec<PathBuf>, depth: usize) {
-    if depth > 6 { return; }
-    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    if depth > 6 {
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
     for entry in entries.filter_map(|e| e.ok()) {
         let path = entry.path();
         let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-        if name == "target" || name == ".git" || name.starts_with('.') { continue; }
+        if name == "target" || name == ".git" || name.starts_with('.') {
+            continue;
+        }
         if path.is_dir() {
             collect_checkpoints(&path, out, depth + 1);
         } else if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
@@ -238,7 +266,8 @@ fn collect_checkpoints(dir: &Path, out: &mut Vec<PathBuf>, depth: usize) {
 
 fn collect_str_array(args: &Value, key: &str) -> Vec<String> {
     match &args[key] {
-        Value::Array(arr) => arr.iter()
+        Value::Array(arr) => arr
+            .iter()
             .filter_map(|v| v.as_str().map(str::to_owned))
             .collect(),
         _ => vec![],

@@ -15,27 +15,37 @@ use serde_json::{json, Value};
 use crate::protocol::ToolResult;
 
 pub fn bench_history(args: &Value) -> Result<ToolResult, String> {
-    let op = args["op"].as_str()
+    let op = args["op"]
+        .as_str()
         .ok_or("bench_history: 'op' required — record | list | query | compare")?;
 
     match op {
-        "record"  => record(args),
-        "list"    => list(args),
-        "query"   => query(args),
+        "record" => record(args),
+        "list" => list(args),
+        "query" => query(args),
         "compare" => compare(args),
-        other     => Err(format!("bench_history: unknown op '{other}'. Use record|list|query|compare")),
+        other => Err(format!(
+            "bench_history: unknown op '{other}'. Use record|list|query|compare"
+        )),
     }
 }
 
 // ── record ────────────────────────────────────────────────────────────────────
 
 fn record(args: &Value) -> Result<ToolResult, String> {
-    let tag   = args["tag"].as_str().ok_or("bench_history record: 'tag' required")?;
-    let value = args["value"].as_f64().ok_or("bench_history record: 'value' required (f64)")?;
-    let unit  = args["unit"].as_str().ok_or("bench_history record: 'unit' required (e.g. 'GB/s', 'GFLOP/s', 'ms')")?;
+    let tag = args["tag"]
+        .as_str()
+        .ok_or("bench_history record: 'tag' required")?;
+    let value = args["value"]
+        .as_f64()
+        .ok_or("bench_history record: 'value' required (f64)")?;
+    let unit = args["unit"]
+        .as_str()
+        .ok_or("bench_history record: 'unit' required (e.g. 'GB/s', 'GFLOP/s', 'ms')")?;
 
     let ts = std::time::SystemTime::now()
-        .duration_since(UNIX_EPOCH).unwrap_or_default()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
         .as_secs();
 
     let record = json!({
@@ -84,20 +94,30 @@ fn list(args: &Value) -> Result<ToolResult, String> {
 // ── query ─────────────────────────────────────────────────────────────────────
 
 fn query(args: &Value) -> Result<ToolResult, String> {
-    let tag_filter    = args["tag"].as_str();
+    let tag_filter = args["tag"].as_str();
     let kernel_filter = args["kernel"].as_str();
-    let limit         = args["limit"].as_u64().unwrap_or(50) as usize;
+    let limit = args["limit"].as_u64().unwrap_or(50) as usize;
 
     let records = load_all()?;
-    let filtered: Vec<&Value> = records.iter().filter(|r| {
-        let tag_ok = tag_filter
-            .map(|t| r["tag"].as_str().map(|rt| rt.contains(t)).unwrap_or(false))
-            .unwrap_or(true);
-        let kern_ok = kernel_filter
-            .map(|k| r["kernel"].as_str().map(|rk| rk.contains(k)).unwrap_or(false))
-            .unwrap_or(true);
-        tag_ok && kern_ok
-    }).rev().take(limit).collect();
+    let filtered: Vec<&Value> = records
+        .iter()
+        .filter(|r| {
+            let tag_ok = tag_filter
+                .map(|t| r["tag"].as_str().map(|rt| rt.contains(t)).unwrap_or(false))
+                .unwrap_or(true);
+            let kern_ok = kernel_filter
+                .map(|k| {
+                    r["kernel"]
+                        .as_str()
+                        .map(|rk| rk.contains(k))
+                        .unwrap_or(false)
+                })
+                .unwrap_or(true);
+            tag_ok && kern_ok
+        })
+        .rev()
+        .take(limit)
+        .collect();
 
     Ok(ToolResult::json(&json!({
         "count":   filtered.len(),
@@ -108,10 +128,13 @@ fn query(args: &Value) -> Result<ToolResult, String> {
 // ── compare ───────────────────────────────────────────────────────────────────
 
 fn compare(args: &Value) -> Result<ToolResult, String> {
-    let tag = args["tag"].as_str().ok_or("bench_history compare: 'tag' required")?;
+    let tag = args["tag"]
+        .as_str()
+        .ok_or("bench_history compare: 'tag' required")?;
     let records = load_all()?;
 
-    let tag_records: Vec<&Value> = records.iter()
+    let tag_records: Vec<&Value> = records
+        .iter()
         .filter(|r| r["tag"].as_str() == Some(tag))
         .collect();
 
@@ -123,12 +146,16 @@ fn compare(args: &Value) -> Result<ToolResult, String> {
         })));
     }
 
-    let latest  = tag_records[tag_records.len() - 1];
-    let prev    = tag_records[tag_records.len() - 2];
+    let latest = tag_records[tag_records.len() - 1];
+    let prev = tag_records[tag_records.len() - 2];
 
     let v1 = prev["value"].as_f64().unwrap_or(0.0);
     let v2 = latest["value"].as_f64().unwrap_or(0.0);
-    let delta_pct = if v1 != 0.0 { (v2 - v1) / v1 * 100.0 } else { 0.0 };
+    let delta_pct = if v1 != 0.0 {
+        (v2 - v1) / v1 * 100.0
+    } else {
+        0.0
+    };
     let improved = delta_pct > 0.0;
 
     Ok(ToolResult::json(&json!({
@@ -163,8 +190,7 @@ fn load_all() -> Result<Vec<Value>, String> {
         return Ok(vec![]);
     }
 
-    let file = std::fs::File::open(&path)
-        .map_err(|e| format!("bench_history: open: {e}"))?;
+    let file = std::fs::File::open(&path).map_err(|e| format!("bench_history: open: {e}"))?;
 
     let records: Vec<Value> = std::io::BufReader::new(file)
         .lines()

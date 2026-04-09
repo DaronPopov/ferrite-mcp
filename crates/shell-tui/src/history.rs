@@ -93,7 +93,11 @@ impl History {
                 let _ = std::fs::create_dir_all(parent);
             }
             use std::io::Write;
-            if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+            if let Ok(mut f) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(path)
+            {
                 let _ = writeln!(f, "{line}");
             }
         }

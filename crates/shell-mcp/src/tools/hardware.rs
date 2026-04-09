@@ -102,8 +102,8 @@ fn try_cuda_device_query() -> Option<Value> {
     let nvcc = which_bin("nvcc")?;
 
     let dir = std::env::temp_dir();
-    let src  = dir.join("ferrite_gpuq.cu");
-    let bin  = dir.join("ferrite_gpuq");
+    let src = dir.join("ferrite_gpuq.cu");
+    let bin = dir.join("ferrite_gpuq");
 
     std::fs::write(&src, GPU_QUERY_SRC).ok()?;
 
@@ -144,12 +144,16 @@ fn nvidia_smi_full() -> Option<Value> {
         .output()
         .ok()?;
 
-    if !out.status.success() { return None; }
+    if !out.status.success() {
+        return None;
+    }
 
     let mut devices = Vec::new();
     for line in String::from_utf8_lossy(&out.stdout).lines() {
         let parts: Vec<&str> = line.split(", ").collect();
-        if parts.len() < 9 { continue; }
+        if parts.len() < 9 {
+            continue;
+        }
         devices.push(json!({
             "index":          parts[0].trim().parse::<u32>().unwrap_or(0),
             "name":           parts[1].trim(),
@@ -163,7 +167,11 @@ fn nvidia_smi_full() -> Option<Value> {
         }));
     }
 
-    if devices.is_empty() { None } else { Some(Value::Array(devices)) }
+    if devices.is_empty() {
+        None
+    } else {
+        Some(Value::Array(devices))
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -174,12 +182,16 @@ fn nvidia_smi_extra() -> Value {
     let Ok(out) = std::process::Command::new("nvidia-smi")
         .args(["--query-gpu", fields, "--format=csv,noheader,nounits"])
         .output()
-    else { return Value::Null };
+    else {
+        return Value::Null;
+    };
 
     let mut stats = Vec::new();
     for line in String::from_utf8_lossy(&out.stdout).lines() {
         let p: Vec<&str> = line.split(", ").collect();
-        if p.len() < 8 { continue; }
+        if p.len() < 8 {
+            continue;
+        }
         stats.push(json!({
             "index":          p[0].trim().parse::<u32>().unwrap_or(0),
             "driver_version": p[1].trim(),
@@ -215,12 +227,17 @@ fn cuda_include_dir() -> Option<String> {
 #[cfg(target_os = "linux")]
 fn which_bin(name: &str) -> Option<String> {
     let path_var = std::env::var("PATH").unwrap_or_default();
-    path_var.split(':').filter(|d| !d.is_empty()).map(|d| {
-        std::path::PathBuf::from(d).join(name)
-    }).find(|p| {
-        use std::os::unix::fs::PermissionsExt;
-        p.metadata().map(|m| m.is_file() && m.permissions().mode() & 0o111 != 0).unwrap_or(false)
-    }).map(|p| p.display().to_string())
+    path_var
+        .split(':')
+        .filter(|d| !d.is_empty())
+        .map(|d| std::path::PathBuf::from(d).join(name))
+        .find(|p| {
+            use std::os::unix::fs::PermissionsExt;
+            p.metadata()
+                .map(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+                .unwrap_or(false)
+        })
+        .map(|p| p.display().to_string())
 }
 
 // ── GPU info — macOS ──────────────────────────────────────────────────────────
@@ -259,31 +276,40 @@ pub fn cpu_info(_args: &Value) -> Result<ToolResult, String> {
 fn collect_cpu_info() -> Value {
     let cpuinfo = std::fs::read_to_string("/proc/cpuinfo").unwrap_or_default();
 
-    let model = cpuinfo.lines()
+    let model = cpuinfo
+        .lines()
         .find(|l| l.starts_with("model name"))
         .and_then(|l| l.split(':').nth(1))
         .map(|s| s.trim().to_owned())
         .unwrap_or_else(|| "unknown".to_owned());
 
-    let logical_cores = cpuinfo.lines()
+    let logical_cores = cpuinfo
+        .lines()
         .filter(|l| l.starts_with("processor"))
         .count();
 
-    let physical_cores = cpuinfo.lines()
+    let physical_cores = cpuinfo
+        .lines()
         .find(|l| l.starts_with("cpu cores"))
         .and_then(|l| l.split(':').nth(1))
         .and_then(|s| s.trim().parse::<usize>().ok())
         .unwrap_or(logical_cores);
 
-    let sockets = cpuinfo.lines()
+    let sockets = cpuinfo
+        .lines()
         .filter(|l| l.starts_with("physical id"))
-        .filter_map(|l| l.split(':').nth(1).and_then(|s| s.trim().parse::<usize>().ok()))
+        .filter_map(|l| {
+            l.split(':')
+                .nth(1)
+                .and_then(|s| s.trim().parse::<usize>().ok())
+        })
         .max()
         .map(|m| m + 1)
         .unwrap_or(1);
 
     // SIMD flags
-    let flags_line = cpuinfo.lines()
+    let flags_line = cpuinfo
+        .lines()
         .find(|l| l.starts_with("flags") || l.starts_with("Features"))
         .and_then(|l| l.split(':').nth(1))
         .unwrap_or("")
@@ -295,7 +321,8 @@ fn collect_cpu_info() -> Value {
     let caches = read_cache_topology();
 
     // MHz
-    let freq_mhz = cpuinfo.lines()
+    let freq_mhz = cpuinfo
+        .lines()
         .find(|l| l.starts_with("cpu MHz"))
         .and_then(|l| l.split(':').nth(1))
         .and_then(|s| s.trim().parse::<f64>().ok());
@@ -333,7 +360,9 @@ fn extract_simd_flags(flags: &str) -> Value {
 fn read_cache_topology() -> Value {
     let mut caches = Vec::new();
     let base = std::path::Path::new("/sys/devices/system/cpu/cpu0/cache");
-    if !base.exists() { return Value::Array(caches); }
+    if !base.exists() {
+        return Value::Array(caches);
+    }
 
     if let Ok(entries) = std::fs::read_dir(base) {
         let mut indices: Vec<_> = entries.filter_map(|e| e.ok()).collect();
@@ -343,8 +372,8 @@ fn read_cache_topology() -> Value {
             let p = entry.path();
             let level = read_sysfs(&p, "level").and_then(|s| s.parse::<u32>().ok());
             let ctype = read_sysfs(&p, "type");
-            let size  = read_sysfs(&p, "size");
-            let ways  = read_sysfs(&p, "ways_of_associativity").and_then(|s| s.parse::<u32>().ok());
+            let size = read_sysfs(&p, "size");
+            let ways = read_sysfs(&p, "ways_of_associativity").and_then(|s| s.parse::<u32>().ok());
             if level.is_some() {
                 caches.push(json!({ "level": level, "type": ctype, "size": size, "ways": ways }));
             }
@@ -355,7 +384,9 @@ fn read_cache_topology() -> Value {
 
 #[cfg(target_os = "linux")]
 fn read_sysfs(base: &std::path::Path, file: &str) -> Option<String> {
-    std::fs::read_to_string(base.join(file)).ok().map(|s| s.trim().to_owned())
+    std::fs::read_to_string(base.join(file))
+        .ok()
+        .map(|s| s.trim().to_owned())
 }
 
 // ── CPU info — macOS ──────────────────────────────────────────────────────────
@@ -365,7 +396,7 @@ fn collect_cpu_info() -> Value {
     let model = sysctl_str("machdep.cpu.brand_string")
         .or_else(|| sysctl_str("hw.model"))
         .unwrap_or_else(|| "Apple Silicon".to_owned());
-    let logical  = sysctl_u64("hw.logicalcpu").unwrap_or(0) as usize;
+    let logical = sysctl_u64("hw.logicalcpu").unwrap_or(0) as usize;
     let physical = sysctl_u64("hw.physicalcpu").unwrap_or(0) as usize;
 
     let mut caches = vec![];
@@ -417,45 +448,107 @@ fn sysctl_u64(name: &str) -> Option<u64> {
 /// Architecture limits for theoretical occupancy calculation.
 /// Source: CUDA Occupancy Calculator + CUDA C Programming Guide.
 struct ArchLimits {
-    max_warps_per_sm:   u32,
-    max_blocks_per_sm:  u32,
-    max_regs_per_sm:    u32,
+    max_warps_per_sm: u32,
+    max_blocks_per_sm: u32,
+    max_regs_per_sm: u32,
     /// Default shared memory per SM in bytes (without dynamic config)
-    max_smem_per_sm:    u32,
+    max_smem_per_sm: u32,
     /// Register allocation granularity (warps) — reserved for future fine-grained calc
     #[allow(dead_code)]
-    reg_alloc_unit:     u32,
+    reg_alloc_unit: u32,
 }
 
 fn arch_limits(major: u32, minor: u32) -> ArchLimits {
     match (major, minor) {
         // Maxwell
-        (5, _) => ArchLimits { max_warps_per_sm: 64, max_blocks_per_sm: 32, max_regs_per_sm: 65536, max_smem_per_sm: 96 * 1024,  reg_alloc_unit: 4 },
+        (5, _) => ArchLimits {
+            max_warps_per_sm: 64,
+            max_blocks_per_sm: 32,
+            max_regs_per_sm: 65536,
+            max_smem_per_sm: 96 * 1024,
+            reg_alloc_unit: 4,
+        },
         // Pascal
-        (6, 0) => ArchLimits { max_warps_per_sm: 64, max_blocks_per_sm: 32, max_regs_per_sm: 65536, max_smem_per_sm: 64 * 1024,  reg_alloc_unit: 4 },
-        (6, _) => ArchLimits { max_warps_per_sm: 32, max_blocks_per_sm: 32, max_regs_per_sm: 65536, max_smem_per_sm: 48 * 1024,  reg_alloc_unit: 4 },
+        (6, 0) => ArchLimits {
+            max_warps_per_sm: 64,
+            max_blocks_per_sm: 32,
+            max_regs_per_sm: 65536,
+            max_smem_per_sm: 64 * 1024,
+            reg_alloc_unit: 4,
+        },
+        (6, _) => ArchLimits {
+            max_warps_per_sm: 32,
+            max_blocks_per_sm: 32,
+            max_regs_per_sm: 65536,
+            max_smem_per_sm: 48 * 1024,
+            reg_alloc_unit: 4,
+        },
         // Volta
-        (7, 0) => ArchLimits { max_warps_per_sm: 64, max_blocks_per_sm: 32, max_regs_per_sm: 65536, max_smem_per_sm: 96 * 1024,  reg_alloc_unit: 4 },
+        (7, 0) => ArchLimits {
+            max_warps_per_sm: 64,
+            max_blocks_per_sm: 32,
+            max_regs_per_sm: 65536,
+            max_smem_per_sm: 96 * 1024,
+            reg_alloc_unit: 4,
+        },
         // Turing
-        (7, 5) => ArchLimits { max_warps_per_sm: 32, max_blocks_per_sm: 16, max_regs_per_sm: 65536, max_smem_per_sm: 64 * 1024,  reg_alloc_unit: 4 },
+        (7, 5) => ArchLimits {
+            max_warps_per_sm: 32,
+            max_blocks_per_sm: 16,
+            max_regs_per_sm: 65536,
+            max_smem_per_sm: 64 * 1024,
+            reg_alloc_unit: 4,
+        },
         // Ampere A100
-        (8, 0) => ArchLimits { max_warps_per_sm: 64, max_blocks_per_sm: 32, max_regs_per_sm: 65536, max_smem_per_sm: 164 * 1024, reg_alloc_unit: 4 },
+        (8, 0) => ArchLimits {
+            max_warps_per_sm: 64,
+            max_blocks_per_sm: 32,
+            max_regs_per_sm: 65536,
+            max_smem_per_sm: 164 * 1024,
+            reg_alloc_unit: 4,
+        },
         // Ada Lovelace RTX 40xx (sm_89) — more blocks per SM than sm_86
-        (8, 9) => ArchLimits { max_warps_per_sm: 48, max_blocks_per_sm: 24, max_regs_per_sm: 65536, max_smem_per_sm: 100 * 1024, reg_alloc_unit: 4 },
+        (8, 9) => ArchLimits {
+            max_warps_per_sm: 48,
+            max_blocks_per_sm: 24,
+            max_regs_per_sm: 65536,
+            max_smem_per_sm: 100 * 1024,
+            reg_alloc_unit: 4,
+        },
         // Ampere RTX 30xx (sm_86, sm_87)
-        (8, _) => ArchLimits { max_warps_per_sm: 48, max_blocks_per_sm: 16, max_regs_per_sm: 65536, max_smem_per_sm: 100 * 1024, reg_alloc_unit: 4 },
+        (8, _) => ArchLimits {
+            max_warps_per_sm: 48,
+            max_blocks_per_sm: 16,
+            max_regs_per_sm: 65536,
+            max_smem_per_sm: 100 * 1024,
+            reg_alloc_unit: 4,
+        },
         // Hopper
-        (9, _) => ArchLimits { max_warps_per_sm: 64, max_blocks_per_sm: 32, max_regs_per_sm: 65536, max_smem_per_sm: 228 * 1024, reg_alloc_unit: 4 },
+        (9, _) => ArchLimits {
+            max_warps_per_sm: 64,
+            max_blocks_per_sm: 32,
+            max_regs_per_sm: 65536,
+            max_smem_per_sm: 228 * 1024,
+            reg_alloc_unit: 4,
+        },
         // Safe default for unknown future arches
-        _      => ArchLimits { max_warps_per_sm: 48, max_blocks_per_sm: 16, max_regs_per_sm: 65536, max_smem_per_sm: 48 * 1024,  reg_alloc_unit: 4 },
+        _ => ArchLimits {
+            max_warps_per_sm: 48,
+            max_blocks_per_sm: 16,
+            max_regs_per_sm: 65536,
+            max_smem_per_sm: 48 * 1024,
+            reg_alloc_unit: 4,
+        },
     }
 }
 
 pub fn occupancy_calc(args: &Value) -> Result<ToolResult, String> {
-    let threads_per_block = args["threads_per_block"].as_u64()
-        .ok_or("occupancy_calc: 'threads_per_block' is required")? as u32;
-    let shared_mem_bytes  = args["shared_mem_bytes"].as_u64().unwrap_or(0) as u32;
-    let regs_per_thread   = args["registers_per_thread"].as_u64().unwrap_or(0) as u32;
+    let threads_per_block = args["threads_per_block"]
+        .as_u64()
+        .ok_or("occupancy_calc: 'threads_per_block' is required")?
+        as u32;
+    let shared_mem_bytes = args["shared_mem_bytes"].as_u64().unwrap_or(0) as u32;
+    let regs_per_thread = args["registers_per_thread"].as_u64().unwrap_or(0) as u32;
 
     if threads_per_block == 0 || threads_per_block > 1024 {
         return Ok(ToolResult::error("threads_per_block must be 1–1024"));
@@ -478,8 +571,7 @@ pub fn occupancy_calc(args: &Value) -> Result<ToolResult, String> {
     let warps_per_block = threads_per_block.div_ceil(warp_size);
 
     // ── Limiter 1: thread count ───────────────────────────────────────────────
-    let blocks_by_threads = (arch.max_warps_per_sm / warps_per_block)
-        .min(arch.max_blocks_per_sm);
+    let blocks_by_threads = (arch.max_warps_per_sm / warps_per_block).min(arch.max_blocks_per_sm);
     let active_warps_by_threads = blocks_by_threads * warps_per_block;
 
     // ── Limiter 2: shared memory ──────────────────────────────────────────────
@@ -498,8 +590,8 @@ pub fn occupancy_calc(args: &Value) -> Result<ToolResult, String> {
         let regs_per_warp_raw = regs_per_thread * warp_size;
         // Round to nearest 256-register boundary (common granularity)
         let regs_per_warp = ((regs_per_warp_raw + 255) / 256) * 256;
-        let b = (arch.max_regs_per_sm / (regs_per_warp * warps_per_block))
-            .min(arch.max_blocks_per_sm);
+        let b =
+            (arch.max_regs_per_sm / (regs_per_warp * warps_per_block)).min(arch.max_blocks_per_sm);
         (b, b * warps_per_block)
     };
 
@@ -508,19 +600,25 @@ pub fn occupancy_calc(args: &Value) -> Result<ToolResult, String> {
         .min(active_warps_by_smem)
         .min(active_warps_by_regs);
 
-    let active_blocks = blocks_by_threads
-        .min(blocks_by_smem)
-        .min(blocks_by_regs);
+    let active_blocks = blocks_by_threads.min(blocks_by_smem).min(blocks_by_regs);
 
     let occupancy_pct = (active_warps as f64 / arch.max_warps_per_sm as f64 * 100.0) as u32;
 
     // Only report a resource as a limiter if it is actually constrained
     // (i.e. the user specified it AND it ties for the minimum active warps).
     let mut limiters = Vec::new();
-    if active_warps_by_threads == active_warps { limiters.push("thread_count"); }
-    if shared_mem_bytes > 0 && active_warps_by_smem == active_warps { limiters.push("shared_memory"); }
-    if regs_per_thread  > 0 && active_warps_by_regs == active_warps { limiters.push("registers"); }
-    if limiters.is_empty() { limiters.push("thread_count"); } // always at least one
+    if active_warps_by_threads == active_warps {
+        limiters.push("thread_count");
+    }
+    if shared_mem_bytes > 0 && active_warps_by_smem == active_warps {
+        limiters.push("shared_memory");
+    }
+    if regs_per_thread > 0 && active_warps_by_regs == active_warps {
+        limiters.push("registers");
+    }
+    if limiters.is_empty() {
+        limiters.push("thread_count");
+    } // always at least one
 
     // ── Recommendations ───────────────────────────────────────────────────────
     let mut tips = Vec::new();
@@ -532,8 +630,11 @@ pub fn occupancy_calc(args: &Value) -> Result<ToolResult, String> {
         ));
     }
     if occupancy_pct < 50 {
-        tips.push("Occupancy below 50% — consider reducing shared memory or register usage, \
-                   or increasing threads_per_block".to_owned());
+        tips.push(
+            "Occupancy below 50% — consider reducing shared memory or register usage, \
+                   or increasing threads_per_block"
+                .to_owned(),
+        );
     }
     if shared_mem_bytes > 0 && blocks_by_smem < blocks_by_threads {
         let max_smem_for_full = arch.max_smem_per_sm / blocks_by_threads;
@@ -591,11 +692,13 @@ pub fn gpu_live(_args: &Value) -> Result<ToolResult, String> {
     let mut gpus: Vec<Value> = Vec::new();
     for line in String::from_utf8_lossy(&out.stdout).lines() {
         let p: Vec<&str> = line.split(", ").collect();
-        if p.len() < 11 { continue; }
+        if p.len() < 11 {
+            continue;
+        }
 
-        let power_draw  = p[5].trim().parse::<f32>().ok();
+        let power_draw = p[5].trim().parse::<f32>().ok();
         let power_limit = p[6].trim().parse::<f32>().ok();
-        let power_pct   = match (power_draw, power_limit) {
+        let power_pct = match (power_draw, power_limit) {
             (Some(d), Some(l)) if l > 0.0 => Some((d / l * 100.0) as u32),
             _ => None,
         };
@@ -617,9 +720,9 @@ pub fn gpu_live(_args: &Value) -> Result<ToolResult, String> {
     }
 
     let n = gpus.len();
-    let ready = gpus.iter().all(|g| {
-        g["gpu_util_pct"].as_u64().unwrap_or(100) < 5
-    });
+    let ready = gpus
+        .iter()
+        .all(|g| g["gpu_util_pct"].as_u64().unwrap_or(100) < 5);
 
     Ok(ToolResult::json(&json!({
         "gpus":           gpus,
@@ -637,7 +740,8 @@ pub fn gpu_live(_args: &Value) -> Result<ToolResult, String> {
 fn live_compute_cap() -> Option<(u32, u32)> {
     let out = std::process::Command::new("nvidia-smi")
         .args(["--query-gpu=compute_cap", "--format=csv,noheader"])
-        .output().ok()?;
+        .output()
+        .ok()?;
     let s = String::from_utf8_lossy(&out.stdout);
     let cap = s.lines().next()?.trim();
     let (maj, min) = cap.split_once('.')?;

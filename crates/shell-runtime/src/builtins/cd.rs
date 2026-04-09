@@ -1,10 +1,12 @@
-use shell_core::{state::ShellState, types::ExitStatus};
 use super::Builtin;
+use shell_core::{state::ShellState, types::ExitStatus};
 
 pub struct Cd;
 
 impl Builtin for Cd {
-    fn name(&self) -> &'static str { "cd" }
+    fn name(&self) -> &'static str {
+        "cd"
+    }
 
     fn run(&self, args: &[String], state: &mut ShellState) -> ExitStatus {
         let target = match args.first() {

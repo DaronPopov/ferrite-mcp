@@ -1,10 +1,12 @@
-use shell_core::{state::ShellState, types::ExitStatus};
 use super::Builtin;
+use shell_core::{state::ShellState, types::ExitStatus};
 
 pub struct Echo;
 
 impl Builtin for Echo {
-    fn name(&self) -> &'static str { "echo" }
+    fn name(&self) -> &'static str {
+        "echo"
+    }
 
     fn run(&self, args: &[String], _state: &mut ShellState) -> ExitStatus {
         let mut no_newline = false;

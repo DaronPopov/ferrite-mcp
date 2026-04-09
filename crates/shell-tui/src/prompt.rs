@@ -30,7 +30,11 @@ pub fn render(state: &ShellState) {
         SetForegroundColor(COLOR_PROMPT_CWD),
         Print(&cwd),
         SetForegroundColor(DUST),
-        Print(if branch.is_empty() { String::new() } else { format!("  {branch}") }),
+        Print(if branch.is_empty() {
+            String::new()
+        } else {
+            format!("  {branch}")
+        }),
         ResetColor,
         Print("\n"),
     );

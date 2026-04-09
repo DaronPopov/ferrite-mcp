@@ -13,6 +13,7 @@ use crate::config::GitConfig;
 use crate::server::ServerState;
 use crate::tools::git_write;
 use crate::tools::project::expand_tilde;
+use crate::tools::state::{read_config, read_cwd};
 
 pub fn maybe_auto_checkpoint(
     tool: &str,
@@ -27,21 +28,20 @@ pub fn maybe_auto_checkpoint(
         return Ok(());
     };
 
-    let (cfg, cwd) = {
-        let guard = state.lock().map_err(|e| format!("state lock poisoned: {e}"))?;
-        (guard.config.git.clone(), guard.cwd.clone())
-    };
+    let cfg = read_config(state).git.clone();
+    let cwd = read_cwd(state);
 
     if !cfg.auto_checkpoint || !class_enabled(&cfg, class) {
         return Ok(());
     }
 
-    let repo_path = args["path"]
-        .as_str()
-        .map(expand_tilde)
-        .unwrap_or(cwd);
+    let repo_path = args["path"].as_str().map(expand_tilde).unwrap_or(cwd);
 
-    let add_mode = if cfg.add_mode == "all" { "all" } else { "tracked" };
+    let add_mode = if cfg.add_mode == "all" {
+        "all"
+    } else {
+        "tracked"
+    };
     let cp_args = json!({
         "path": repo_path.display().to_string(),
         "stage": true,
@@ -82,7 +82,12 @@ fn classify(tool: &str, args: &Value) -> Option<&'static str> {
     }
     if matches!(
         tool,
-        "build_check" | "test_run" | "cocotb_run" | "verilog_sim" | "vivado_tcl" | "chip_build_pipeline"
+        "build_check"
+            | "test_run"
+            | "cocotb_run"
+            | "verilog_sim"
+            | "vivado_tcl"
+            | "chip_build_pipeline"
     ) {
         return Some("build");
     }

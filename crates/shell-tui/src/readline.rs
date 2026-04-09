@@ -55,7 +55,10 @@ impl Readline {
         let mut cursor_pos: usize = 0; // byte offset into buf
 
         loop {
-            let Event::Key(KeyEvent { code, modifiers, .. }) = event::read()? else {
+            let Event::Key(KeyEvent {
+                code, modifiers, ..
+            }) = event::read()?
+            else {
                 continue;
             };
 
@@ -170,8 +173,7 @@ impl Readline {
 
                 // Tab — completion
                 (KeyCode::Tab, _) => {
-                    let candidates =
-                        Completer::complete(&buf, cursor_pos, state, hooks);
+                    let candidates = Completer::complete(&buf, cursor_pos, state, hooks);
                     if candidates.len() == 1 {
                         // Single match — inline complete
                         let word_start = buf[..cursor_pos]
@@ -214,11 +216,15 @@ impl Readline {
     }
 
     fn show_completions(&self, candidates: &[String]) -> std::io::Result<()> {
-        use crossterm::style::{Print, SetForegroundColor, ResetColor};
         use crate::theme::{COLOR_COMPLETION_ITEM, COLOR_COMPLETION_SEL};
+        use crossterm::style::{Print, ResetColor, SetForegroundColor};
         println!();
         for (i, c) in candidates.iter().enumerate() {
-            let color = if i == 0 { COLOR_COMPLETION_SEL } else { COLOR_COMPLETION_ITEM };
+            let color = if i == 0 {
+                COLOR_COMPLETION_SEL
+            } else {
+                COLOR_COMPLETION_ITEM
+            };
             execute!(
                 std::io::stdout(),
                 SetForegroundColor(color),

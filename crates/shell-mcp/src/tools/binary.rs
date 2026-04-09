@@ -10,15 +10,19 @@ use serde_json::{json, Value};
 use crate::protocol::ToolResult;
 
 pub fn inspect_binary(args: &Value) -> Result<ToolResult, String> {
-    let path = args["path"].as_str().ok_or("inspect_binary: 'path' is required")?;
+    let path = args["path"]
+        .as_str()
+        .ok_or("inspect_binary: 'path' is required")?;
 
     if !std::path::Path::new(path).exists() {
-        return Ok(ToolResult::error(format!("inspect_binary: {path}: no such file")));
+        return Ok(ToolResult::error(format!(
+            "inspect_binary: {path}: no such file"
+        )));
     }
 
-    let ldd      = run_ldd(path);
-    let symbols  = run_nm(path);
-    let elf_hdr  = run_readelf(path);
+    let ldd = run_ldd(path);
+    let symbols = run_nm(path);
+    let elf_hdr = run_readelf(path);
 
     Ok(ToolResult::json(&json!({
         "path":    path,
@@ -45,16 +49,20 @@ fn run_ldd(path: &str) -> Value {
 
     for line in stdout.lines() {
         let line = line.trim();
-        if line.is_empty() { continue; }
+        if line.is_empty() {
+            continue;
+        }
 
         // Formats:
         //   libfoo.so.1 => /path/to/libfoo.so.1 (0xaddr)
         //   linux-vdso.so.1 (0xaddr)          ← virtual, no path
         //   not a dynamic executable
-        if line.contains("not a dynamic") { continue; }
+        if line.contains("not a dynamic") {
+            continue;
+        }
 
         if let Some(arrow) = line.find(" => ") {
-            let lib  = line[..arrow].trim();
+            let lib = line[..arrow].trim();
             let rest = line[arrow + 4..].trim();
 
             let (resolved, found) = if rest.starts_with("not found") {
@@ -73,7 +81,8 @@ fn run_ldd(path: &str) -> Value {
         }
     }
 
-    let missing: Vec<&str> = deps.iter()
+    let missing: Vec<&str> = deps
+        .iter()
         .filter(|d| d["found"] == false)
         .filter_map(|d| d["lib"].as_str())
         .collect();
@@ -97,25 +106,32 @@ fn run_nm(path: &str) -> Value {
     // If -D fails (e.g. static binary), fall back to all symbols
     let out = match out {
         Ok(o) if o.status.success() => o,
-        _ => match std::process::Command::new("nm").args(["-C", "--format=posix", path]).output() {
+        _ => match std::process::Command::new("nm")
+            .args(["-C", "--format=posix", path])
+            .output()
+        {
             Ok(o) => o,
             Err(e) => return json!({"error": format!("nm failed: {e}")}),
-        }
+        },
     };
 
     let stdout = String::from_utf8_lossy(&out.stdout);
-    let mut defined: Vec<Value>   = Vec::new();
+    let mut defined: Vec<Value> = Vec::new();
     let mut undefined: Vec<Value> = Vec::new();
 
     for line in stdout.lines() {
         // posix format: name type [value] [size]
         let mut parts = line.splitn(4, ' ');
-        let name  = parts.next().unwrap_or("").to_owned();
+        let name = parts.next().unwrap_or("").to_owned();
         let stype = parts.next().unwrap_or("").to_owned();
-        let _val  = parts.next();
-        let size  = parts.next().and_then(|s| u64::from_str_radix(s.trim(), 16).ok());
+        let _val = parts.next();
+        let size = parts
+            .next()
+            .and_then(|s| u64::from_str_radix(s.trim(), 16).ok());
 
-        if name.is_empty() { continue; }
+        if name.is_empty() {
+            continue;
+        }
 
         let entry = json!({ "name": name, "type": symbol_type_name(&stype), "size": size });
 
@@ -127,8 +143,15 @@ fn run_nm(path: &str) -> Value {
     }
 
     // Surface the most interesting symbols
-    let cuda_syms: Vec<&Value> = defined.iter().chain(undefined.iter())
-        .filter(|s| s["name"].as_str().map(|n| n.contains("cuda") || n.contains("CUDA")).unwrap_or(false))
+    let cuda_syms: Vec<&Value> = defined
+        .iter()
+        .chain(undefined.iter())
+        .filter(|s| {
+            s["name"]
+                .as_str()
+                .map(|n| n.contains("cuda") || n.contains("CUDA"))
+                .unwrap_or(false)
+        })
         .collect();
 
     json!({
@@ -149,16 +172,19 @@ fn symbol_type_name(t: &str) -> &'static str {
         "U" | "u" => "undefined (import)",
         "W" | "w" => "weak",
         "V" | "v" => "weak object",
-        "A"       => "absolute",
-        "C"       => "common",
-        _         => "other",
+        "A" => "absolute",
+        "C" => "common",
+        _ => "other",
     }
 }
 
 // ── readelf ───────────────────────────────────────────────────────────────────
 
 fn run_readelf(path: &str) -> Value {
-    let Ok(out) = std::process::Command::new("readelf").args(["-h", path]).output() else {
+    let Ok(out) = std::process::Command::new("readelf")
+        .args(["-h", path])
+        .output()
+    else {
         return json!({"error": "readelf not available"});
     };
 
@@ -171,7 +197,8 @@ fn run_readelf(path: &str) -> Value {
 
     for line in stdout.lines() {
         if let Some(colon) = line.find(':') {
-            let key = line[..colon].trim()
+            let key = line[..colon]
+                .trim()
                 .to_lowercase()
                 .replace(' ', "_")
                 .replace('(', "")

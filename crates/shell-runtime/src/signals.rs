@@ -1,6 +1,6 @@
 //! Signal handling setup for the interactive shell.
 
-use nix::sys::signal::{self, SigAction, SigHandler, SaFlags, SigSet, Signal};
+use nix::sys::signal::{self, SaFlags, SigAction, SigHandler, SigSet, Signal};
 
 /// Install signal handlers appropriate for an interactive shell session.
 ///
@@ -15,7 +15,7 @@ pub fn install_interactive_handlers() -> nix::Result<()> {
     let default = SigAction::new(SigHandler::SigDfl, SaFlags::empty(), SigSet::empty());
 
     unsafe {
-        signal::sigaction(Signal::SIGINT,  &ignore)?;
+        signal::sigaction(Signal::SIGINT, &ignore)?;
         signal::sigaction(Signal::SIGQUIT, &ignore)?;
         signal::sigaction(Signal::SIGTSTP, &ignore)?;
         signal::sigaction(Signal::SIGTTIN, &ignore)?;
@@ -31,7 +31,7 @@ pub fn restore_default_handlers() -> nix::Result<()> {
     let default = SigAction::new(SigHandler::SigDfl, SaFlags::empty(), SigSet::empty());
 
     unsafe {
-        signal::sigaction(Signal::SIGINT,  &default)?;
+        signal::sigaction(Signal::SIGINT, &default)?;
         signal::sigaction(Signal::SIGQUIT, &default)?;
         signal::sigaction(Signal::SIGTSTP, &default)?;
         signal::sigaction(Signal::SIGTTIN, &default)?;

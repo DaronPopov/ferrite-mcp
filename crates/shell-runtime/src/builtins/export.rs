@@ -1,10 +1,12 @@
-use shell_core::{state::ShellState, types::ExitStatus};
 use super::Builtin;
+use shell_core::{state::ShellState, types::ExitStatus};
 
 pub struct Export;
 
 impl Builtin for Export {
-    fn name(&self) -> &'static str { "export" }
+    fn name(&self) -> &'static str {
+        "export"
+    }
 
     fn run(&self, args: &[String], state: &mut ShellState) -> ExitStatus {
         for arg in args {

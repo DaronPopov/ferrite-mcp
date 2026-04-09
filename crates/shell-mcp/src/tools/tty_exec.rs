@@ -21,7 +21,7 @@ use crate::job_store::{JobStatus, JobStore};
 use crate::permissions;
 use crate::protocol::ToolResult;
 use crate::server::ServerState;
-use crate::tools::state::resolve_or_cwd;
+use crate::tools::state::{lock_mutex, resolve_or_cwd};
 
 // ── Default response table (default_yes mode) ─────────────────────────────────
 //
@@ -31,51 +31,55 @@ use crate::tools::state::resolve_or_cwd;
 // Order matters: more specific patterns first.
 const DEFAULT_YES_RESPONSES: &[(&str, &str)] = &[
     // Licence / acceptance
-    ("do you accept",              "y\n"),
-    ("accept the license",         "y\n"),
-    ("i have read",                "y\n"),
+    ("do you accept", "y\n"),
+    ("accept the license", "y\n"),
+    ("i have read", "y\n"),
     // Confirmation / destructive ops
-    ("are you sure",               "y\n"),
-    ("are you absolutely sure",    "y\n"),
-    ("do you want to continue",    "y\n"),
-    ("do you want to proceed",     "y\n"),
-    ("do you wish to continue",    "y\n"),
-    ("proceed?",                   "y\n"),
+    ("are you sure", "y\n"),
+    ("are you absolutely sure", "y\n"),
+    ("do you want to continue", "y\n"),
+    ("do you want to proceed", "y\n"),
+    ("do you wish to continue", "y\n"),
+    ("proceed?", "y\n"),
     // Standard y/n prompts (most-specific first)
-    ("[yes/no/quit]",              "yes\n"),
-    ("(yes/no)",                   "yes\n"),
-    ("[yes/no]",                   "yes\n"),
-    ("[y/n/q]",                    "y\n"),
-    ("[y/n]",                      "y\n"),
-    ("(y/n)",                      "y\n"),
-    ("y/n:",                       "y\n"),
+    ("[yes/no/quit]", "yes\n"),
+    ("(yes/no)", "yes\n"),
+    ("[yes/no]", "yes\n"),
+    ("[y/n/q]", "y\n"),
+    ("[y/n]", "y\n"),
+    ("(y/n)", "y\n"),
+    ("y/n:", "y\n"),
     // Overwrite prompts
-    ("overwrite?",                 "y\n"),
-    ("already exists. overwrite",  "y\n"),
+    ("overwrite?", "y\n"),
+    ("already exists. overwrite", "y\n"),
     // Pager / more
-    ("--more--",                   "q"),
-    ("(q to quit)",                "q"),
-    ("press q to quit",            "q"),
+    ("--more--", "q"),
+    ("(q to quit)", "q"),
+    ("press q to quit", "q"),
     // "Press Enter to continue"
-    ("press enter to continue",    "\n"),
-    ("press return to continue",   "\n"),
-    ("press enter",                "\n"),
+    ("press enter to continue", "\n"),
+    ("press return to continue", "\n"),
+    ("press enter", "\n"),
     // Reboot / restart prompts (decline — agent shouldn't trigger reboots)
-    ("restart now",                "n\n"),
-    ("reboot now",                 "n\n"),
-    ("do you want to restart",     "n\n"),
+    ("restart now", "n\n"),
+    ("reboot now", "n\n"),
+    ("do you want to restart", "n\n"),
 ];
 
 // ── tty_exec ──────────────────────────────────────────────────────────────────
 
-pub fn tty_exec(args: &Value, store: &Arc<JobStore>, state: &Arc<Mutex<ServerState>>) -> Result<ToolResult, String> {
+pub fn tty_exec(
+    args: &Value,
+    store: &Arc<JobStore>,
+    state: &Arc<Mutex<ServerState>>,
+) -> Result<ToolResult, String> {
     let cmd = args["cmd"].as_str().ok_or("tty_exec: 'cmd' is required")?;
 
     let cwd = resolve_or_cwd(state, args["cwd"].as_str())?;
 
     let timeout_secs = args["timeout_secs"].as_u64().unwrap_or(120);
-    let default_yes  = args["default_yes"].as_bool().unwrap_or(true);
-    let idle_done    = args["idle_done_secs"].as_u64().unwrap_or(3);
+    let default_yes = args["default_yes"].as_bool().unwrap_or(true);
+    let idle_done = args["idle_done_secs"].as_u64().unwrap_or(3);
 
     // Build response table: default_yes baseline + caller overrides.
     let mut responses: Vec<(String, String)> = Vec::new();
@@ -103,7 +107,13 @@ pub fn tty_exec(args: &Value, store: &Arc<JobStore>, state: &Arc<Mutex<ServerSta
     let (cmd_rewritten, perm_env) = permissions::preprocess(cmd);
 
     // Spawn in a PTY so programs that open /dev/tty directly still work.
-    let job = store.spawn_pty(&cmd_rewritten, cwd, Some(&format!("tty_exec: {}", &cmd[..cmd.len().min(40)])), perm_env)
+    let job = store
+        .spawn_pty(
+            &cmd_rewritten,
+            cwd,
+            Some(&format!("tty_exec: {}", &cmd[..cmd.len().min(40)])),
+            perm_env,
+        )
         .map_err(|e| format!("tty_exec: spawn_pty: {e}"))?;
 
     // ── Pattern-response drive loop ────────────────────────────────────────────
@@ -112,9 +122,10 @@ pub fn tty_exec(args: &Value, store: &Arc<JobStore>, state: &Arc<Mutex<ServerSta
     // Track which response we've sent to avoid flooding on repeated output.
     // For each pattern, record the byte offset after which we last matched it
     // so we only re-fire if new output past that point matches again.
-    let mut last_match_at: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    let mut last_match_at: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
     let mut last_output_len: usize = 0;
-    let mut last_output_at  = Instant::now();
+    let mut last_output_at = Instant::now();
 
     // Byte offset we read up to so far (prevents re-scanning old output).
     let mut scan_cursor: usize = 0;
@@ -124,26 +135,30 @@ pub fn tty_exec(args: &Value, store: &Arc<JobStore>, state: &Arc<Mutex<ServerSta
 
     loop {
         // ── Check job status ─────────────────────────────────────────────────
-        let status = job.status.lock().unwrap().clone();
-        if status.is_terminal() { break; }
+        let status = lock_mutex(&job.status, "tty job status").clone();
+        if status.is_terminal() {
+            break;
+        }
 
         // ── Check deadline ────────────────────────────────────────────────────
         if Instant::now() >= deadline {
             // Kill if still running.
-            unsafe { libc::kill(job.pid as i32, libc::SIGTERM); }
+            unsafe {
+                libc::kill(job.pid as i32, libc::SIGTERM);
+            }
             timed_out = true;
             break;
         }
 
         // ── Read new output ───────────────────────────────────────────────────
         let full_output = {
-            let buf = job.stdout_buf.lock().unwrap();
+            let buf = lock_mutex(&job.stdout_buf, "tty stdout buffer");
             buf.clone()
         };
 
         if full_output.len() != last_output_len {
             last_output_len = full_output.len();
-            last_output_at  = Instant::now();
+            last_output_at = Instant::now();
         } else if last_output_at.elapsed().as_secs() >= idle_done {
             // Program has been quiet for idle_done_secs — assume it's done
             // even if it hasn't sent EOF yet (common with some interactive progs).
@@ -164,7 +179,7 @@ pub fn tty_exec(args: &Value, store: &Arc<JobStore>, state: &Arc<Mutex<ServerSta
                     if window.contains(pat.as_str()) {
                         // Send the answer.
                         if let Some(ref tx) = job.stdin_tx {
-                            let mut stdin = tx.lock().unwrap();
+                            let mut stdin = lock_mutex(tx, "tty stdin");
                             let _ = stdin.write_all(ans.as_bytes());
                             let _ = stdin.flush();
                         }
@@ -189,10 +204,10 @@ pub fn tty_exec(args: &Value, store: &Arc<JobStore>, state: &Arc<Mutex<ServerSta
     // Wait briefly for the process to actually exit after we break.
     let mut wait_ms = 0u64;
     let exit_code = loop {
-        let s = job.status.lock().unwrap().clone();
+        let s = lock_mutex(&job.status, "tty job status").clone();
         match s {
             JobStatus::Done(code) => break code,
-            _ if wait_ms >= 3000  => break -1,
+            _ if wait_ms >= 3000 => break -1,
             _ => {
                 std::thread::sleep(Duration::from_millis(50));
                 wait_ms += 50;
@@ -201,8 +216,8 @@ pub fn tty_exec(args: &Value, store: &Arc<JobStore>, state: &Arc<Mutex<ServerSta
     };
 
     // Collect full output, strip ANSI.
-    let raw_out = job.stdout_buf.lock().unwrap().clone();
-    let output  = strip_ansi(String::from_utf8_lossy(&raw_out).into_owned());
+    let raw_out = lock_mutex(&job.stdout_buf, "tty stdout buffer").clone();
+    let output = strip_ansi(String::from_utf8_lossy(&raw_out).into_owned());
 
     Ok(ToolResult::json(&json!({
         "ok":             exit_code == 0 && !timed_out,
@@ -234,20 +249,27 @@ fn strip_ansi(s: String) -> String {
                 match bytes[i] {
                     b'[' => {
                         i += 1;
-                        while i < bytes.len() && !(0x40..=0x7e).contains(&bytes[i]) { i += 1; }
+                        while i < bytes.len() && !(0x40..=0x7e).contains(&bytes[i]) {
+                            i += 1;
+                        }
                         i += 1;
                     }
                     b']' => {
                         i += 1;
                         while i < bytes.len() && bytes[i] != 0x07 {
-                            if bytes[i] == 0x1b && i+1 < bytes.len() && bytes[i+1] == b'\\' {
-                                i += 2; break;
+                            if bytes[i] == 0x1b && i + 1 < bytes.len() && bytes[i + 1] == b'\\' {
+                                i += 2;
+                                break;
                             }
                             i += 1;
                         }
-                        if i < bytes.len() { i += 1; }
+                        if i < bytes.len() {
+                            i += 1;
+                        }
                     }
-                    _ => { i += 1; }
+                    _ => {
+                        i += 1;
+                    }
                 }
             }
         } else {

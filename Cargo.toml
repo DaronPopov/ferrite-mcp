@@ -1,8 +1,6 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/fercuda-ffi-stub",
-    "crates/ferrite-notify",
     "crates/shell-core",
     "crates/shell-lexer",
     "crates/shell-parser",

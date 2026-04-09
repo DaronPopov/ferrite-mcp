@@ -22,21 +22,37 @@ use crate::protocol::ToolResult;
 // ── Default binary list to check ──────────────────────────────────────────────
 
 const DEFAULT_BINS: &[&str] = &[
-    "python3", "pip3", "node", "npm", "cargo", "rustup",
-    "git", "curl", "wget", "tar", "unzip", "make",
-    "gcc", "g++", "cmake",
-    "apt", "apt-get", "dpkg",
-    "systemctl", "sudo",
-    "docker", "snap",
+    "python3",
+    "pip3",
+    "node",
+    "npm",
+    "cargo",
+    "rustup",
+    "git",
+    "curl",
+    "wget",
+    "tar",
+    "unzip",
+    "make",
+    "gcc",
+    "g++",
+    "cmake",
+    "apt",
+    "apt-get",
+    "dpkg",
+    "systemctl",
+    "sudo",
+    "docker",
+    "snap",
 ];
 
 // ── Endpoints to probe for network reachability ───────────────────────────────
 
 const NETWORK_PROBES: &[(&str, &str)] = &[
-    ("github.com",   "https://github.com"),
-    ("pypi.org",     "https://pypi.org/simple/"),
-    ("crates.io",    "https://crates.io/"),
-    ("npmjs.com",    "https://registry.npmjs.org/"),
+    ("github.com", "https://github.com"),
+    ("pypi.org", "https://pypi.org/simple/"),
+    ("crates.io", "https://crates.io/"),
+    ("npmjs.com", "https://registry.npmjs.org/"),
     ("ubuntu (apt)", "http://archive.ubuntu.com/ubuntu/"),
 ];
 
@@ -60,17 +76,21 @@ pub fn env_doctor(args: &Value) -> Result<ToolResult, String> {
     }
 
     let check_network = args["check_network"].as_bool().unwrap_or(true);
-    let check_disk    = args["check_disk"].as_bool().unwrap_or(true);
+    let check_disk = args["check_disk"].as_bool().unwrap_or(true);
     let check_versions = args["check_versions"].as_bool().unwrap_or(true);
 
     // ── Binary availability ────────────────────────────────────────────────────
-    let mut found:   Vec<Value> = Vec::new();
+    let mut found: Vec<Value> = Vec::new();
     let mut missing: Vec<Value> = Vec::new();
 
     for bin in &bins {
         match which_path(bin) {
             Some(path) => {
-                let ver = if check_versions { tool_version(bin) } else { None };
+                let ver = if check_versions {
+                    tool_version(bin)
+                } else {
+                    None
+                };
                 found.push(json!({
                     "bin":     bin,
                     "path":    path,
@@ -106,16 +126,21 @@ pub fn env_doctor(args: &Value) -> Result<ToolResult, String> {
 
     // ── Network reachability ───────────────────────────────────────────────────
     let network = if check_network {
-        let results: Vec<Value> = NETWORK_PROBES.iter().map(|(name, url)| {
-            let (ok, latency_ms) = probe_url(url);
-            json!({
-                "host":       name,
-                "url":        url,
-                "reachable":  ok,
-                "latency_ms": latency_ms,
+        let results: Vec<Value> = NETWORK_PROBES
+            .iter()
+            .map(|(name, url)| {
+                let (ok, latency_ms) = probe_url(url);
+                json!({
+                    "host":       name,
+                    "url":        url,
+                    "reachable":  ok,
+                    "latency_ms": latency_ms,
+                })
             })
-        }).collect();
-        let all_ok = results.iter().all(|r| r["reachable"].as_bool().unwrap_or(false));
+            .collect();
+        let all_ok = results
+            .iter()
+            .all(|r| r["reachable"].as_bool().unwrap_or(false));
         json!({ "probes": results, "all_reachable": all_ok })
     } else {
         Value::Null
@@ -123,21 +148,19 @@ pub fn env_doctor(args: &Value) -> Result<ToolResult, String> {
 
     // ── Writable directories ───────────────────────────────────────────────────
     let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_owned());
-    let write_checks: Vec<Value> = [
-        home.as_str(),
-        "/tmp",
-        "/usr/local/bin",
-        "/etc/sudoers.d",
-    ].iter().map(|dir| {
-        let writable = is_writable(dir);
-        json!({ "path": dir, "writable": writable })
-    }).collect();
+    let write_checks: Vec<Value> = [home.as_str(), "/tmp", "/usr/local/bin", "/etc/sudoers.d"]
+        .iter()
+        .map(|dir| {
+            let writable = is_writable(dir);
+            json!({ "path": dir, "writable": writable })
+        })
+        .collect();
 
     // ── Sudoers status ────────────────────────────────────────────────────────
     let sudo_status = match permissions::sudoers_status() {
-        permissions::SudoersStatus::Active    => "active",
+        permissions::SudoersStatus::Active => "active",
         permissions::SudoersStatus::StaleUser => "stale_user",
-        permissions::SudoersStatus::Missing   => "missing",
+        permissions::SudoersStatus::Missing => "missing",
     };
 
     // ── Overall health ────────────────────────────────────────────────────────
@@ -148,18 +171,19 @@ pub fn env_doctor(args: &Value) -> Result<ToolResult, String> {
         .collect();
 
     let disk_ok = !check_disk || {
-        disk["root_ok"].as_bool().unwrap_or(true)
-            && disk["home_ok"].as_bool().unwrap_or(true)
+        disk["root_ok"].as_bool().unwrap_or(true) && disk["home_ok"].as_bool().unwrap_or(true)
     };
 
-    let net_ok = !check_network
-        || network["all_reachable"].as_bool().unwrap_or(true);
+    let net_ok = !check_network || network["all_reachable"].as_bool().unwrap_or(true);
 
     let healthy = critical_missing.is_empty() && disk_ok && net_ok;
 
     let mut warnings: Vec<String> = Vec::new();
     if !critical_missing.is_empty() {
-        warnings.push(format!("Critical tools missing: {}", critical_missing.join(", ")));
+        warnings.push(format!(
+            "Critical tools missing: {}",
+            critical_missing.join(", ")
+        ));
     }
     if check_disk && !disk["root_ok"].as_bool().unwrap_or(true) {
         warnings.push("Low disk space on /".to_owned());
@@ -194,7 +218,8 @@ pub fn env_doctor(args: &Value) -> Result<ToolResult, String> {
 
 fn which_path(bin: &str) -> Option<String> {
     let path_var = std::env::var("PATH").unwrap_or_default();
-    path_var.split(':')
+    path_var
+        .split(':')
         .filter(|d| !d.is_empty())
         .map(|d| Path::new(d).join(bin))
         .find(|p| {
@@ -210,21 +235,17 @@ fn tool_version(bin: &str) -> Option<String> {
     // Most tools support --version; a few use -V or version.
     let flag = match bin {
         "cargo" | "rustup" | "rustc" => "-V",
-        _                             => "--version",
+        _ => "--version",
     };
 
-    Command::new(bin)
-        .arg(flag)
-        .output()
-        .ok()
-        .and_then(|o| {
-            let out = String::from_utf8_lossy(&o.stdout).into_owned()
-                + &String::from_utf8_lossy(&o.stderr);
-            // First non-empty line, truncated to 80 chars.
-            out.lines()
-                .find(|l| !l.trim().is_empty())
-                .map(|l| l.trim().chars().take(80).collect())
-        })
+    Command::new(bin).arg(flag).output().ok().and_then(|o| {
+        let out =
+            String::from_utf8_lossy(&o.stdout).into_owned() + &String::from_utf8_lossy(&o.stderr);
+        // First non-empty line, truncated to 80 chars.
+        out.lines()
+            .find(|l| !l.trim().is_empty())
+            .map(|l| l.trim().chars().take(80).collect())
+    })
 }
 
 fn suggest_install(bin: &str) -> &'static str {
@@ -262,9 +283,12 @@ fn probe_url(url: &str) -> (bool, Option<u64>) {
         .args([
             "--silent",
             "--head",
-            "--max-time", "5",
-            "--write-out", "%{http_code}",
-            "--output", "/dev/null",
+            "--max-time",
+            "5",
+            "--write-out",
+            "%{http_code}",
+            "--output",
+            "/dev/null",
             url,
         ])
         .output();
@@ -282,11 +306,16 @@ fn probe_url(url: &str) -> (bool, Option<u64>) {
 
 fn is_writable(path: &str) -> bool {
     let p = Path::new(path);
-    if !p.exists() { return false; }
+    if !p.exists() {
+        return false;
+    }
     // Try creating a temp file in the directory.
     let test = p.join(".ferrite_write_test");
     match std::fs::write(&test, b"") {
-        Ok(_) => { let _ = std::fs::remove_file(&test); true }
+        Ok(_) => {
+            let _ = std::fs::remove_file(&test);
+            true
+        }
         Err(_) => false,
     }
 }

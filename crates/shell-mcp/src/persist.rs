@@ -42,28 +42,32 @@ fn session_path() -> PathBuf {
 /// Serializable snapshot of a Job's state.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JobSnapshot {
-    pub job_id:       String,
-    pub pid:          u32,
-    pub label:        String,
-    pub cmd:          String,
-    pub cwd:          String,
+    pub job_id: String,
+    pub pid: u32,
+    pub label: String,
+    pub cmd: String,
+    pub cwd: String,
     pub started_secs: u64,
     /// "running" | "done" | "killed" | "attached"
-    pub status:       String,
-    pub exit_code:    Option<i32>,
-    pub log_path:     String,
+    pub status: String,
+    pub exit_code: Option<i32>,
+    pub log_path: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct SessionData {
     pub version: u32,
     pub counter: usize,
-    pub jobs:    Vec<JobSnapshot>,
+    pub jobs: Vec<JobSnapshot>,
 }
 
 impl Default for SessionData {
     fn default() -> Self {
-        Self { version: 1, counter: 1, jobs: Vec::new() }
+        Self {
+            version: 1,
+            counter: 1,
+            jobs: Vec::new(),
+        }
     }
 }
 
@@ -78,7 +82,9 @@ impl Persistence {
     pub fn new() -> Self {
         let _ = fs::create_dir_all(data_dir());
         let _ = fs::create_dir_all(logs_dir());
-        Self { session_path: session_path() }
+        Self {
+            session_path: session_path(),
+        }
     }
 
     /// Atomically write session data (write tmp → rename).

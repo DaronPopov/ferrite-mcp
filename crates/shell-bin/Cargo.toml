@@ -24,3 +24,4 @@ shell-tui     = { workspace = true }
 shell-mcp     = { workspace = true }
 anyhow        = { workspace = true }
 serde_json    = { workspace = true }
+toml          = { workspace = true }

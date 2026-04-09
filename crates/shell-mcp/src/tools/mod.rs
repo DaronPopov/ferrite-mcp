@@ -6,18 +6,19 @@ pub mod bg_spawn;
 pub mod bg_window;
 pub mod binary;
 pub mod code;
-pub mod control;
 pub mod config_ux;
+pub mod control;
 pub mod cuda;
 pub mod debug;
 pub mod discovery;
 pub mod dynamic;
 pub mod eda;
+pub mod env_doctor;
 pub mod execution;
 pub mod filesystem;
 pub mod git;
-pub mod git_new;
 pub mod git_guard;
+pub mod git_new;
 pub mod git_write;
 pub mod github;
 pub mod hardware;
@@ -29,6 +30,7 @@ pub mod mobile_session;
 pub mod network;
 pub mod notify;
 pub mod perf_tools;
+pub mod permissions_tool;
 pub mod profiling;
 pub mod project;
 pub mod remote;
@@ -37,9 +39,6 @@ pub mod session;
 pub mod state;
 pub mod symbols;
 pub mod system;
-pub mod env_doctor;
-pub mod fercuda;
-pub mod permissions_tool;
 pub mod tmux;
 pub mod tty_exec;
 pub mod ux_wizard;
@@ -332,39 +331,16 @@ pub fn all_tool_definitions() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "ux_wizard",
-            description: "Interactive question flow for staged config changes. Current workflow: fercuda_authz_limits. op=start|answer|status|apply|reset.",
+            description: "Interactive question flow for staged config changes. Current workflow: role_limits. op=start|answer|status|apply|reset.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
                     "op":         { "type": "string", "enum": ["start","answer","status","apply","reset"], "description": "Wizard operation" },
-                    "workflow":   { "type": "string", "description": "Workflow id (default fercuda_authz_limits)" },
+                    "workflow":   { "type": "string", "description": "Workflow id (default role_limits)" },
                     "question_id":{ "type": "string", "description": "Question id when op=answer" },
                     "value":      { "description": "Answer value when op=answer (string or integer)" }
                 },
                 "required": ["op"]
-            }),
-        },
-        ToolDef {
-            name: "fercuda_runtime",
-            description: "Operate feRcuda through MCP. Preferred contract shape is {action, input, agent_api_version}; legacy {op,...} is still accepted. Supports runtime inspect, session lifecycle, tensor IO, JIT compile/bind/launch, fixed ops, and job control.",
-            input_schema: json!({
-                "type": "object",
-                "properties": {
-                    "agent_api_version": { "type": "string", "description": "Preferred value: v1alpha1" },
-                    "action": { "type": "string", "description": "Canonical action name, e.g. session.create, tensor.upload, jit.kernel.launch" },
-                    "input": {
-                        "type": "object",
-                        "description": "Structured payload for the selected action."
-                    },
-                    "op": {
-                        "type": "string",
-                        "description": "Legacy compatibility field. Prefer 'action' + 'input'."
-                    }
-                },
-                "anyOf": [
-                    { "required": ["action"] },
-                    { "required": ["op"] }
-                ]
             }),
         },
 

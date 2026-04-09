@@ -15,23 +15,21 @@ use serde_json::{json, Value};
 use crate::protocol::ToolResult;
 use crate::server::ServerState;
 use crate::terminal;
+use crate::tools::state::read_cwd;
 
 // ── exec ──────────────────────────────────────────────────────────────────────
 
 pub fn exec_cmd(args: &Value, state: &Arc<Mutex<ServerState>>) -> Result<ToolResult, String> {
     let cmd = args["cmd"].as_str().ok_or("exec: 'cmd' is required")?;
 
-    let state_cwd = state.lock()
-        .map_err(|e| format!("state lock poisoned: {e}"))?.cwd.clone();
+    let state_cwd = read_cwd(state);
     // Re-read config from disk each call so changes take effect without restart
     let config = crate::config::FerriteConfig::load();
 
-    let cwd = args["cwd"].as_str()
-        .map(PathBuf::from)
-        .unwrap_or(state_cwd);
+    let cwd = args["cwd"].as_str().map(PathBuf::from).unwrap_or(state_cwd);
 
     let timeout_secs = args["timeout_secs"].as_u64().unwrap_or(60);
-    let stdin_data   = args["stdin"].as_str().unwrap_or("").to_owned();
+    let stdin_data = args["stdin"].as_str().unwrap_or("").to_owned();
 
     // Pre-process: rewrite command to non-interactive form + inject baseline env.
     // This is transparent — the agent always gets the best-effort non-blocking version.
@@ -53,13 +51,23 @@ pub fn exec_cmd(args: &Value, state: &Arc<Mutex<ServerState>>) -> Result<ToolRes
     // On each failure, classify_error() decides what to do next.
     const MAX_RETRIES: usize = 3;
     let mut current_cmd = cmd_rewritten.clone();
-    let mut attempt      = 0usize;
+    let mut attempt = 0usize;
     let mut recovery_log: Vec<serde_json::Value> = Vec::new();
 
     let result = loop {
-        let title = format!("ferrite | exec: {}", &current_cmd[..current_cmd.len().min(40)]);
-        let raw = run_observed(&current_cmd, &cwd, &extra_env, &stdin_data,
-            Duration::from_secs(timeout_secs), &title, &config);
+        let title = format!(
+            "ferrite | exec: {}",
+            &current_cmd[..current_cmd.len().min(40)]
+        );
+        let raw = run_observed(
+            &current_cmd,
+            &cwd,
+            &extra_env,
+            &stdin_data,
+            Duration::from_secs(timeout_secs),
+            &title,
+            &config,
+        );
 
         let exit_code = raw["exit_code"].as_i64().unwrap_or(-1);
         if exit_code == 0 || attempt >= MAX_RETRIES {
@@ -136,7 +144,15 @@ pub fn run(
     stdin_data: &str,
     timeout: Duration,
 ) -> Value {
-    run_observed(cmd, cwd, extra_env, stdin_data, timeout, "", &Default::default())
+    run_observed(
+        cmd,
+        cwd,
+        extra_env,
+        stdin_data,
+        timeout,
+        "",
+        &Default::default(),
+    )
 }
 
 /// Run a command, optionally opening a terminal observer window.
@@ -162,17 +178,23 @@ fn run_observed(
         .arg(cmd)
         .current_dir(cwd)
         .envs(extra_env.iter().map(|(k, v)| (k.as_str(), v.as_str())))
-        .stdin(if stdin_data.is_empty() { Stdio::null() } else { Stdio::piped() })
+        .stdin(if stdin_data.is_empty() {
+            Stdio::null()
+        } else {
+            Stdio::piped()
+        })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
     {
         Ok(c) => c,
-        Err(e) => return json!({
-            "success": false,
-            "error": format!("failed to spawn: {e}"),
-            "cmd": cmd,
-        }),
+        Err(e) => {
+            return json!({
+                "success": false,
+                "error": format!("failed to spawn: {e}"),
+                "cmd": cmd,
+            })
+        }
     };
 
     // Write stdin if provided
@@ -203,9 +225,9 @@ fn run_observed(
             let mut buf = Vec::new();
             let mut reader = std::io::BufReader::new(stream);
             let mut tmp = [0u8; 4096];
-            let mut log_file = log.as_ref().and_then(|p| {
-                std::fs::OpenOptions::new().append(true).open(p).ok()
-            });
+            let mut log_file = log
+                .as_ref()
+                .and_then(|p| std::fs::OpenOptions::new().append(true).open(p).ok());
             loop {
                 match reader.read(&mut tmp) {
                     Ok(0) | Err(_) => break,
@@ -228,9 +250,9 @@ fn run_observed(
             let mut reader = std::io::BufReader::new(stream);
             let mut tmp = [0u8; 4096];
             // stderr also appends to same log
-            let mut log_file = log.as_ref().and_then(|p| {
-                std::fs::OpenOptions::new().append(true).open(p).ok()
-            });
+            let mut log_file = log
+                .as_ref()
+                .and_then(|p| std::fs::OpenOptions::new().append(true).open(p).ok());
             loop {
                 match reader.read(&mut tmp) {
                     Ok(0) | Err(_) => break,
@@ -282,29 +304,27 @@ fn run_observed(
         .map(|b| strip_ansi(String::from_utf8_lossy(&b).into_owned()))
         .unwrap_or_default();
 
-    let exit_code = exit_status
-        .and_then(|s| s.code())
-        .unwrap_or(-1);
+    let exit_code = exit_status.and_then(|s| s.code()).unwrap_or(-1);
 
     // Signal the terminal observer: awk watches for this line and shows
     // a coloured final status then exits, closing the pipeline cleanly.
     if let Some(ref log) = log_path {
         let marker = format!("FERRITE_DONE:{exit_code}\n");
         let _ = std::fs::OpenOptions::new()
-            .append(true).open(log)
+            .append(true)
+            .open(log)
             .and_then(|mut f| f.write_all(marker.as_bytes()));
     }
 
     // Sidecar PID file path — only present when an observer window was launched.
-    let obs = log_path.as_ref()
-        .map(|l| format!("{}.pid", l.display()));
+    let obs = log_path.as_ref().map(|l| format!("{}.pid", l.display()));
 
     // Compact format for clean success (no stderr, exit 0, no timeout).
     if exit_code == 0 && stderr.is_empty() && !timed_out {
         return match obs {
             Some(pid_file) => json!({ "ok": true, "ms": duration_ms, "out": stdout,
                                       "observer_pid_file": pid_file }),
-            None           => json!({ "ok": true, "ms": duration_ms, "out": stdout }),
+            None => json!({ "ok": true, "ms": duration_ms, "out": stdout }),
         };
     }
 
@@ -327,14 +347,19 @@ fn run_observed(
 // ── build_check ───────────────────────────────────────────────────────────────
 
 pub fn build_check(args: &Value, state: &Arc<Mutex<ServerState>>) -> Result<ToolResult, String> {
-    let file = args["file"].as_str().ok_or("build_check: 'file' is required")?;
+    let file = args["file"]
+        .as_str()
+        .ok_or("build_check: 'file' is required")?;
     let extra_flags: Vec<String> = args["flags"]
         .as_array()
-        .map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_owned)).collect())
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str().map(str::to_owned))
+                .collect()
+        })
         .unwrap_or_default();
 
-    let state_cwd = state.lock()
-        .map_err(|e| format!("state lock poisoned: {e}"))?.cwd.clone();
+    let state_cwd = read_cwd(state);
     let config = crate::config::FerriteConfig::load();
 
     // Resolve file path relative to cwd
@@ -344,7 +369,8 @@ pub fn build_check(args: &Value, state: &Arc<Mutex<ServerState>>) -> Result<Tool
         state_cwd.join(file)
     };
 
-    let filename = file_path.file_name()
+    let filename = file_path
+        .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or(file);
     let title = format!("ferrite | build: {filename}");
@@ -352,15 +378,15 @@ pub fn build_check(args: &Value, state: &Arc<Mutex<ServerState>>) -> Result<Tool
     // Detect build type from file/directory
     let build_type = match args["type"].as_str().unwrap_or("auto") {
         "auto" => detect_build_type(&file_path),
-        t      => t.to_owned(),
+        t => t.to_owned(),
     };
 
     let result = match build_type.as_str() {
-        "cuda"  => build_cuda(&file_path, &extra_flags, &state_cwd, &title, &config),
-        "rust"  => build_rust(&file_path, &extra_flags, &state_cwd, &title, &config),
-        "c"     => build_c(&file_path, &extra_flags, "gcc", &state_cwd, &title, &config),
-        "cpp"   => build_c(&file_path, &extra_flags, "g++", &state_cwd, &title, &config),
-        other   => return Ok(ToolResult::error(format!("unknown build type: {other}"))),
+        "cuda" => build_cuda(&file_path, &extra_flags, &state_cwd, &title, &config),
+        "rust" => build_rust(&file_path, &extra_flags, &state_cwd, &title, &config),
+        "c" => build_c(&file_path, &extra_flags, "gcc", &state_cwd, &title, &config),
+        "cpp" => build_c(&file_path, &extra_flags, "g++", &state_cwd, &title, &config),
+        other => return Ok(ToolResult::error(format!("unknown build type: {other}"))),
     };
 
     Ok(ToolResult::json(&result))
@@ -368,39 +394,54 @@ pub fn build_check(args: &Value, state: &Arc<Mutex<ServerState>>) -> Result<Tool
 
 fn detect_build_type(path: &Path) -> String {
     if path.is_dir() {
-        if path.join("Cargo.toml").exists() { return "rust".to_owned(); }
-        if path.join("CMakeLists.txt").exists() { return "cmake".to_owned(); }
+        if path.join("Cargo.toml").exists() {
+            return "rust".to_owned();
+        }
+        if path.join("CMakeLists.txt").exists() {
+            return "cmake".to_owned();
+        }
     }
     match path.extension().and_then(|e| e.to_str()) {
-        Some("cu")                        => "cuda",
-        Some("rs")                        => "rust",
-        Some("c")                         => "c",
+        Some("cu") => "cuda",
+        Some("rs") => "rust",
+        Some("c") => "c",
         Some("cc") | Some("cpp") | Some("cxx") => "cpp",
-        _                                 => "unknown",
-    }.to_owned()
+        _ => "unknown",
+    }
+    .to_owned()
 }
 
 // ── CUDA build ────────────────────────────────────────────────────────────────
 
-fn build_cuda(file: &Path, extra_flags: &[String], cwd: &Path, title: &str, config: &crate::config::FerriteConfig) -> Value {
+fn build_cuda(
+    file: &Path,
+    extra_flags: &[String],
+    cwd: &Path,
+    title: &str,
+    config: &crate::config::FerriteConfig,
+) -> Value {
     let nvcc = match which_bin("nvcc") {
         Some(p) => p,
-        None => return json!({
-            "success": false,
-            "error": "nvcc not found — is CUDA installed and in PATH?",
-        }),
+        None => {
+            return json!({
+                "success": false,
+                "error": "nvcc not found — is CUDA installed and in PATH?",
+            })
+        }
     };
 
     let source_file = match resolve_cuda_source(file) {
         Ok(path) => path,
-        Err((message, candidates)) => return json!({
-            "success": false,
-            "build_type": "cuda",
-            "compiler": nvcc,
-            "error": message,
-            "candidate_count": candidates.len(),
-            "candidates": candidates,
-        }),
+        Err((message, candidates)) => {
+            return json!({
+                "success": false,
+                "build_type": "cuda",
+                "compiler": nvcc,
+                "error": message,
+                "candidate_count": candidates.len(),
+                "candidates": candidates,
+            })
+        }
     };
 
     // Detect compute capability from cached gpu_info
@@ -410,7 +451,7 @@ fn build_cuda(file: &Path, extra_flags: &[String], cwd: &Path, title: &str, conf
 
     let mut cmd_parts = vec![
         nvcc.clone(),
-        "-c".to_owned(),                        // compile only, no link
+        "-c".to_owned(), // compile only, no link
         "-o".to_owned(),
         out_path.display().to_string(),
     ];
@@ -457,7 +498,10 @@ fn resolve_cuda_source(path: &Path) -> Result<PathBuf, (String, Vec<String>)> {
             return Ok(path.to_owned());
         }
         return Err((
-            format!("CUDA build_check expects a .cu file, got '{}'", path.display()),
+            format!(
+                "CUDA build_check expects a .cu file, got '{}'",
+                path.display()
+            ),
             Vec::new(),
         ));
     }
@@ -491,7 +535,9 @@ fn resolve_cuda_source(path: &Path) -> Result<PathBuf, (String, Vec<String>)> {
 }
 
 fn collect_cuda_sources(dir: &Path, out: &mut Vec<String>) {
-    let Ok(entries) = fs::read_dir(dir) else { return; };
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
     for entry in entries.flatten() {
         let path = entry.path();
         if path.is_dir() {
@@ -528,14 +574,17 @@ fn detect_cuda_arch_flags() -> Vec<String> {
     }
 
     // Conservative fallback — runs on anything Pascal+
-    vec!["-arch=compute_60".to_owned(), "-code=sm_60,compute_60".to_owned()]
+    vec![
+        "-arch=compute_60".to_owned(),
+        "-code=sm_60,compute_60".to_owned(),
+    ]
 }
 
 /// Parse nvcc diagnostic output into structured error/warning lists.
 ///
 /// nvcc format: `path/to/file.cu(line,col): severity: message`
 fn parse_nvcc_output(output: &str) -> (Vec<Value>, Vec<Value>) {
-    let mut errors   = Vec::new();
+    let mut errors = Vec::new();
     let mut warnings = Vec::new();
 
     for line in output.lines() {
@@ -560,21 +609,24 @@ fn try_parse_nvcc_line(line: &str) -> Option<Value> {
     let paren = line.find('(')?;
     let close = line[paren..].find(')')?;
     let file = line[..paren].trim();
-    let loc  = &line[paren + 1..paren + close];
+    let loc = &line[paren + 1..paren + close];
 
     // Parse line[,col]
     let (ln, col) = if let Some(comma) = loc.find(',') {
-        (loc[..comma].parse::<u32>().ok(), loc[comma+1..].parse::<u32>().ok())
+        (
+            loc[..comma].parse::<u32>().ok(),
+            loc[comma + 1..].parse::<u32>().ok(),
+        )
     } else {
         (loc.parse::<u32>().ok(), None)
     };
 
-    let rest = line[paren + close + 1..].trim();  // ": severity: message"
+    let rest = line[paren + close + 1..].trim(); // ": severity: message"
     let rest = rest.strip_prefix(':')?;
 
     let colon = rest.find(':')?;
     let severity = rest[..colon].trim().to_owned();
-    let message  = rest[colon+1..].trim().to_owned();
+    let message = rest[colon + 1..].trim().to_owned();
 
     Some(json!({
         "file": file,
@@ -587,7 +639,13 @@ fn try_parse_nvcc_line(line: &str) -> Option<Value> {
 
 // ── Rust / Cargo build ────────────────────────────────────────────────────────
 
-fn build_rust(file: &Path, extra_flags: &[String], cwd: &Path, title: &str, config: &crate::config::FerriteConfig) -> Value {
+fn build_rust(
+    file: &Path,
+    extra_flags: &[String],
+    cwd: &Path,
+    title: &str,
+    config: &crate::config::FerriteConfig,
+) -> Value {
     // If file is a directory or Cargo.toml, run cargo check from there.
     // If it's a .rs file, cargo check the parent package.
     let cargo_dir = if file.is_dir() {
@@ -603,7 +661,15 @@ fn build_rust(file: &Path, extra_flags: &[String], cwd: &Path, title: &str, conf
     flags.extend(extra_flags.iter().cloned());
 
     let cmd = format!("cargo check {}", flags.join(" "));
-    let raw = run_observed(&cmd, &cargo_dir, &[], "", Duration::from_secs(180), title, config);
+    let raw = run_observed(
+        &cmd,
+        &cargo_dir,
+        &[],
+        "",
+        Duration::from_secs(180),
+        title,
+        config,
+    );
 
     let stderr = raw["stderr"].as_str().unwrap_or("").to_owned();
     let stdout = raw["stdout"].as_str().unwrap_or("").to_owned();
@@ -627,21 +693,28 @@ fn build_rust(file: &Path, extra_flags: &[String], cwd: &Path, title: &str, conf
 
 /// Parse `cargo check --message-format=json` stdout.
 fn parse_cargo_json_output(stdout: &str) -> (Vec<Value>, Vec<Value>) {
-    let mut errors   = Vec::new();
+    let mut errors = Vec::new();
     let mut warnings = Vec::new();
 
     for line in stdout.lines() {
-        let Ok(msg) = serde_json::from_str::<Value>(line) else { continue };
-        if msg["reason"] != "compiler-message" { continue; }
+        let Ok(msg) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        if msg["reason"] != "compiler-message" {
+            continue;
+        }
 
         let m = &msg["message"];
         let level = m["level"].as_str().unwrap_or("");
-        let text  = m["message"].as_str().unwrap_or("").to_owned();
-        let code  = m["code"]["code"].as_str().map(str::to_owned);
+        let text = m["message"].as_str().unwrap_or("").to_owned();
+        let code = m["code"]["code"].as_str().map(str::to_owned);
 
         // Collect primary span
-        let span = m["spans"].as_array()
-            .and_then(|spans| spans.iter().find(|s| s["is_primary"].as_bool().unwrap_or(false)));
+        let span = m["spans"].as_array().and_then(|spans| {
+            spans
+                .iter()
+                .find(|s| s["is_primary"].as_bool().unwrap_or(false))
+        });
 
         let diag = json!({
             "severity": level,
@@ -666,14 +739,23 @@ fn parse_cargo_json_output(stdout: &str) -> (Vec<Value>, Vec<Value>) {
 fn find_cargo_root(from: &Path) -> Option<PathBuf> {
     let mut dir = if from.is_file() { from.parent()? } else { from };
     loop {
-        if dir.join("Cargo.toml").exists() { return Some(dir.to_owned()); }
+        if dir.join("Cargo.toml").exists() {
+            return Some(dir.to_owned());
+        }
         dir = dir.parent()?;
     }
 }
 
 // ── C / C++ build ─────────────────────────────────────────────────────────────
 
-fn build_c(file: &Path, extra_flags: &[String], compiler: &str, cwd: &Path, title: &str, config: &crate::config::FerriteConfig) -> Value {
+fn build_c(
+    file: &Path,
+    extra_flags: &[String],
+    compiler: &str,
+    cwd: &Path,
+    title: &str,
+    config: &crate::config::FerriteConfig,
+) -> Value {
     let out = std::env::temp_dir().join("ferrite_build_check.o");
     let mut parts = vec![
         compiler.to_owned(),
@@ -712,20 +794,24 @@ fn build_c(file: &Path, extra_flags: &[String], compiler: &str, cwd: &Path, titl
 /// Parse GCC/Clang diagnostic output.
 /// Format: `file.c:line:col: severity: message`
 fn parse_gcc_output(output: &str) -> (Vec<Value>, Vec<Value>) {
-    let mut errors   = Vec::new();
+    let mut errors = Vec::new();
     let mut warnings = Vec::new();
 
     for line in output.lines() {
         let parts: Vec<&str> = line.splitn(5, ':').collect();
-        if parts.len() < 5 { continue; }
+        if parts.len() < 5 {
+            continue;
+        }
 
-        let file     = parts[0].trim();
-        let ln       = parts[1].trim().parse::<u32>().ok();
-        let col      = parts[2].trim().parse::<u32>().ok();
+        let file = parts[0].trim();
+        let ln = parts[1].trim().parse::<u32>().ok();
+        let col = parts[2].trim().parse::<u32>().ok();
         let severity = parts[3].trim();
-        let message  = parts[4].trim();
+        let message = parts[4].trim();
 
-        if !matches!(severity, "error" | "warning" | "note" | "fatal error") { continue; }
+        if !matches!(severity, "error" | "warning" | "note" | "fatal error") {
+            continue;
+        }
 
         let diag = json!({
             "file": file,
@@ -751,12 +837,13 @@ fn parse_gcc_output(output: &str) -> (Vec<Value>, Vec<Value>) {
 /// This lets Claude define an entire multi-step workflow as one atomic tool call,
 /// avoiding per-step round-trips for long hardware experiments or data sweeps.
 pub fn task_run(args: &Value, state: &Arc<Mutex<ServerState>>) -> Result<ToolResult, String> {
-    let script      = args["script"].as_str().ok_or("task_run: 'script' is required")?;
+    let script = args["script"]
+        .as_str()
+        .ok_or("task_run: 'script' is required")?;
     let interpreter = args["interpreter"].as_str().unwrap_or("python3");
-    let timeout     = args["timeout_secs"].as_u64().unwrap_or(120);
+    let timeout = args["timeout_secs"].as_u64().unwrap_or(120);
 
-    let state_cwd = state.lock()
-        .map_err(|e| format!("state lock poisoned: {e}"))?.cwd.clone();
+    let state_cwd = read_cwd(state);
     let config = crate::config::FerriteConfig::load();
     let cwd = args["cwd"].as_str().map(PathBuf::from).unwrap_or(state_cwd);
 
@@ -769,7 +856,11 @@ pub fn task_run(args: &Value, state: &Arc<Mutex<ServerState>>) -> Result<ToolRes
         ));
     }
 
-    let ext = if interpreter.starts_with("python") { "py" } else { "sh" };
+    let ext = if interpreter.starts_with("python") {
+        "py"
+    } else {
+        "sh"
+    };
 
     let ts = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -777,12 +868,19 @@ pub fn task_run(args: &Value, state: &Arc<Mutex<ServerState>>) -> Result<ToolRes
         .as_millis();
     let script_path = std::env::temp_dir().join(format!("ferrite_task_{ts}.{ext}"));
 
-    std::fs::write(&script_path, script)
-        .map_err(|e| format!("task_run: write tempfile: {e}"))?;
+    std::fs::write(&script_path, script).map_err(|e| format!("task_run: write tempfile: {e}"))?;
 
     let cmd = format!("{interpreter} {}", script_path.display());
     let title = format!("ferrite | task: {interpreter}");
-    let result = run_observed(&cmd, &cwd, &[], "", Duration::from_secs(timeout), &title, &config);
+    let result = run_observed(
+        &cmd,
+        &cwd,
+        &[],
+        "",
+        Duration::from_secs(timeout),
+        &title,
+        &config,
+    );
 
     let _ = std::fs::remove_file(&script_path);
 
@@ -799,9 +897,7 @@ pub fn launch(args: &Value, state: &Arc<Mutex<ServerState>>) -> Result<ToolResul
 
     let cmd = args["cmd"].as_str().ok_or("launch: 'cmd' is required")?;
 
-    let state_cwd = state.lock()
-        .map_err(|e| format!("state lock poisoned: {e}"))?
-        .cwd.clone();
+    let state_cwd = read_cwd(state);
     let cwd = args["cwd"].as_str().map(PathBuf::from).unwrap_or(state_cwd);
 
     let child = Command::new("/bin/sh")
@@ -858,15 +954,19 @@ fn strip_ansi(s: String) -> String {
                         // OSC: ESC ] ... ST (BEL or ESC \)
                         i += 1;
                         while i < bytes.len() && bytes[i] != 0x07 {
-                            if bytes[i] == 0x1b && i + 1 < bytes.len() && bytes[i+1] == b'\\' {
+                            if bytes[i] == 0x1b && i + 1 < bytes.len() && bytes[i + 1] == b'\\' {
                                 i += 2;
                                 break;
                             }
                             i += 1;
                         }
-                        if i < bytes.len() { i += 1; }
+                        if i < bytes.len() {
+                            i += 1;
+                        }
                     }
-                    _ => { i += 1; } // skip whatever follows ESC
+                    _ => {
+                        i += 1;
+                    } // skip whatever follows ESC
                 }
             }
         } else {
@@ -879,12 +979,17 @@ fn strip_ansi(s: String) -> String {
 
 fn which_bin(name: &str) -> Option<String> {
     let path_var = std::env::var("PATH").unwrap_or_default();
-    path_var.split(':').filter(|d| !d.is_empty()).map(|d| {
-        std::path::PathBuf::from(d).join(name)
-    }).find(|p| {
-        use std::os::unix::fs::PermissionsExt;
-        p.metadata().map(|m| m.is_file() && m.permissions().mode() & 0o111 != 0).unwrap_or(false)
-    }).map(|p| p.display().to_string())
+    path_var
+        .split(':')
+        .filter(|d| !d.is_empty())
+        .map(|d| std::path::PathBuf::from(d).join(name))
+        .find(|p| {
+            use std::os::unix::fs::PermissionsExt;
+            p.metadata()
+                .map(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+                .unwrap_or(false)
+        })
+        .map(|p| p.display().to_string())
 }
 
 // ── close_observer ────────────────────────────────────────────────────────────
@@ -900,13 +1005,15 @@ fn which_bin(name: &str) -> Option<String> {
 pub fn close_observer(args: &Value) -> Result<ToolResult, String> {
     let pid_file = match args["pid_file"].as_str() {
         Some(f) => f.to_owned(),
-        None    => find_newest_pid_file()?,
+        None => find_newest_pid_file()?,
     };
 
     let text = std::fs::read_to_string(&pid_file)
         .map_err(|e| format!("close_observer: read '{pid_file}': {e}"))?;
 
-    let pid: i32 = text.trim().parse()
+    let pid: i32 = text
+        .trim()
+        .parse()
         .map_err(|_| format!("close_observer: invalid PID '{}'", text.trim()))?;
 
     let rc = unsafe { libc::kill(pid, libc::SIGTERM) };
@@ -940,10 +1047,17 @@ fn find_newest_pid_file() -> Result<String, String> {
         .collect();
 
     if entries.is_empty() {
-        return Err("close_observer: no active observer found — no /tmp/ferrite_exec_*.pid files".to_string());
+        return Err(
+            "close_observer: no active observer found — no /tmp/ferrite_exec_*.pid files"
+                .to_string(),
+        );
     }
 
-    entries.sort_by_key(|e| e.metadata().and_then(|m| m.modified()).unwrap_or(std::time::SystemTime::UNIX_EPOCH));
+    entries.sort_by_key(|e| {
+        e.metadata()
+            .and_then(|m| m.modified())
+            .unwrap_or(std::time::SystemTime::UNIX_EPOCH)
+    });
     Ok(entries.last().unwrap().path().display().to_string())
 }
 
@@ -951,11 +1065,15 @@ fn cuda_include_dir() -> Option<String> {
     for var in ["CUDA_HOME", "CUDA_PATH", "CUDA_ROOT"] {
         if let Ok(v) = std::env::var(var) {
             let inc = format!("{v}/include");
-            if Path::new(&inc).exists() { return Some(inc); }
+            if Path::new(&inc).exists() {
+                return Some(inc);
+            }
         }
     }
     for p in ["/usr/local/cuda/include", "/usr/include/cuda"] {
-        if Path::new(p).exists() { return Some(p.to_owned()); }
+        if Path::new(p).exists() {
+            return Some(p.to_owned());
+        }
     }
     None
 }

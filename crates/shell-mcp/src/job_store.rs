@@ -16,7 +16,8 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use crate::persist::{JobSnapshot, Persistence, SessionData, log_path_for};
+use crate::persist::{log_path_for, JobSnapshot, Persistence, SessionData};
+use crate::tools::state::lock_mutex;
 
 // PTY support
 use std::os::unix::io::FromRawFd;
@@ -37,21 +38,25 @@ impl JobStatus {
     pub fn label(&self) -> &'static str {
         match self {
             JobStatus::Running | JobStatus::Attached => "running",
-            JobStatus::Done(_)                       => "done",
-            JobStatus::Killed                        => "killed",
+            JobStatus::Done(_) => "done",
+            JobStatus::Killed => "killed",
         }
     }
     pub fn exit_code(&self) -> Option<i32> {
-        if let JobStatus::Done(c) = self { Some(*c) } else { None }
+        if let JobStatus::Done(c) = self {
+            Some(*c)
+        } else {
+            None
+        }
     }
     pub fn is_terminal(&self) -> bool {
         matches!(self, JobStatus::Done(_) | JobStatus::Killed)
     }
     fn as_snapshot_str(&self) -> &'static str {
         match self {
-            JobStatus::Running  => "running",
-            JobStatus::Done(_)  => "done",
-            JobStatus::Killed   => "killed",
+            JobStatus::Running => "running",
+            JobStatus::Done(_) => "done",
+            JobStatus::Killed => "killed",
             JobStatus::Attached => "attached",
         }
     }
@@ -60,16 +65,16 @@ impl JobStatus {
 // ── Job ───────────────────────────────────────────────────────────────────────
 
 pub struct Job {
-    pub job_id:     String,
-    pub pid:        u32,
-    pub label:      String,
-    pub cmd:        String,
-    pub cwd:        PathBuf,
-    pub status:     Arc<Mutex<JobStatus>>,
+    pub job_id: String,
+    pub pid: u32,
+    pub label: String,
+    pub cmd: String,
+    pub cwd: PathBuf,
+    pub status: Arc<Mutex<JobStatus>>,
     pub stdout_buf: Arc<Mutex<Vec<u8>>>,
     pub stderr_buf: Arc<Mutex<Vec<u8>>>,
     /// Persistent combined log file — survives ferrite restarts.
-    pub log_path:   PathBuf,
+    pub log_path: PathBuf,
     /// Cursor for incremental bg_status reads.
     pub stdout_cursor: Mutex<usize>,
     pub stderr_cursor: Mutex<usize>,
@@ -91,43 +96,47 @@ impl Job {
     }
 
     pub fn drain_new_stdout(&self) -> Vec<u8> {
-        let buf = self.stdout_buf.lock().unwrap();
-        let mut cur = self.stdout_cursor.lock().unwrap();
+        let buf = lock_mutex(&self.stdout_buf, "job stdout buffer");
+        let mut cur = lock_mutex(&self.stdout_cursor, "job stdout cursor");
         let slice = buf[*cur..].to_vec();
         *cur = buf.len();
         slice
     }
 
     pub fn drain_new_stderr(&self) -> Vec<u8> {
-        let buf = self.stderr_buf.lock().unwrap();
-        let mut cur = self.stderr_cursor.lock().unwrap();
+        let buf = lock_mutex(&self.stderr_buf, "job stderr buffer");
+        let mut cur = lock_mutex(&self.stderr_cursor, "job stderr cursor");
         let slice = buf[*cur..].to_vec();
         *cur = buf.len();
         slice
     }
 
     pub fn full_stdout(&self) -> Vec<u8> {
-        self.stdout_buf.lock().unwrap().clone()
+        lock_mutex(&self.stdout_buf, "job stdout buffer").clone()
     }
     pub fn full_stderr(&self) -> Vec<u8> {
-        self.stderr_buf.lock().unwrap().clone()
+        lock_mutex(&self.stderr_buf, "job stderr buffer").clone()
     }
     pub fn stdout_bytes(&self) -> usize {
-        self.stdout_buf.lock().unwrap().len()
+        lock_mutex(&self.stdout_buf, "job stdout buffer").len()
     }
     pub fn stderr_bytes(&self) -> usize {
-        self.stderr_buf.lock().unwrap().len()
+        lock_mutex(&self.stderr_buf, "job stderr buffer").len()
     }
     pub fn current_status(&self) -> JobStatus {
-        self.status.lock().unwrap().clone()
+        lock_mutex(&self.status, "job status").clone()
     }
 
     /// Block until terminal state or timeout. Returns true if completed.
     pub fn wait(&self, timeout: Duration) -> bool {
         let deadline = Instant::now() + timeout;
         loop {
-            if self.current_status().is_terminal() { return true; }
-            if Instant::now() >= deadline { return false; }
+            if self.current_status().is_terminal() {
+                return true;
+            }
+            if Instant::now() >= deadline {
+                return false;
+            }
             thread::sleep(Duration::from_millis(150));
         }
     }
@@ -135,15 +144,15 @@ impl Job {
     pub fn to_snapshot(&self) -> JobSnapshot {
         let status = self.current_status();
         JobSnapshot {
-            job_id:       self.job_id.clone(),
-            pid:          self.pid,
-            label:        self.label.clone(),
-            cmd:          self.cmd.clone(),
-            cwd:          self.cwd.display().to_string(),
+            job_id: self.job_id.clone(),
+            pid: self.pid,
+            label: self.label.clone(),
+            cmd: self.cmd.clone(),
+            cwd: self.cwd.display().to_string(),
             started_secs: self.started_secs,
-            status:       status.as_snapshot_str().to_string(),
-            exit_code:    status.exit_code(),
-            log_path:     self.log_path.display().to_string(),
+            status: status.as_snapshot_str().to_string(),
+            exit_code: status.exit_code(),
+            log_path: self.log_path.display().to_string(),
         }
     }
 }
@@ -151,8 +160,8 @@ impl Job {
 // ── JobStore ──────────────────────────────────────────────────────────────────
 
 pub struct JobStore {
-    jobs:        Mutex<HashMap<String, Arc<Job>>>,
-    counter:     AtomicUsize,
+    jobs: Mutex<HashMap<String, Arc<Job>>>,
+    counter: AtomicUsize,
     persistence: Arc<Persistence>,
 }
 
@@ -160,8 +169,8 @@ impl JobStore {
     #[allow(dead_code)]
     pub fn new(persistence: Arc<Persistence>) -> Self {
         Self {
-            jobs:        Mutex::new(HashMap::new()),
-            counter:     AtomicUsize::new(1),
+            jobs: Mutex::new(HashMap::new()),
+            counter: AtomicUsize::new(1),
             persistence,
         }
     }
@@ -192,9 +201,8 @@ impl JobStore {
             .ok()
             .and_then(|o| {
                 let s = String::from_utf8_lossy(&o.stdout).into_owned();
-                s.find("sec = ").and_then(|i| {
-                    s[i + 6..].split([',', '}']).next()?.trim().parse().ok()
-                })
+                s.find("sec = ")
+                    .and_then(|i| s[i + 6..].split([',', '}']).next()?.trim().parse().ok())
             })
             .unwrap_or(0)
     }
@@ -208,8 +216,8 @@ impl JobStore {
         let counter_start = data.counter.max(1);
 
         let store = Self {
-            jobs:        Mutex::new(HashMap::new()),
-            counter:     AtomicUsize::new(counter_start),
+            jobs: Mutex::new(HashMap::new()),
+            counter: AtomicUsize::new(counter_start),
             persistence: Arc::clone(&persistence),
         };
 
@@ -239,39 +247,39 @@ impl JobStore {
             if should_poll {
                 let status_t = Arc::clone(&status_arc);
                 let pid = snap.pid;
-                thread::spawn(move || {
-                    loop {
-                        thread::sleep(Duration::from_secs(1));
-                        {
-                            let s = status_t.lock().unwrap();
-                            if s.is_terminal() { break; }
-                        }
-                        if !pid_alive(pid) {
-                            *status_t.lock().unwrap() = JobStatus::Done(-1);
+                thread::spawn(move || loop {
+                    thread::sleep(Duration::from_secs(1));
+                    {
+                        let s = lock_mutex(&status_t, "restored job status");
+                        if s.is_terminal() {
                             break;
                         }
+                    }
+                    if !pid_alive(pid) {
+                        *lock_mutex(&status_t, "restored job status") = JobStatus::Done(-1);
+                        break;
                     }
                 });
             }
 
             let job = Arc::new(Job {
-                job_id:        snap.job_id.clone(),
-                pid:           snap.pid,
-                label:         snap.label,
-                cmd:           snap.cmd,
-                cwd:           PathBuf::from(snap.cwd),
-                status:        status_arc,
-                stdout_buf:    Arc::new(Mutex::new(Vec::new())),
-                stderr_buf:    Arc::new(Mutex::new(Vec::new())),
-                log_path:      PathBuf::from(snap.log_path),
+                job_id: snap.job_id.clone(),
+                pid: snap.pid,
+                label: snap.label,
+                cmd: snap.cmd,
+                cwd: PathBuf::from(snap.cwd),
+                status: status_arc,
+                stdout_buf: Arc::new(Mutex::new(Vec::new())),
+                stderr_buf: Arc::new(Mutex::new(Vec::new())),
+                log_path: PathBuf::from(snap.log_path),
                 stdout_cursor: Mutex::new(0),
                 stderr_cursor: Mutex::new(0),
-                started_secs:  snap.started_secs,
-                stdin_tx:      None,  // PTY master not restored across restarts
-                is_pty:        false,
+                started_secs: snap.started_secs,
+                stdin_tx: None, // PTY master not restored across restarts
+                is_pty: false,
             });
 
-            store.jobs.lock().unwrap().insert(snap.job_id, job);
+            lock_mutex(&store.jobs, "job store map").insert(snap.job_id, job);
         }
 
         store
@@ -284,7 +292,7 @@ impl JobStore {
 
     /// Snapshot all jobs and save to disk. Called after mutations.
     pub fn persist_all(&self) {
-        let jobs = self.jobs.lock().unwrap();
+        let jobs = lock_mutex(&self.jobs, "job store map");
         let counter = self.counter.load(Ordering::Relaxed);
         let snapshots: Vec<JobSnapshot> = jobs.values().map(|j| j.to_snapshot()).collect();
         self.persistence.save(&SessionData {
@@ -303,8 +311,8 @@ impl JobStore {
         label: Option<&str>,
         extra_env: Vec<(String, String)>,
     ) -> Result<Arc<Job>, String> {
-        let job_id   = self.next_id();
-        let label    = label.unwrap_or(cmd).to_string();
+        let job_id = self.next_id();
+        let label = label.unwrap_or(cmd).to_string();
         let log_path = log_path_for(&job_id);
 
         let mut child = Command::new("/bin/sh")
@@ -318,7 +326,7 @@ impl JobStore {
             .spawn()
             .map_err(|e| format!("spawn failed: {e}"))?;
 
-        let pid         = child.id();
+        let pid = child.id();
         let stdout_pipe = child.stdout.take().unwrap();
         let stderr_pipe = child.stderr.take().unwrap();
 
@@ -327,16 +335,18 @@ impl JobStore {
             .unwrap_or_default()
             .as_secs();
 
-        let status     = Arc::new(Mutex::new(JobStatus::Running));
+        let status = Arc::new(Mutex::new(JobStatus::Running));
         let stdout_buf = Arc::new(Mutex::new(Vec::<u8>::new()));
         let stderr_buf = Arc::new(Mutex::new(Vec::<u8>::new()));
 
         // Shared log file — both stdout and stderr threads write here.
         let log_file: Arc<Mutex<Option<fs::File>>> = Arc::new(Mutex::new(
             fs::OpenOptions::new()
-                .create(true).write(true).truncate(true)
+                .create(true)
+                .write(true)
+                .truncate(true)
                 .open(&log_path)
-                .ok()
+                .ok(),
         ));
 
         // ── stdout reader thread ──────────────────────────────────────────────
@@ -345,14 +355,14 @@ impl JobStore {
             let log_t = Arc::clone(&log_file);
             thread::spawn(move || {
                 let mut reader = std::io::BufReader::new(stdout_pipe);
-                let mut chunk  = [0u8; 8192];
+                let mut chunk = [0u8; 8192];
                 loop {
                     match reader.read(&mut chunk) {
                         Ok(0) | Err(_) => break,
                         Ok(n) => {
                             let data = &chunk[..n];
-                            buf_t.lock().unwrap().extend_from_slice(data);
-                            if let Some(ref mut f) = *log_t.lock().unwrap() {
+                            lock_mutex(&buf_t, "job stdout buffer").extend_from_slice(data);
+                            if let Some(ref mut f) = *lock_mutex(&log_t, "job log file") {
                                 let _ = f.write_all(data);
                                 let _ = f.flush();
                             }
@@ -368,14 +378,14 @@ impl JobStore {
             let log_t = Arc::clone(&log_file);
             thread::spawn(move || {
                 let mut reader = std::io::BufReader::new(stderr_pipe);
-                let mut chunk  = [0u8; 8192];
+                let mut chunk = [0u8; 8192];
                 loop {
                     match reader.read(&mut chunk) {
                         Ok(0) | Err(_) => break,
                         Ok(n) => {
                             let data = &chunk[..n];
-                            buf_t.lock().unwrap().extend_from_slice(data);
-                            if let Some(ref mut f) = *log_t.lock().unwrap() {
+                            lock_mutex(&buf_t, "job stderr buffer").extend_from_slice(data);
+                            if let Some(ref mut f) = *lock_mutex(&log_t, "job log file") {
                                 let _ = f.write_all(data);
                                 let _ = f.flush();
                             }
@@ -387,14 +397,14 @@ impl JobStore {
 
         // ── waiter thread — marks job done, writes sentinel, triggers persist ──
         {
-            let status_t   = Arc::clone(&status);
+            let status_t = Arc::clone(&status);
             let log_path_t = log_path.clone();
             thread::spawn(move || {
                 let code = match child.wait() {
                     Ok(exit) => exit.code().unwrap_or(-1),
-                    Err(_)   => -1,
+                    Err(_) => -1,
                 };
-                *status_t.lock().unwrap() = JobStatus::Done(code);
+                *lock_mutex(&status_t, "job status") = JobStatus::Done(code);
                 // Write FERRITE_DONE sentinel so colorized_watch_cmd banner triggers.
                 // Note: full persist_all is triggered by the next tool call that
                 // reads this job's status. See query.rs bg_status / bg_list.
@@ -406,10 +416,10 @@ impl JobStore {
         }
 
         let job = Arc::new(Job {
-            job_id:        job_id.clone(),
+            job_id: job_id.clone(),
             pid,
             label,
-            cmd:           cmd.to_string(),
+            cmd: cmd.to_string(),
             cwd,
             status,
             stdout_buf,
@@ -418,11 +428,11 @@ impl JobStore {
             stdout_cursor: Mutex::new(0),
             stderr_cursor: Mutex::new(0),
             started_secs,
-            stdin_tx:      None,
-            is_pty:        false,
+            stdin_tx: None,
+            is_pty: false,
         });
 
-        self.jobs.lock().unwrap().insert(job_id, Arc::clone(&job));
+        lock_mutex(&self.jobs, "job store map").insert(job_id, Arc::clone(&job));
         self.persist_all();
         Ok(job)
     }
@@ -438,23 +448,31 @@ impl JobStore {
         label: Option<&str>,
         extra_env: Vec<(String, String)>,
     ) -> Result<Arc<Job>, String> {
-        let job_id   = self.next_id();
-        let label    = label.unwrap_or(cmd).to_string();
+        let job_id = self.next_id();
+        let label = label.unwrap_or(cmd).to_string();
         let log_path = crate::persist::log_path_for(&job_id);
 
         // Open PTY master + slave via POSIX API (no libutil needed).
         let (master_raw, slave_raw) = unsafe { open_pty() }?;
 
         // Dup slave for stdin/stdout/stderr; Stdio::from_raw_fd takes ownership.
-        let slave_in  = unsafe { libc::dup(slave_raw) };
+        let slave_in = unsafe { libc::dup(slave_raw) };
         let slave_out = unsafe { libc::dup(slave_raw) };
         let slave_err = unsafe { libc::dup(slave_raw) };
         if slave_in < 0 || slave_out < 0 || slave_err < 0 {
-            unsafe { libc::close(master_raw); libc::close(slave_raw); }
-            return Err(format!("spawn_pty: dup slave fd: {}", std::io::Error::last_os_error()));
+            unsafe {
+                libc::close(master_raw);
+                libc::close(slave_raw);
+            }
+            return Err(format!(
+                "spawn_pty: dup slave fd: {}",
+                std::io::Error::last_os_error()
+            ));
         }
         // Close the original slave in the parent after dup.
-        unsafe { libc::close(slave_raw); }
+        unsafe {
+            libc::close(slave_raw);
+        }
 
         let mut cmd_builder = Command::new("/bin/sh");
         cmd_builder
@@ -462,7 +480,7 @@ impl JobStore {
             .arg(cmd)
             .current_dir(&cwd)
             .envs(extra_env.iter().map(|(k, v)| (k.as_str(), v.as_str())))
-            .stdin(unsafe  { Stdio::from_raw_fd(slave_in) })
+            .stdin(unsafe { Stdio::from_raw_fd(slave_in) })
             .stdout(unsafe { Stdio::from_raw_fd(slave_out) })
             .stderr(unsafe { Stdio::from_raw_fd(slave_err) });
 
@@ -475,7 +493,9 @@ impl JobStore {
             });
         }
 
-        let child = cmd_builder.spawn().map_err(|e| format!("spawn_pty failed: {e}"))?;
+        let child = cmd_builder
+            .spawn()
+            .map_err(|e| format!("spawn_pty failed: {e}"))?;
         let pid = child.id();
 
         let started_secs = SystemTime::now()
@@ -483,19 +503,23 @@ impl JobStore {
             .unwrap_or_default()
             .as_secs();
 
-        let status     = Arc::new(Mutex::new(JobStatus::Running));
+        let status = Arc::new(Mutex::new(JobStatus::Running));
         let stdout_buf = Arc::new(Mutex::new(Vec::<u8>::new()));
 
         // PTY master: clone for reading output, keep original for writing input.
-        let master_read  = unsafe { std::fs::File::from_raw_fd(master_raw) };
-        let master_write = master_read.try_clone().map_err(|e| format!("clone pty master: {e}"))?;
-        let master_tx    = Arc::new(Mutex::new(master_write));
+        let master_read = unsafe { std::fs::File::from_raw_fd(master_raw) };
+        let master_write = master_read
+            .try_clone()
+            .map_err(|e| format!("clone pty master: {e}"))?;
+        let master_tx = Arc::new(Mutex::new(master_write));
 
         let log_file: Arc<Mutex<Option<fs::File>>> = Arc::new(Mutex::new(
             fs::OpenOptions::new()
-                .create(true).write(true).truncate(true)
+                .create(true)
+                .write(true)
+                .truncate(true)
                 .open(&log_path)
-                .ok()
+                .ok(),
         ));
 
         // ── PTY reader thread — reads master, feeds stdout_buf + log ─────────
@@ -505,14 +529,14 @@ impl JobStore {
             thread::spawn(move || {
                 use std::io::Read;
                 let mut reader = std::io::BufReader::new(master_read);
-                let mut chunk  = [0u8; 8192];
+                let mut chunk = [0u8; 8192];
                 loop {
                     match reader.read(&mut chunk) {
                         Ok(0) | Err(_) => break,
                         Ok(n) => {
                             let data = &chunk[..n];
-                            buf_t.lock().unwrap().extend_from_slice(data);
-                            if let Some(ref mut f) = *log_t.lock().unwrap() {
+                            lock_mutex(&buf_t, "pty stdout buffer").extend_from_slice(data);
+                            if let Some(ref mut f) = *lock_mutex(&log_t, "job log file") {
                                 let _ = f.write_all(data);
                                 let _ = f.flush();
                             }
@@ -524,15 +548,15 @@ impl JobStore {
 
         // ── waiter thread ────────────────────────────────────────────────────
         {
-            let status_t   = Arc::clone(&status);
+            let status_t = Arc::clone(&status);
             let log_path_t = log_path.clone();
-            let mut child  = child;
+            let mut child = child;
             thread::spawn(move || {
                 let code = match child.wait() {
                     Ok(exit) => exit.code().unwrap_or(-1),
-                    Err(_)   => -1,
+                    Err(_) => -1,
                 };
-                *status_t.lock().unwrap() = JobStatus::Done(code);
+                *lock_mutex(&status_t, "pty job status") = JobStatus::Done(code);
                 // Write FERRITE_DONE sentinel so colorized_watch_cmd banner triggers.
                 let sentinel = format!("FERRITE_DONE:{code}\n");
                 if let Ok(mut f) = fs::OpenOptions::new().append(true).open(&log_path_t) {
@@ -542,23 +566,23 @@ impl JobStore {
         }
 
         let job = Arc::new(Job {
-            job_id:        job_id.clone(),
+            job_id: job_id.clone(),
             pid,
             label,
-            cmd:           cmd.to_string(),
+            cmd: cmd.to_string(),
             cwd,
             status,
             stdout_buf,
-            stderr_buf:    Arc::new(Mutex::new(Vec::new())), // PTY merges stderr into stdout
+            stderr_buf: Arc::new(Mutex::new(Vec::new())), // PTY merges stderr into stdout
             log_path,
             stdout_cursor: Mutex::new(0),
             stderr_cursor: Mutex::new(0),
             started_secs,
-            stdin_tx:      Some(master_tx),
-            is_pty:        true,
+            stdin_tx: Some(master_tx),
+            is_pty: true,
         });
 
-        self.jobs.lock().unwrap().insert(job_id, Arc::clone(&job));
+        lock_mutex(&self.jobs, "job store map").insert(job_id, Arc::clone(&job));
         self.persist_all();
         Ok(job)
     }
@@ -571,7 +595,7 @@ impl JobStore {
         }
 
         let job_id = self.next_id();
-        let label  = label.unwrap_or(&format!("pid {pid}")).to_string();
+        let label = label.unwrap_or(&format!("pid {pid}")).to_string();
         let log_path = log_path_for(&job_id);
 
         let started_secs = SystemTime::now()
@@ -582,39 +606,39 @@ impl JobStore {
         let status = Arc::new(Mutex::new(JobStatus::Attached));
         {
             let status_t = Arc::clone(&status);
-            thread::spawn(move || {
-                loop {
-                    thread::sleep(Duration::from_secs(1));
-                    {
-                        let s = status_t.lock().unwrap();
-                        if s.is_terminal() { break; }
-                    }
-                    if !pid_alive(pid) {
-                        *status_t.lock().unwrap() = JobStatus::Done(-1);
+            thread::spawn(move || loop {
+                thread::sleep(Duration::from_secs(1));
+                {
+                    let s = lock_mutex(&status_t, "attached job status");
+                    if s.is_terminal() {
                         break;
                     }
+                }
+                if !pid_alive(pid) {
+                    *lock_mutex(&status_t, "attached job status") = JobStatus::Done(-1);
+                    break;
                 }
             });
         }
 
         let job = Arc::new(Job {
-            job_id:        job_id.clone(),
+            job_id: job_id.clone(),
             pid,
             label,
-            cmd:           format!("<attached pid {pid}>"),
-            cwd:           PathBuf::from("/"),
+            cmd: format!("<attached pid {pid}>"),
+            cwd: PathBuf::from("/"),
             status,
-            stdout_buf:    Arc::new(Mutex::new(Vec::new())),
-            stderr_buf:    Arc::new(Mutex::new(Vec::new())),
+            stdout_buf: Arc::new(Mutex::new(Vec::new())),
+            stderr_buf: Arc::new(Mutex::new(Vec::new())),
             log_path,
             stdout_cursor: Mutex::new(0),
             stderr_cursor: Mutex::new(0),
             started_secs,
-            stdin_tx:      None,
-            is_pty:        false,
+            stdin_tx: None,
+            is_pty: false,
         });
 
-        self.jobs.lock().unwrap().insert(job_id, Arc::clone(&job));
+        lock_mutex(&self.jobs, "job store map").insert(job_id, Arc::clone(&job));
         self.persist_all();
         Ok(job)
     }
@@ -622,17 +646,23 @@ impl JobStore {
     // ── lookup ────────────────────────────────────────────────────────────────
 
     pub fn get(&self, job_id: &str) -> Option<Arc<Job>> {
-        self.jobs.lock().unwrap().get(job_id).cloned()
+        lock_mutex(&self.jobs, "job store map").get(job_id).cloned()
     }
 
     pub fn all(&self) -> Vec<Arc<Job>> {
-        let mut jobs: Vec<Arc<Job>> = self.jobs.lock().unwrap().values().cloned().collect();
+        let mut jobs: Vec<Arc<Job>> = lock_mutex(&self.jobs, "job store map")
+            .values()
+            .cloned()
+            .collect();
         jobs.sort_by_key(|j| j.started_secs);
         jobs
     }
 
     pub fn stats(&self) -> JobStoreStats {
-        let jobs: Vec<Arc<Job>> = self.jobs.lock().unwrap().values().cloned().collect();
+        let jobs: Vec<Arc<Job>> = lock_mutex(&self.jobs, "job store map")
+            .values()
+            .cloned()
+            .collect();
         let mut running = 0usize;
         let mut attached = 0usize;
         let mut done = 0usize;
@@ -665,8 +695,12 @@ impl JobStore {
 
     #[allow(dead_code)]
     pub fn remove_job(&self, job_id: &str) -> bool {
-        let removed = self.jobs.lock().unwrap().remove(job_id).is_some();
-        if removed { self.persist_all(); }
+        let removed = lock_mutex(&self.jobs, "job store map")
+            .remove(job_id)
+            .is_some();
+        if removed {
+            self.persist_all();
+        }
         removed
     }
 }
@@ -688,9 +722,13 @@ pub struct JobStoreStats {
 /// Returns true if the process with the given PID is still running.
 fn pid_alive(pid: u32) -> bool {
     #[cfg(target_os = "linux")]
-    { std::path::Path::new(&format!("/proc/{pid}")).exists() }
+    {
+        std::path::Path::new(&format!("/proc/{pid}")).exists()
+    }
     #[cfg(not(target_os = "linux"))]
-    { unsafe { libc::kill(pid as i32, 0) == 0 } }
+    {
+        unsafe { libc::kill(pid as i32, 0) == 0 }
+    }
 }
 
 // ── PTY helpers ───────────────────────────────────────────────────────────────
@@ -734,7 +772,10 @@ unsafe fn open_pty() -> Result<(i32, i32), String> {
     let slave = libc::open(slave_path.as_ptr(), libc::O_RDWR | libc::O_NOCTTY);
     if slave < 0 {
         libc::close(master);
-        return Err(format!("open slave pty: {}", std::io::Error::last_os_error()));
+        return Err(format!(
+            "open slave pty: {}",
+            std::io::Error::last_os_error()
+        ));
     }
 
     Ok((master, slave))

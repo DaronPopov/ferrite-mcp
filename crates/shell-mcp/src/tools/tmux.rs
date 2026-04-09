@@ -8,23 +8,27 @@
 //!   kill    — kill a session
 //!   has     — check if a session exists (returns bool, no error)
 
-use std::time::Duration;
 use serde_json::{json, Value};
+use std::time::Duration;
 
 use crate::protocol::ToolResult;
 use crate::tools::execution::run;
 
 pub fn tmux_ctl(args: &Value) -> Result<ToolResult, String> {
-    let op = args["op"].as_str().ok_or("tmux_ctl: 'op' is required (new|list|send|capture|kill|has)")?;
+    let op = args["op"]
+        .as_str()
+        .ok_or("tmux_ctl: 'op' is required (new|list|send|capture|kill|has)")?;
 
     match op {
-        "new"     => tmux_new(args),
-        "list"    => tmux_list(),
-        "send"    => tmux_send(args),
+        "new" => tmux_new(args),
+        "list" => tmux_list(),
+        "send" => tmux_send(args),
         "capture" => tmux_capture(args),
-        "kill"    => tmux_kill(args),
-        "has"     => tmux_has(args),
-        other     => Err(format!("tmux_ctl: unknown op '{other}' — use new|list|send|capture|kill|has")),
+        "kill" => tmux_kill(args),
+        "has" => tmux_has(args),
+        other => Err(format!(
+            "tmux_ctl: unknown op '{other}' — use new|list|send|capture|kill|has"
+        )),
     }
 }
 
@@ -47,9 +51,18 @@ fn tmux_new(args: &Value) -> Result<ToolResult, String> {
     }
 
     let cmd = if start_cmd.is_empty() {
-        format!("tmux new-session -d -s '{}' -c '{}'", session, cwd.display())
+        format!(
+            "tmux new-session -d -s '{}' -c '{}'",
+            session,
+            cwd.display()
+        )
     } else {
-        format!("tmux new-session -d -s '{}' -c '{}' '{}'", session, cwd.display(), start_cmd)
+        format!(
+            "tmux new-session -d -s '{}' -c '{}' '{}'",
+            session,
+            cwd.display(),
+            start_cmd
+        )
     };
 
     let base = std::path::PathBuf::from("/");
@@ -57,7 +70,10 @@ fn tmux_new(args: &Value) -> Result<ToolResult, String> {
     let success = raw["success"].as_bool().unwrap_or(false);
 
     if !success {
-        return Err(format!("tmux new-session failed: {}", raw["stderr"].as_str().unwrap_or("")));
+        return Err(format!(
+            "tmux new-session failed: {}",
+            raw["stderr"].as_str().unwrap_or("")
+        ));
     }
 
     Ok(ToolResult::json(&json!({
@@ -97,7 +113,10 @@ fn tmux_list() -> Result<ToolResult, String> {
         return Err(format!("tmux list-sessions: {}", err_text.trim()));
     }
 
-    let sessions: Vec<Value> = sess_raw["stdout"].as_str().unwrap_or("").lines()
+    let sessions: Vec<Value> = sess_raw["stdout"]
+        .as_str()
+        .unwrap_or("")
+        .lines()
         .filter(|l| !l.is_empty())
         .map(|line| {
             let parts: Vec<&str> = line.splitn(4, '|').collect();
@@ -121,9 +140,11 @@ fn tmux_list() -> Result<ToolResult, String> {
 
 fn tmux_send(args: &Value) -> Result<ToolResult, String> {
     let session = args["session"].as_str().unwrap_or("main");
-    let window  = args["window"].as_str().unwrap_or("");
-    let cmd     = args["cmd"].as_str().ok_or("tmux_ctl send: 'cmd' is required")?;
-    let enter   = args["enter"].as_bool().unwrap_or(true);
+    let window = args["window"].as_str().unwrap_or("");
+    let cmd = args["cmd"]
+        .as_str()
+        .ok_or("tmux_ctl send: 'cmd' is required")?;
+    let enter = args["enter"].as_bool().unwrap_or(true);
 
     // Target: session or session:window.pane
     let target = if window.is_empty() {
@@ -143,7 +164,10 @@ fn tmux_send(args: &Value) -> Result<ToolResult, String> {
     let success = raw["success"].as_bool().unwrap_or(false);
 
     if !success {
-        return Err(format!("tmux send-keys failed: {}", raw["stderr"].as_str().unwrap_or("")));
+        return Err(format!(
+            "tmux send-keys failed: {}",
+            raw["stderr"].as_str().unwrap_or("")
+        ));
     }
 
     Ok(ToolResult::json(&json!({
@@ -158,9 +182,9 @@ fn tmux_send(args: &Value) -> Result<ToolResult, String> {
 // ── capture ───────────────────────────────────────────────────────────────────
 
 fn tmux_capture(args: &Value) -> Result<ToolResult, String> {
-    let session  = args["session"].as_str().unwrap_or("main");
-    let window   = args["window"].as_str().unwrap_or("");
-    let lines    = args["lines"].as_u64().unwrap_or(50);
+    let session = args["session"].as_str().unwrap_or("main");
+    let window = args["window"].as_str().unwrap_or("");
+    let lines = args["lines"].as_u64().unwrap_or(50);
 
     let target = if window.is_empty() {
         session.to_owned()
@@ -169,16 +193,16 @@ fn tmux_capture(args: &Value) -> Result<ToolResult, String> {
     };
 
     // capture-pane -p prints to stdout; -S -N gets last N lines from scrollback
-    let cmd = format!(
-        "tmux capture-pane -t '{}' -p -S -{lines}",
-        target
-    );
+    let cmd = format!("tmux capture-pane -t '{}' -p -S -{lines}", target);
 
     let base = std::path::PathBuf::from("/");
     let raw = run(&cmd, &base, &[], "", Duration::from_secs(5));
 
     if !raw["success"].as_bool().unwrap_or(false) {
-        return Err(format!("tmux capture-pane: {}", raw["stderr"].as_str().unwrap_or("")));
+        return Err(format!(
+            "tmux capture-pane: {}",
+            raw["stderr"].as_str().unwrap_or("")
+        ));
     }
 
     let output = raw["stdout"].as_str().unwrap_or("").to_owned();
@@ -194,7 +218,9 @@ fn tmux_capture(args: &Value) -> Result<ToolResult, String> {
 // ── kill ──────────────────────────────────────────────────────────────────────
 
 fn tmux_kill(args: &Value) -> Result<ToolResult, String> {
-    let session = args["session"].as_str().ok_or("tmux_ctl kill: 'session' is required")?;
+    let session = args["session"]
+        .as_str()
+        .ok_or("tmux_ctl kill: 'session' is required")?;
 
     if !session_exists(session) {
         return Ok(ToolResult::json(&json!({
@@ -218,7 +244,9 @@ fn tmux_kill(args: &Value) -> Result<ToolResult, String> {
 // ── has ───────────────────────────────────────────────────────────────────────
 
 fn tmux_has(args: &Value) -> Result<ToolResult, String> {
-    let session = args["session"].as_str().ok_or("tmux_ctl has: 'session' is required")?;
+    let session = args["session"]
+        .as_str()
+        .ok_or("tmux_ctl has: 'session' is required")?;
     Ok(ToolResult::json(&json!({
         "exists":  session_exists(session),
         "session": session,

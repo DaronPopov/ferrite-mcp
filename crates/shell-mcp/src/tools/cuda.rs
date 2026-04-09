@@ -20,17 +20,26 @@ use crate::server::ServerState;
 use crate::tools::execution::run;
 use crate::tools::state::resolve_or_cwd;
 
-pub fn cuda_env_doctor(args: &Value, state: &Arc<Mutex<ServerState>>) -> Result<ToolResult, String> {
+pub fn cuda_env_doctor(
+    args: &Value,
+    state: &Arc<Mutex<ServerState>>,
+) -> Result<ToolResult, String> {
     let base = resolve_or_cwd(state, args["path"].as_str())?;
 
     let nvcc = probe_bin("nvcc", &["--version"]);
-    let nvidia_smi = probe_bin("nvidia-smi", &["--query-gpu=name,driver_version,memory.total", "--format=csv,noheader"]);
+    let nvidia_smi = probe_bin(
+        "nvidia-smi",
+        &[
+            "--query-gpu=name,driver_version,memory.total",
+            "--format=csv,noheader",
+        ],
+    );
     let ncu = probe_bin("ncu", &["--version"]);
     let compute_sanitizer = probe_bin("compute-sanitizer", &["--version"]);
     let cuobjdump = probe_bin("cuobjdump", &["--version"]);
 
-    let ready = nvcc["found"].as_bool() == Some(true)
-        && nvidia_smi["found"].as_bool() == Some(true);
+    let ready =
+        nvcc["found"].as_bool() == Some(true) && nvidia_smi["found"].as_bool() == Some(true);
 
     let gpu_ready = if nvidia_smi["found"].as_bool() == Some(true) {
         "ready"
@@ -59,11 +68,19 @@ pub fn cuda_artifacts(args: &Value, state: &Arc<Mutex<ServerState>>) -> Result<T
 
     let source_files = collect_files(&root, &["cu", "cuh", "ptx"], max_results);
     let build_outputs = collect_named_files(&root.join("build"), max_results);
-    let profile_reports = collect_files(&root, &["ncu-rep", "nsys-rep", "qdrep", "sqlite", "json"], max_results);
+    let profile_reports = collect_files(
+        &root,
+        &["ncu-rep", "nsys-rep", "qdrep", "sqlite", "json"],
+        max_results,
+    );
     let libraries = collect_matching_names(&root.join("build"), &[".so", ".a"], max_results);
     let binaries = collect_executables(&root.join("build"), max_results);
 
-    let artifact_count = source_files.len() + build_outputs.len() + profile_reports.len() + libraries.len() + binaries.len();
+    let artifact_count = source_files.len()
+        + build_outputs.len()
+        + profile_reports.len()
+        + libraries.len()
+        + binaries.len();
 
     Ok(ToolResult::json(&json!({
         "path": root.display().to_string(),
@@ -85,10 +102,26 @@ pub fn cuda_triage(args: &Value, state: &Arc<Mutex<ServerState>>) -> Result<Tool
         let cwd = resolve_or_cwd(state, args["cwd"].as_str())?;
         let timeout_secs = args["timeout_secs"].as_u64().unwrap_or(120);
         let raw = run(cmd, &cwd, &[], "", Duration::from_secs(timeout_secs));
-        let stdout = raw["stdout"].as_str().or_else(|| raw["out"].as_str()).unwrap_or("").to_owned();
+        let stdout = raw["stdout"]
+            .as_str()
+            .or_else(|| raw["out"].as_str())
+            .unwrap_or("")
+            .to_owned();
         let stderr = raw["stderr"].as_str().unwrap_or("").to_owned();
-        let exit_code = raw["exit_code"].as_i64().unwrap_or(if raw["ok"].as_bool() == Some(true) { 0 } else { -1 });
-        (stdout, stderr, exit_code, Some(cmd.to_owned()), Some(cwd.display().to_string()))
+        let exit_code = raw["exit_code"]
+            .as_i64()
+            .unwrap_or(if raw["ok"].as_bool() == Some(true) {
+                0
+            } else {
+                -1
+            });
+        (
+            stdout,
+            stderr,
+            exit_code,
+            Some(cmd.to_owned()),
+            Some(cwd.display().to_string()),
+        )
     } else {
         (
             args["stdout"].as_str().unwrap_or("").to_owned(),
@@ -110,13 +143,17 @@ pub fn cuda_triage(args: &Value, state: &Arc<Mutex<ServerState>>) -> Result<Tool
     })))
 }
 
-pub fn cuda_regression_run(args: &Value, state: &Arc<Mutex<ServerState>>) -> Result<ToolResult, String> {
+pub fn cuda_regression_run(
+    args: &Value,
+    state: &Arc<Mutex<ServerState>>,
+) -> Result<ToolResult, String> {
     let root = resolve_or_cwd(state, args["path"].as_str())?;
     let dry_run = args["dry_run"].as_bool().unwrap_or(false);
     let timeout_secs = args["timeout_secs"].as_u64().unwrap_or(120);
     let test_target = args["test_target"].as_str();
     let benchmark_cmd = args["benchmark_cmd"].as_str();
-    let steps: Vec<&str> = args["steps"].as_array()
+    let steps: Vec<&str> = args["steps"]
+        .as_array()
         .map(|a| a.iter().filter_map(|v| v.as_str()).collect())
         .unwrap_or_else(|| vec!["env", "test"]);
 
@@ -124,12 +161,15 @@ pub fn cuda_regression_run(args: &Value, state: &Arc<Mutex<ServerState>>) -> Res
     let ctest_tests = discover_ctest_tests(&build_dir);
 
     if dry_run {
-        let plan: Vec<Value> = steps.iter().map(|step| {
-            json!({
-                "step": step,
-                "cmd": cuda_step_cmd(step, &root, test_target, benchmark_cmd, &ctest_tests)
+        let plan: Vec<Value> = steps
+            .iter()
+            .map(|step| {
+                json!({
+                    "step": step,
+                    "cmd": cuda_step_cmd(step, &root, test_target, benchmark_cmd, &ctest_tests)
+                })
             })
-        }).collect();
+            .collect();
         return Ok(ToolResult::json(&json!({
             "path": root.display().to_string(),
             "dry_run": true,
@@ -146,7 +186,10 @@ pub fn cuda_regression_run(args: &Value, state: &Arc<Mutex<ServerState>>) -> Res
             continue;
         }
         let raw = run(&cmd, &root, &[], "", Duration::from_secs(timeout_secs));
-        let success = raw["success"].as_bool().or_else(|| raw["ok"].as_bool()).unwrap_or(false);
+        let success = raw["success"]
+            .as_bool()
+            .or_else(|| raw["ok"].as_bool())
+            .unwrap_or(false);
         if !success {
             overall_success = false;
         }
@@ -171,13 +214,17 @@ pub fn cuda_regression_run(args: &Value, state: &Arc<Mutex<ServerState>>) -> Res
     })))
 }
 
-pub fn cuda_regression_report(args: &Value, state: &Arc<Mutex<ServerState>>) -> Result<ToolResult, String> {
+pub fn cuda_regression_report(
+    args: &Value,
+    state: &Arc<Mutex<ServerState>>,
+) -> Result<ToolResult, String> {
     let root = resolve_or_cwd(state, args["path"].as_str())?;
     let timeout_secs = args["timeout_secs"].as_u64().unwrap_or(120);
     let test_target = args["test_target"].as_str();
     let benchmark_cmd = args["benchmark_cmd"].as_str();
     let include_logs = args["include_logs"].as_bool().unwrap_or(false);
-    let steps: Vec<&str> = args["steps"].as_array()
+    let steps: Vec<&str> = args["steps"]
+        .as_array()
         .map(|a| a.iter().filter_map(|v| v.as_str()).collect())
         .unwrap_or_else(|| vec!["env", "test"]);
 
@@ -193,10 +240,23 @@ pub fn cuda_regression_report(args: &Value, state: &Arc<Mutex<ServerState>>) -> 
             continue;
         }
         let raw = run(&cmd, &root, &[], "", Duration::from_secs(timeout_secs));
-        let stdout = raw["stdout"].as_str().or_else(|| raw["out"].as_str()).unwrap_or("").to_owned();
+        let stdout = raw["stdout"]
+            .as_str()
+            .or_else(|| raw["out"].as_str())
+            .unwrap_or("")
+            .to_owned();
         let stderr = raw["stderr"].as_str().unwrap_or("").to_owned();
-        let exit_code = raw["exit_code"].as_i64().unwrap_or(if raw["ok"].as_bool() == Some(true) { 0 } else { -1 });
-        let success = raw["success"].as_bool().or_else(|| raw["ok"].as_bool()).unwrap_or(false);
+        let exit_code = raw["exit_code"]
+            .as_i64()
+            .unwrap_or(if raw["ok"].as_bool() == Some(true) {
+                0
+            } else {
+                -1
+            });
+        let success = raw["success"]
+            .as_bool()
+            .or_else(|| raw["ok"].as_bool())
+            .unwrap_or(false);
         if !success {
             overall_success = false;
         }
@@ -243,10 +303,21 @@ fn probe_bin(name: &str, version_args: &[&str]) -> Value {
         return json!({ "found": false, "path": null, "version": null });
     };
     let output = Command::new(&path).args(version_args).output().ok();
-    let version = output.as_ref().map(|o| {
-        let text = format!("{}{}", String::from_utf8_lossy(&o.stdout), String::from_utf8_lossy(&o.stderr));
-        text.lines().find(|l| !l.trim().is_empty()).unwrap_or("").trim().to_owned()
-    }).unwrap_or_default();
+    let version = output
+        .as_ref()
+        .map(|o| {
+            let text = format!(
+                "{}{}",
+                String::from_utf8_lossy(&o.stdout),
+                String::from_utf8_lossy(&o.stderr)
+            );
+            text.lines()
+                .find(|l| !l.trim().is_empty())
+                .unwrap_or("")
+                .trim()
+                .to_owned()
+        })
+        .unwrap_or_default();
     json!({
         "found": true,
         "path": path,
@@ -256,12 +327,15 @@ fn probe_bin(name: &str, version_args: &[&str]) -> Value {
 
 fn which_bin(name: &str) -> Option<String> {
     let path_var = std::env::var("PATH").unwrap_or_default();
-    path_var.split(':')
+    path_var
+        .split(':')
         .filter(|d| !d.is_empty())
         .map(|d| PathBuf::from(d).join(name))
         .find(|p| {
             use std::os::unix::fs::PermissionsExt;
-            p.metadata().map(|m| m.is_file() && m.permissions().mode() & 0o111 != 0).unwrap_or(false)
+            p.metadata()
+                .map(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+                .unwrap_or(false)
         })
         .map(|p| p.display().to_string())
 }
@@ -335,7 +409,9 @@ fn walk(root: &Path, f: &mut impl FnMut(&Path)) {
     if !root.exists() {
         return;
     }
-    let Ok(entries) = fs::read_dir(root) else { return; };
+    let Ok(entries) = fs::read_dir(root) else {
+        return;
+    };
     for entry in entries.flatten() {
         let path = entry.path();
         if path.is_dir() {
@@ -352,26 +428,95 @@ fn walk(root: &Path, f: &mut impl FnMut(&Path)) {
 
 fn classify_cuda_failure(phase: &str, stdout: &str, stderr: &str, exit_code: i64) -> Value {
     let combined = format!("{stdout}\n{stderr}").to_lowercase();
-    let (status, severity, root_cause, confidence, next_action, tool) =
-        if exit_code == 0 {
-            ("green", "info", "none", "high", "continue", "cuda_artifacts")
-        } else if combined.contains("nvcc fatal") || combined.contains("error:") && phase == "build" {
-            ("red", "high", "compile_error", "high", "inspect_build_error", "build_check")
-        } else if combined.contains("cannot find -l") || combined.contains("undefined reference") || combined.contains("cannot open shared object file") {
-            ("red", "high", "link_or_library_error", "high", "inspect_library_resolution", "find_lib")
-        } else if combined.contains("illegal memory access") || combined.contains("out of bounds") {
-            ("red", "high", "illegal_memory_access", "high", "run_compute_sanitizer", "compute_sanitizer")
-        } else if combined.contains("race") || combined.contains("barrier") {
-            ("red", "high", "sync_or_race_error", "medium", "run_compute_sanitizer", "compute_sanitizer")
-        } else if combined.contains("err_nvgpuctrperm") || combined.contains("permission denied") && combined.contains("ncu") {
-            ("yellow", "medium", "profiling_permission_error", "high", "fix_perf_permissions", "ncu_profile")
-        } else if combined.contains("no kernel image is available") || combined.contains("unsupported gpu architecture") {
-            ("red", "high", "arch_mismatch", "high", "inspect_cuda_arch_flags", "build_check")
-        } else if combined.contains("timed out") {
-            ("yellow", "medium", "runtime_timeout", "medium", "reduce_problem_size_or_profile", "cuda_triage")
-        } else {
-            ("yellow", "medium", "unknown_cuda_failure", "low", "inspect_output", "cuda_triage")
-        };
+    let (status, severity, root_cause, confidence, next_action, tool) = if exit_code == 0 {
+        (
+            "green",
+            "info",
+            "none",
+            "high",
+            "continue",
+            "cuda_artifacts",
+        )
+    } else if combined.contains("nvcc fatal") || combined.contains("error:") && phase == "build" {
+        (
+            "red",
+            "high",
+            "compile_error",
+            "high",
+            "inspect_build_error",
+            "build_check",
+        )
+    } else if combined.contains("cannot find -l")
+        || combined.contains("undefined reference")
+        || combined.contains("cannot open shared object file")
+    {
+        (
+            "red",
+            "high",
+            "link_or_library_error",
+            "high",
+            "inspect_library_resolution",
+            "find_lib",
+        )
+    } else if combined.contains("illegal memory access") || combined.contains("out of bounds") {
+        (
+            "red",
+            "high",
+            "illegal_memory_access",
+            "high",
+            "run_compute_sanitizer",
+            "compute_sanitizer",
+        )
+    } else if combined.contains("race") || combined.contains("barrier") {
+        (
+            "red",
+            "high",
+            "sync_or_race_error",
+            "medium",
+            "run_compute_sanitizer",
+            "compute_sanitizer",
+        )
+    } else if combined.contains("err_nvgpuctrperm")
+        || combined.contains("permission denied") && combined.contains("ncu")
+    {
+        (
+            "yellow",
+            "medium",
+            "profiling_permission_error",
+            "high",
+            "fix_perf_permissions",
+            "ncu_profile",
+        )
+    } else if combined.contains("no kernel image is available")
+        || combined.contains("unsupported gpu architecture")
+    {
+        (
+            "red",
+            "high",
+            "arch_mismatch",
+            "high",
+            "inspect_cuda_arch_flags",
+            "build_check",
+        )
+    } else if combined.contains("timed out") {
+        (
+            "yellow",
+            "medium",
+            "runtime_timeout",
+            "medium",
+            "reduce_problem_size_or_profile",
+            "cuda_triage",
+        )
+    } else {
+        (
+            "yellow",
+            "medium",
+            "unknown_cuda_failure",
+            "low",
+            "inspect_output",
+            "cuda_triage",
+        )
+    };
 
     json!({
         "status": status,
@@ -396,9 +541,17 @@ fn cuda_step_cmd(
         "test" => {
             if root.join("build/CTestTestfile.cmake").exists() {
                 if let Some(target) = test_target {
-                    format!("ctest --test-dir {} --output-on-failure -R '^{}$'", root.join("build").display(), target)
+                    format!(
+                        "ctest --test-dir {} --output-on-failure -R '^{}$'",
+                        root.join("build").display(),
+                        target
+                    )
                 } else if let Some(first) = ctest_tests.first() {
-                    format!("ctest --test-dir {} --output-on-failure -R '^{}$'", root.join("build").display(), first)
+                    format!(
+                        "ctest --test-dir {} --output-on-failure -R '^{}$'",
+                        root.join("build").display(),
+                        first
+                    )
                 } else {
                     String::new()
                 }
@@ -413,7 +566,9 @@ fn cuda_step_cmd(
 
 fn discover_ctest_tests(build_dir: &Path) -> Vec<String> {
     let path = build_dir.join("CTestTestfile.cmake");
-    let Ok(text) = fs::read_to_string(path) else { return Vec::new(); };
+    let Ok(text) = fs::read_to_string(path) else {
+        return Vec::new();
+    };
     let mut tests = Vec::new();
     for line in text.lines() {
         if let Some(rest) = line.strip_prefix("add_test([=[") {
@@ -428,7 +583,11 @@ fn discover_ctest_tests(build_dir: &Path) -> Vec<String> {
 fn cuda_artifacts_json(root: &Path, max_results: usize) -> Value {
     let source_files = collect_files(root, &["cu", "cuh", "ptx"], max_results);
     let build_outputs = collect_named_files(&root.join("build"), max_results);
-    let profile_reports = collect_files(root, &["ncu-rep", "nsys-rep", "qdrep", "sqlite", "json"], max_results);
+    let profile_reports = collect_files(
+        root,
+        &["ncu-rep", "nsys-rep", "qdrep", "sqlite", "json"],
+        max_results,
+    );
     let libraries = collect_matching_names(&root.join("build"), &[".so", ".a"], max_results);
     let binaries = collect_executables(&root.join("build"), max_results);
     json!({
@@ -442,15 +601,24 @@ fn cuda_artifacts_json(root: &Path, max_results: usize) -> Value {
 
 fn cuda_regression_summary(step_results: &[Value]) -> Value {
     let total_steps = step_results.len();
-    let passed_steps = step_results.iter().filter(|s| s["success"].as_bool() == Some(true)).count();
-    let skipped_steps = step_results.iter().filter(|s| s["skipped"].as_bool() == Some(true)).count();
-    let first_failure = step_results.iter().find(|s| s["success"].as_bool() == Some(false)).map(|s| {
-        json!({
-            "step": s["step"],
-            "root_cause": s["triage"]["root_cause"],
-            "recommended_tool": s["triage"]["recommended_tool"],
-        })
-    });
+    let passed_steps = step_results
+        .iter()
+        .filter(|s| s["success"].as_bool() == Some(true))
+        .count();
+    let skipped_steps = step_results
+        .iter()
+        .filter(|s| s["skipped"].as_bool() == Some(true))
+        .count();
+    let first_failure = step_results
+        .iter()
+        .find(|s| s["success"].as_bool() == Some(false))
+        .map(|s| {
+            json!({
+                "step": s["step"],
+                "root_cause": s["triage"]["root_cause"],
+                "recommended_tool": s["triage"]["recommended_tool"],
+            })
+        });
     json!({
         "total_steps": total_steps,
         "passed_steps": passed_steps,
@@ -471,7 +639,12 @@ fn truncate_preview(s: &str, max_chars: usize) -> String {
 fn extract_notes(stdout: &str, stderr: &str) -> Vec<String> {
     let combined = format!("{stdout}\n{stderr}");
     let mut notes = Vec::new();
-    for line in combined.lines().map(str::trim).filter(|l| !l.is_empty()).take(4) {
+    for line in combined
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .take(4)
+    {
         notes.push(line.to_owned());
     }
     if notes.is_empty() {
@@ -487,14 +660,24 @@ mod tests {
 
     #[test]
     fn classify_cuda_failure_detects_illegal_memory_access() {
-        let triage = classify_cuda_failure("runtime", "", "CUDA error: an illegal memory access was encountered", 1);
+        let triage = classify_cuda_failure(
+            "runtime",
+            "",
+            "CUDA error: an illegal memory access was encountered",
+            1,
+        );
         assert_eq!(triage["root_cause"], "illegal_memory_access");
         assert_eq!(triage["recommended_tool"], "compute_sanitizer");
     }
 
     #[test]
     fn classify_cuda_failure_detects_compile_error() {
-        let triage = classify_cuda_failure("build", "", "nvcc fatal   : Unsupported gpu architecture 'compute_99'", 1);
+        let triage = classify_cuda_failure(
+            "build",
+            "",
+            "nvcc fatal   : Unsupported gpu architecture 'compute_99'",
+            1,
+        );
         assert_eq!(triage["root_cause"], "compile_error");
         assert_eq!(triage["recommended_tool"], "build_check");
     }

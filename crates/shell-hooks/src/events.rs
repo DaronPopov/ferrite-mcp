@@ -10,20 +10,13 @@ pub enum HookEvent {
     },
 
     /// Fired after a command finishes executing.
-    PostExec {
-        cmdline: String,
-        status: ExitStatus,
-    },
+    PostExec { cmdline: String, status: ExitStatus },
 
     /// Fired when command lookup fails (command not found).
-    CommandNotFound {
-        name: String,
-    },
+    CommandNotFound { name: String },
 
     /// Fired when any shell error occurs.
-    OnError {
-        message: String,
-    },
+    OnError { message: String },
 
     /// Fired when the tab-completion system requests completions.
     ///
@@ -41,7 +34,5 @@ pub enum HookEvent {
     Startup,
 
     /// Fired just before the shell exits.
-    Shutdown {
-        status: ExitStatus,
-    },
+    Shutdown { status: ExitStatus },
 }

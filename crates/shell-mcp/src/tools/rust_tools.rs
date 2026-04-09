@@ -10,30 +10,40 @@ use serde_json::{json, Value};
 
 use crate::protocol::ToolResult;
 use crate::server::ServerState;
+use crate::tools::state::read_cwd;
 use std::sync::{Arc, Mutex};
 
 pub fn cargo_tree(args: &Value, state: &Arc<Mutex<ServerState>>) -> Result<ToolResult, String> {
-    let state_cwd = state.lock()
-        .map_err(|e| format!("state lock: {e}"))?
-        .cwd.clone();
+    let state_cwd = read_cwd(state);
 
-    let root_arg = args["path"].as_str().map(PathBuf::from).unwrap_or(state_cwd);
+    let root_arg = args["path"]
+        .as_str()
+        .map(PathBuf::from)
+        .unwrap_or(state_cwd);
     let full_deps = args["full"].as_bool().unwrap_or(false);
 
     // Find the workspace root from the given path
-    let manifest = find_manifest(&root_arg)
-        .ok_or_else(|| format!("cargo_tree: no Cargo.toml found at or above {}", root_arg.display()))?;
+    let manifest = find_manifest(&root_arg).ok_or_else(|| {
+        format!(
+            "cargo_tree: no Cargo.toml found at or above {}",
+            root_arg.display()
+        )
+    })?;
 
     let mut cmd = std::process::Command::new("cargo");
     cmd.arg("metadata")
-       .arg("--format-version").arg("1")
-       .arg("--manifest-path").arg(&manifest);
+        .arg("--format-version")
+        .arg("1")
+        .arg("--manifest-path")
+        .arg(&manifest);
 
     if !full_deps {
         cmd.arg("--no-deps");
     }
 
-    let out = cmd.output().map_err(|e| format!("cargo metadata failed: {e}"))?;
+    let out = cmd
+        .output()
+        .map_err(|e| format!("cargo metadata failed: {e}"))?;
 
     if !out.status.success() {
         let err = String::from_utf8_lossy(&out.stderr);
@@ -77,7 +87,7 @@ pub fn cargo_tree(args: &Value, state: &Arc<Mutex<ServerState>>) -> Result<ToolR
 }
 
 fn summarise_package(pkg: &Value, include_deps: bool, meta: &Value) -> Value {
-    let name    = pkg["name"].as_str().unwrap_or("");
+    let name = pkg["name"].as_str().unwrap_or("");
     let version = pkg["version"].as_str().unwrap_or("");
     let edition = pkg["edition"].as_str().unwrap_or("");
     let manifest_path = pkg["manifest_path"].as_str().unwrap_or("");
@@ -95,8 +105,8 @@ fn summarise_package(pkg: &Value, include_deps: bool, meta: &Value) -> Value {
         .iter()
         .map(|d| {
             let dep_name = d["name"].as_str().unwrap_or("");
-            let req      = d["req"].as_str().unwrap_or("*");
-            let kind     = d["kind"].as_str().unwrap_or("normal");
+            let req = d["req"].as_str().unwrap_or("*");
+            let kind = d["kind"].as_str().unwrap_or("normal");
             let feats: Vec<&str> = d["features"]
                 .as_array()
                 .map(|a| a.iter().filter_map(|v| v.as_str()).collect())
@@ -124,11 +134,13 @@ fn summarise_package(pkg: &Value, include_deps: bool, meta: &Value) -> Value {
         .as_array()
         .unwrap_or(&vec![])
         .iter()
-        .map(|t| json!({
-            "name": t["name"],
-            "kind": t["kind"],
-            "src":  t["src_path"],
-        }))
+        .map(|t| {
+            json!({
+                "name": t["name"],
+                "kind": t["kind"],
+                "src":  t["src_path"],
+            })
+        })
         .collect();
 
     json!({
@@ -157,13 +169,11 @@ fn find_resolved_version(meta: &Value, name: &str) -> Option<String> {
 /// Run `cargo test` and return structured {passed, failed, ignored, duration_ms}.
 /// Optional filter narrows to matching test names.
 pub fn test_run(args: &Value, state: &Arc<Mutex<ServerState>>) -> Result<ToolResult, String> {
-    let filter  = args["filter"].as_str().unwrap_or("");
+    let filter = args["filter"].as_str().unwrap_or("");
     let package = args["package"].as_str();
     let timeout = args["timeout_secs"].as_u64().unwrap_or(120);
 
-    let cwd = state.lock()
-        .map_err(|e| format!("state lock: {e}"))?
-        .cwd.clone();
+    let cwd = read_cwd(state);
 
     let mut cmd = std::process::Command::new("cargo");
     cmd.arg("test");
@@ -179,8 +189,8 @@ pub fn test_run(args: &Value, state: &Arc<Mutex<ServerState>>) -> Result<ToolRes
     cmd.args(["--", "--test-output=immediate"]);
 
     cmd.current_dir(&cwd)
-       .stdout(std::process::Stdio::piped())
-       .stderr(std::process::Stdio::piped());
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
 
     let start = std::time::Instant::now();
     let deadline = start + std::time::Duration::from_secs(timeout);
@@ -193,7 +203,9 @@ pub fn test_run(args: &Value, state: &Arc<Mutex<ServerState>>) -> Result<ToolRes
             None => {
                 if std::time::Instant::now() > deadline {
                     child.kill().ok();
-                    return Ok(ToolResult::error(format!("cargo test timed out after {timeout}s")));
+                    return Ok(ToolResult::error(format!(
+                        "cargo test timed out after {timeout}s"
+                    )));
                 }
                 std::thread::sleep(std::time::Duration::from_millis(50));
             }
@@ -201,7 +213,9 @@ pub fn test_run(args: &Value, state: &Arc<Mutex<ServerState>>) -> Result<ToolRes
     }
 
     let duration_ms = start.elapsed().as_millis() as u64;
-    let out = child.wait_with_output().map_err(|e| format!("wait_with_output: {e}"))?;
+    let out = child
+        .wait_with_output()
+        .map_err(|e| format!("wait_with_output: {e}"))?;
 
     let stdout = String::from_utf8_lossy(&out.stdout).to_string();
     let stderr = String::from_utf8_lossy(&out.stderr).to_string();
@@ -222,26 +236,30 @@ pub fn test_run(args: &Value, state: &Arc<Mutex<ServerState>>) -> Result<ToolRes
 }
 
 fn parse_test_output(output: &str) -> (Vec<Value>, Vec<Value>, Vec<Value>) {
-    let mut passed  = Vec::new();
-    let mut failed  = Vec::new();
+    let mut passed = Vec::new();
+    let mut failed = Vec::new();
     let mut ignored = Vec::new();
 
     // Format: "test module::name ... ok" or "... FAILED" or "... ignored"
     for line in output.lines() {
         let trimmed = line.trim();
-        if !trimmed.starts_with("test ") { continue; }
+        if !trimmed.starts_with("test ") {
+            continue;
+        }
 
         // Skip "test result: ..." summary line
-        if trimmed.starts_with("test result:") { continue; }
+        if trimmed.starts_with("test result:") {
+            continue;
+        }
 
         if let Some(name_part) = trimmed.strip_prefix("test ") {
             if let Some((name, outcome)) = name_part.rsplit_once(" ... ") {
                 let name = name.trim().to_owned();
                 match outcome.trim() {
-                    "ok"      => passed.push(json!({ "name": name })),
-                    "FAILED"  => failed.push(json!({ "name": name })),
+                    "ok" => passed.push(json!({ "name": name })),
+                    "FAILED" => failed.push(json!({ "name": name })),
                     "ignored" => ignored.push(json!({ "name": name })),
-                    _         => {}
+                    _ => {}
                 }
             }
         }
@@ -259,7 +277,9 @@ fn find_manifest(from: &Path) -> Option<PathBuf> {
     let mut dir = if from.is_file() { from.parent()? } else { from };
     loop {
         let candidate = dir.join("Cargo.toml");
-        if candidate.exists() { return Some(candidate); }
+        if candidate.exists() {
+            return Some(candidate);
+        }
         dir = dir.parent()?;
     }
 }

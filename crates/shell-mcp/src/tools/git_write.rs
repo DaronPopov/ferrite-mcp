@@ -13,6 +13,7 @@ use serde_json::{json, Value};
 use crate::protocol::ToolResult;
 use crate::server::ServerState;
 use crate::tools::project::expand_tilde;
+use crate::tools::state::read_cwd;
 
 #[derive(Clone)]
 enum AddSpec {
@@ -142,10 +143,7 @@ fn parse_checkpoint_request(
     let base_path = if let Some(path_str) = args["path"].as_str() {
         expand_tilde(path_str)
     } else {
-        state.lock()
-            .map_err(|e| format!("state lock poisoned: {e}"))?
-            .cwd
-            .clone()
+        read_cwd(state)
     };
     let root = resolve_git_root(&base_path)?;
     let push = args["push"].as_bool().unwrap_or(false);
@@ -209,10 +207,21 @@ fn parse_add_spec(value: &Value) -> Result<AddSpec, String> {
 
 fn parse_provenance(value: &Value) -> Provenance {
     let mut p = Provenance::default();
-    let Some(obj) = value.as_object() else { return p };
-    p.agent = obj.get("agent").and_then(Value::as_str).map(ToOwned::to_owned);
-    p.session_id = obj.get("session_id").and_then(Value::as_str).map(ToOwned::to_owned);
-    p.reason = obj.get("reason").and_then(Value::as_str).map(ToOwned::to_owned);
+    let Some(obj) = value.as_object() else {
+        return p;
+    };
+    p.agent = obj
+        .get("agent")
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned);
+    p.session_id = obj
+        .get("session_id")
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned);
+    p.reason = obj
+        .get("reason")
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned);
     if let Some(tags) = obj.get("tags").and_then(Value::as_array) {
         p.tags = tags
             .iter()
@@ -241,7 +250,9 @@ fn run_checkpoint(req: CheckpointRequest) -> Result<CheckpointOutcome, String> {
     if req.commit {
         if !staged_stat.is_empty() || req.allow_empty {
             commit_attempted = true;
-            let base = req.message.unwrap_or_else(|| default_checkpoint_message(&before));
+            let base = req
+                .message
+                .unwrap_or_else(|| default_checkpoint_message(&before));
             let msg = decorate_commit_message(base, &req.provenance);
             let out = commit_changes(&req.root, &msg, req.author.as_deref(), req.allow_empty)?;
             committed = out.status.success();
@@ -261,7 +272,11 @@ fn run_checkpoint(req: CheckpointRequest) -> Result<CheckpointOutcome, String> {
     let mut push_branch = None;
     let mut push_stdout = String::new();
     let mut push_stderr = String::new();
-    let push_remote = if req.push { Some(req.remote.clone()) } else { None };
+    let push_remote = if req.push {
+        Some(req.remote.clone())
+    } else {
+        None
+    };
 
     if req.push {
         push_attempted = true;
@@ -356,7 +371,10 @@ fn collect_status(root: &Path) -> Result<StatusSummary, String> {
 }
 
 fn ahead_behind(root: &Path) -> (i64, i64) {
-    let Ok(out) = run_git(root, &["rev-list", "--left-right", "--count", "@{upstream}...HEAD"]) else {
+    let Ok(out) = run_git(
+        root,
+        &["rev-list", "--left-right", "--count", "@{upstream}...HEAD"],
+    ) else {
         return (0, 0);
     };
     if !out.status.success() {
@@ -372,16 +390,29 @@ fn ahead_behind(root: &Path) -> (i64, i64) {
 fn staged_diff_stat(root: &Path) -> Result<String, String> {
     let out = run_git(root, &["diff", "--cached", "--stat"])?;
     if !out.status.success() {
-        return Err(format!("git diff --cached failed: {}", stderr_trimmed(&out)));
+        return Err(format!(
+            "git diff --cached failed: {}",
+            stderr_trimmed(&out)
+        ));
     }
     Ok(stdout_trimmed(&out))
 }
 
-fn commit_changes(root: &Path, message: &str, author: Option<&str>, allow_empty: bool) -> Result<Output, String> {
+fn commit_changes(
+    root: &Path,
+    message: &str,
+    author: Option<&str>,
+    allow_empty: bool,
+) -> Result<Output, String> {
     let mut args: Vec<String> = Vec::new();
 
     if !has_local_identity(root) {
-        args.extend(["-c".into(), "user.name=ferrite".into(), "-c".into(), "user.email=ferrite@local".into()]);
+        args.extend([
+            "-c".into(),
+            "user.name=ferrite".into(),
+            "-c".into(),
+            "user.email=ferrite@local".into(),
+        ]);
     }
 
     args.push("commit".into());
@@ -442,7 +473,11 @@ fn short_head_hash(root: &Path) -> Option<String> {
     let out = run_git(root, &["rev-parse", "--short", "HEAD"]).ok()?;
     if out.status.success() {
         let h = stdout_trimmed(&out);
-        if h.is_empty() { None } else { Some(h) }
+        if h.is_empty() {
+            None
+        } else {
+            Some(h)
+        }
     } else {
         None
     }
@@ -469,13 +504,20 @@ fn run_git_timeout(cwd: &Path, args: &[&str], timeout: Duration) -> Result<Outpu
     let deadline = Instant::now() + timeout;
     loop {
         match child.try_wait() {
-            Ok(Some(_)) => return child.wait_with_output()
-                .map_err(|e| format!("git {}: {e}", args.join(" "))),
+            Ok(Some(_)) => {
+                return child
+                    .wait_with_output()
+                    .map_err(|e| format!("git {}: {e}", args.join(" ")))
+            }
             Ok(None) => {
                 if Instant::now() >= deadline {
                     let _ = child.kill();
                     let _ = child.wait();
-                    return Err(format!("git {}: timed out after {}s", args.join(" "), timeout.as_secs()));
+                    return Err(format!(
+                        "git {}: timed out after {}s",
+                        args.join(" "),
+                        timeout.as_secs()
+                    ));
                 }
                 std::thread::sleep(Duration::from_millis(50));
             }
@@ -485,7 +527,11 @@ fn run_git_timeout(cwd: &Path, args: &[&str], timeout: Duration) -> Result<Outpu
 }
 
 fn resolve_git_root(start: &Path) -> Result<PathBuf, String> {
-    let out = run_git_timeout(start, &["rev-parse", "--show-toplevel"], Duration::from_secs(5))?;
+    let out = run_git_timeout(
+        start,
+        &["rev-parse", "--show-toplevel"],
+        Duration::from_secs(5),
+    )?;
     if !out.status.success() {
         return Err(format!("not a git repo: {}", start.display()));
     }
@@ -498,7 +544,11 @@ fn current_branch(root: &Path) -> Option<String> {
         return None;
     }
     let branch = stdout_trimmed(&out);
-    if branch.is_empty() { None } else { Some(branch) }
+    if branch.is_empty() {
+        None
+    } else {
+        Some(branch)
+    }
 }
 
 fn resolve_push_target(root: &Path, remote: &str) -> Result<String, String> {

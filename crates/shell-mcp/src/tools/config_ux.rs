@@ -28,7 +28,9 @@ pub fn config_ux(args: &Value) -> Result<ToolResult, String> {
             })))
         }
         "get" => {
-            let key = args["key"].as_str().ok_or("config_ux get: 'key' is required")?;
+            let key = args["key"]
+                .as_str()
+                .ok_or("config_ux get: 'key' is required")?;
             if key == "authz.policy_path" {
                 return Ok(ToolResult::json(&json!({
                     "ok": true,
@@ -54,7 +56,9 @@ pub fn config_ux(args: &Value) -> Result<ToolResult, String> {
             }
         }
         "set" => {
-            let key = args["key"].as_str().ok_or("config_ux set: 'key' is required")?;
+            let key = args["key"]
+                .as_str()
+                .ok_or("config_ux set: 'key' is required")?;
             let value = args["value"]
                 .as_str()
                 .ok_or("config_ux set: 'value' must be string")?;

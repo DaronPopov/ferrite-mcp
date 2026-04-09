@@ -8,30 +8,38 @@ use crate::protocol::ToolResult;
 // ── pre_validate ──────────────────────────────────────────────────────────────
 
 pub fn pre_validate(args: &Value) -> Result<ToolResult, String> {
-    let cmd = args["cmd"].as_str().ok_or("pre_validate: 'cmd' is required")?;
+    let cmd = args["cmd"]
+        .as_str()
+        .ok_or("pre_validate: 'cmd' is required")?;
 
     let analysis = permissions::analyze(cmd);
 
     let sudo_status_str = match &analysis.sudo_status {
-        SudoersStatus::Active     => "active",
-        SudoersStatus::StaleUser  => "stale_user",
-        SudoersStatus::Missing    => "missing",
+        SudoersStatus::Active => "active",
+        SudoersStatus::StaleUser => "stale_user",
+        SudoersStatus::Missing => "missing",
     };
 
-    let blockers_json: Vec<Value> = analysis.blockers.iter().map(|b| {
-        json!({
-            "kind": match b.kind {
-                BlockerKind::SudoNotCovered      => "sudo_not_covered",
-                BlockerKind::InteractivePrompt   => "interactive_prompt",
-                BlockerKind::ManualRequired      => "manual_required",
-            },
-            "description":   b.description,
-            "auto_resolved": b.auto_resolved,
-            "resolution":    b.resolution,
+    let blockers_json: Vec<Value> = analysis
+        .blockers
+        .iter()
+        .map(|b| {
+            json!({
+                "kind": match b.kind {
+                    BlockerKind::SudoNotCovered      => "sudo_not_covered",
+                    BlockerKind::InteractivePrompt   => "interactive_prompt",
+                    BlockerKind::ManualRequired      => "manual_required",
+                },
+                "description":   b.description,
+                "auto_resolved": b.auto_resolved,
+                "resolution":    b.resolution,
+            })
         })
-    }).collect();
+        .collect();
 
-    let env_json: Value = analysis.injected_env.iter()
+    let env_json: Value = analysis
+        .injected_env
+        .iter()
         .map(|(k, v)| (k.clone(), Value::String(v.clone())))
         .collect::<serde_json::Map<_, _>>()
         .into();
@@ -69,21 +77,17 @@ pub fn pre_validate(args: &Value) -> Result<ToolResult, String> {
 /// sudo credential first, then falls back to a graphical Polkit (pkexec) dialog.
 pub fn permissions_setup(args: &Value) -> Result<ToolResult, String> {
     let show_entry = args["show_entry"].as_bool().unwrap_or(false);
-    let install    = args["install"].as_bool().unwrap_or(false);
-    let path       = permissions::sudoers_path();
+    let install = args["install"].as_bool().unwrap_or(false);
+    let path = permissions::sudoers_path();
 
     // ── Optional self-install ─────────────────────────────────────────────────
     let install_result: Option<String> = if install {
         match permissions::sudoers_status() {
-            SudoersStatus::Active => {
-                Some("already_active".to_owned())
-            }
-            _ => {
-                match permissions::try_install_sudoers() {
-                    Ok(())   => Some("installed".to_owned()),
-                    Err(msg) => Some(format!("failed: {msg}")),
-                }
-            }
+            SudoersStatus::Active => Some("already_active".to_owned()),
+            _ => match permissions::try_install_sudoers() {
+                Ok(()) => Some("installed".to_owned()),
+                Err(msg) => Some(format!("failed: {msg}")),
+            },
         }
     } else {
         None
@@ -91,12 +95,12 @@ pub fn permissions_setup(args: &Value) -> Result<ToolResult, String> {
 
     // ── Re-read status (may have just changed) ────────────────────────────────
     let status = permissions::sudoers_status();
-    let entry  = permissions::sudoers_entry_content();
+    let entry = permissions::sudoers_entry_content();
 
     let status_str = match &status {
-        SudoersStatus::Active    => "active",
+        SudoersStatus::Active => "active",
         SudoersStatus::StaleUser => "stale_user",
-        SudoersStatus::Missing   => "missing",
+        SudoersStatus::Missing => "missing",
     };
 
     let advice = match &status {
