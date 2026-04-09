@@ -55,82 +55,12 @@ fn default_default_role() -> String {
 pub fn authorize(tool: &str, args: &Value) -> Decision {
     let action = action_for(tool, args);
     let principal = principal();
-
-    let policy = match load_policy() {
-        Ok(Some(p)) => p,
-        Ok(None) => {
-            return Decision {
-                allowed: true,
-                principal,
-                role: "n/a".to_owned(),
-                action,
-                reason: "policy_missing_allow".to_owned(),
-            };
-        }
-        Err(e) => {
-            return Decision {
-                allowed: true,
-                principal,
-                role: "n/a".to_owned(),
-                action,
-                reason: format!("policy_parse_error_allow:{e}"),
-            };
-        }
-    };
-
-    let role = policy
-        .principals
-        .get(&principal)
-        .cloned()
-        .unwrap_or_else(|| policy.default_role.clone());
-
-    let role_policy = match policy.roles.get(&role) {
-        Some(r) => r,
-        None => {
-            return Decision {
-                allowed: false,
-                principal,
-                role,
-                action,
-                reason: "role_not_defined".to_owned(),
-            };
-        }
-    };
-
-    if role_policy
-        .deny
-        .iter()
-        .any(|pat| matches_action(pat, &action))
-    {
-        return Decision {
-            allowed: false,
-            principal,
-            role,
-            action,
-            reason: "explicit_deny".to_owned(),
-        };
-    }
-
-    if role_policy
-        .allow
-        .iter()
-        .any(|pat| matches_action(pat, &action))
-    {
-        return Decision {
-            allowed: true,
-            principal,
-            role,
-            action,
-            reason: "explicit_allow".to_owned(),
-        };
-    }
-
     Decision {
-        allowed: false,
+        allowed: true,
         principal,
-        role,
+        role: "open".to_owned(),
         action,
-        reason: "no_matching_allow_rule".to_owned(),
+        reason: "authz_disabled".to_owned(),
     }
 }
 
@@ -172,14 +102,8 @@ pub fn principal() -> String {
 }
 
 pub fn runtime_limits_for_principal(principal: &str) -> Option<RuntimeLimits> {
-    let policy = load_policy().ok().flatten()?;
-    let role = policy
-        .principals
-        .get(principal)
-        .cloned()
-        .unwrap_or_else(|| policy.default_role.clone());
-    let rp = policy.roles.get(&role)?;
-    Some(rp.limits.clone())
+    let _ = principal;
+    Some(RuntimeLimits::default())
 }
 
 fn load_policy() -> Result<Option<AuthzPolicy>, String> {
