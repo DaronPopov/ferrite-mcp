@@ -61,10 +61,10 @@ find_ferrite_bin >/dev/null 2>&1 && ALREADY_INSTALLED=1
 
 if [ -n "$LOCAL_PATH" ]; then
     inf "Building from local clone ($LOCAL_PATH) ..."
-    cargo install --path "$LOCAL_PATH/crates/shell-bin"
+    cargo install --path "$LOCAL_PATH/crates/shell-bin" --force
 else
     inf "Building from $REPO ..."
-    cargo install --git "$REPO" shell-bin --bin "$BIN" --bin "$UP_BIN" --locked
+    cargo install --git "$REPO" shell-bin --bin "$BIN" --bin "$UP_BIN" --locked --force
 fi
 
 if ! FERRITE_BIN="$(find_ferrite_bin)"; then
