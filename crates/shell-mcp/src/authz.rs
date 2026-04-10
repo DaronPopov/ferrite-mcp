@@ -55,12 +55,78 @@ fn default_default_role() -> String {
 pub fn authorize(tool: &str, args: &Value) -> Decision {
     let action = action_for(tool, args);
     let principal = principal();
+    let policy = match load_policy() {
+        Ok(Some(policy)) => policy,
+        Ok(None) => {
+            return Decision {
+                allowed: true,
+                principal,
+                role: "open".to_owned(),
+                action,
+                reason: "authz_disabled".to_owned(),
+            };
+        }
+        Err(e) => {
+            return Decision {
+                allowed: false,
+                principal,
+                role: "unknown".to_owned(),
+                action,
+                reason: format!("policy_error: {e}"),
+            };
+        }
+    };
+
+    let role = policy
+        .principals
+        .get(&principal)
+        .cloned()
+        .unwrap_or_else(|| policy.default_role.clone());
+    let Some(role_policy) = policy.roles.get(&role) else {
+        return Decision {
+            allowed: false,
+            principal,
+            role,
+            action,
+            reason: "unknown_role".to_owned(),
+        };
+    };
+
+    if role_policy
+        .deny
+        .iter()
+        .any(|pattern| matches_action(pattern, &action))
+    {
+        return Decision {
+            allowed: false,
+            principal,
+            role,
+            action,
+            reason: "explicit_deny".to_owned(),
+        };
+    }
+
+    if !role_policy.allow.is_empty()
+        && !role_policy
+            .allow
+            .iter()
+            .any(|pattern| matches_action(pattern, &action))
+    {
+        return Decision {
+            allowed: false,
+            principal,
+            role,
+            action,
+            reason: "not_allowed".to_owned(),
+        };
+    }
+
     Decision {
         allowed: true,
         principal,
-        role: "open".to_owned(),
+        role,
         action,
-        reason: "authz_disabled".to_owned(),
+        reason: "allowed".to_owned(),
     }
 }
 
@@ -102,8 +168,13 @@ pub fn principal() -> String {
 }
 
 pub fn runtime_limits_for_principal(principal: &str) -> Option<RuntimeLimits> {
-    let _ = principal;
-    Some(RuntimeLimits::default())
+    let policy = load_policy().ok()??;
+    let role = policy
+        .principals
+        .get(principal)
+        .cloned()
+        .unwrap_or(policy.default_role);
+    policy.roles.get(&role).map(|role| role.limits.clone())
 }
 
 fn load_policy() -> Result<Option<AuthzPolicy>, String> {
@@ -171,4 +242,104 @@ fn fnv1a64_hex(s: &str) -> String {
         hash = hash.wrapping_mul(0x100000001b3);
     }
     format!("{hash:016x}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::{Mutex, OnceLock};
+
+    static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+        ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn write_policy(dir: &std::path::Path, text: &str) {
+        std::fs::write(dir.join("authz_policy.toml"), text).expect("write policy");
+        std::env::set_var("FERRITE_AUTHZ_POLICY", dir.join("authz_policy.toml"));
+        std::env::set_var("FERRITE_PRINCIPAL", "default");
+    }
+
+    #[test]
+    fn authorize_allows_when_policy_missing() {
+        let _guard = env_lock();
+        let dir = std::env::temp_dir().join(format!(
+            "ferrite-authz-missing-test-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        std::env::set_var("FERRITE_AUTHZ_POLICY", dir.join("missing.toml"));
+        std::env::set_var("FERRITE_PRINCIPAL", "default");
+
+        let decision = authorize("read_file", &serde_json::json!({}));
+
+        assert!(decision.allowed);
+        assert_eq!(decision.role, "open");
+        assert_eq!(decision.reason, "authz_disabled");
+    }
+
+    #[test]
+    fn authorize_respects_deny_before_allow() {
+        let _guard = env_lock();
+        let dir = std::env::temp_dir().join(format!(
+            "ferrite-authz-test-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        write_policy(
+            &dir,
+            r#"
+default_role = "operator"
+
+[roles.operator]
+allow = ["exec.*"]
+deny = ["exec.danger"]
+"#,
+        );
+
+        let denied = authorize("exec", &serde_json::json!({ "action": "danger" }));
+        let allowed = authorize("exec", &serde_json::json!({ "action": "safe" }));
+
+        assert!(!denied.allowed);
+        assert_eq!(denied.reason, "explicit_deny");
+        assert!(allowed.allowed);
+    }
+
+    #[test]
+    fn runtime_limits_come_from_policy_role() {
+        let _guard = env_lock();
+        let dir = std::env::temp_dir().join(format!(
+            "ferrite-authz-limits-test-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        write_policy(
+            &dir,
+            r#"
+default_role = "operator"
+
+[roles.operator]
+allow = []
+deny = []
+[roles.operator.limits]
+max_concurrent_jobs = 7
+"#,
+        );
+
+        let limits = runtime_limits_for_principal("default").expect("limits");
+
+        assert_eq!(limits.max_concurrent_jobs, Some(7));
+    }
 }
