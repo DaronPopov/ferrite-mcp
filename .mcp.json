@@ -1,8 +1,8 @@
 {
   "mcpServers": {
-    "cream": {
+    "ferrite": {
       "type": "stdio",
-      "command": "${HOME}/.cargo/bin/cream",
+      "command": "${HOME}/.cargo/bin/ferrite",
       "args": ["--mcp"],
       "env": {}
     }
