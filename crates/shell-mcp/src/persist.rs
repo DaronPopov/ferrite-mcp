@@ -77,6 +77,12 @@ pub struct Persistence {
     session_path: PathBuf,
 }
 
+impl Default for Persistence {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Persistence {
     /// Create a new Persistence handle, ensuring storage directories exist.
     pub fn new() -> Self {

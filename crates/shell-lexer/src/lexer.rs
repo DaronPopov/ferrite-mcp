@@ -153,7 +153,7 @@ impl<'src> Lexer<'src> {
 
     fn scan_until(&mut self, stop: char) -> String {
         let start = self.pos;
-        while !matches!(self.peek(), None) && self.peek() != Some(stop) {
+        while self.peek().is_some() && self.peek() != Some(stop) {
             self.advance();
         }
         self.src[start..self.pos].to_owned()

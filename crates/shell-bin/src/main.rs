@@ -204,7 +204,10 @@ fn run_install() -> anyhow::Result<()> {
     mcp_servers.insert(
         "ferrite".to_owned(),
         toml::Value::Table(Table::from_iter([
-            ("command".to_owned(), toml::Value::String(bin.display().to_string())),
+            (
+                "command".to_owned(),
+                toml::Value::String(bin.display().to_string()),
+            ),
             (
                 "args".to_owned(),
                 toml::Value::Array(vec![toml::Value::String("--mcp".to_owned())]),

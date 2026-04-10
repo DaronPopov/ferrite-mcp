@@ -62,6 +62,7 @@ impl History {
         Some(&self.entries[idx])
     }
 
+    #[allow(clippy::should_implement_trait)]
     pub fn next(&mut self) -> Option<&str> {
         match self.cursor {
             None => None,

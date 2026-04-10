@@ -50,10 +50,7 @@ pub fn read_cwd(state: &Arc<Mutex<ServerState>>) -> PathBuf {
     cwd
 }
 
-pub fn with_write_cwd<T>(
-    state: &Arc<Mutex<ServerState>>,
-    f: impl FnOnce(&mut PathBuf) -> T,
-) -> T {
+pub fn with_write_cwd<T>(state: &Arc<Mutex<ServerState>>, f: impl FnOnce(&mut PathBuf) -> T) -> T {
     let guard = lock_state(state);
     let mut cwd = write_rwlock(&guard.cwd, "server cwd");
     f(&mut cwd)

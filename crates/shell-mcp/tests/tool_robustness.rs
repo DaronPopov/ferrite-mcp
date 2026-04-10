@@ -19,6 +19,10 @@ use shell_mcp::tools::filesystem::{changed_since, glob_files, list_dir, read_fil
 use shell_mcp::tools::git::{git_diff, git_log, git_status};
 use shell_mcp::tools::github::gh_status;
 use shell_mcp::tools::ml::checkpoint_list;
+use shell_mcp::tools::mutate::{
+    apply_patch, diff_files, edit_file, edit_transaction, hash_file, read_bytes, replace_in_files,
+    sed_file, stat_file, write_file,
+};
 use shell_mcp::tools::project::project_context;
 use shell_mcp::tools::state::shell_state;
 use shell_mcp::tools::symbols::symbol_index;
@@ -407,7 +411,8 @@ fn core_path_tools_default_to_server_cwd() {
     let state = state_with_cwd(&root);
 
     let file = result_json(&read_file(&json!({ "path": "hello.txt" }), &state).unwrap());
-    assert_eq!(file["content"].as_str(), Some("hello from session cwd"));
+    // Line endings are now preserved by the determinism-layer reader.
+    assert_eq!(file["content"].as_str(), Some("hello from session cwd\n"));
 
     let listing = result_json(&list_dir(&json!({}), &state).unwrap());
     assert_eq!(listing["path"].as_str(), Some(root.to_str().unwrap()));
@@ -499,5 +504,467 @@ fn bg_tools_default_to_server_cwd() {
     let job = store.get(&step_job).unwrap();
     assert_eq!(job.cwd, root);
 
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+// ── determinism-layer mutation tools ─────────────────────────────────────────
+
+fn mutate_temp_root() -> std::path::PathBuf {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!("ferrite_mutate_{nanos}_{}", std::process::id()));
+    std::fs::create_dir_all(&root).unwrap();
+    root
+}
+
+#[test]
+fn write_file_refuses_to_clobber_by_default() {
+    let root = mutate_temp_root();
+    let state = state_with_cwd(&root);
+    let path = root.join("a.txt");
+    std::fs::write(&path, "old").unwrap();
+
+    let res = write_file(&json!({ "path": "a.txt", "content": "new" }), &state).unwrap();
+    let v = result_json(&res);
+    assert_eq!(v["error"].as_bool(), Some(true), "expected refusal: {v}");
+    assert_eq!(v["code"].as_str(), Some("precondition_failed"));
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "old");
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn write_file_creates_then_cas_round_trip() {
+    let root = mutate_temp_root();
+    let state = state_with_cwd(&root);
+
+    // Create
+    let res = write_file(&json!({ "path": "b.txt", "content": "hello\n" }), &state).unwrap();
+    let v = result_json(&res);
+    assert_eq!(v["ok"].as_bool(), Some(true));
+    assert_eq!(v["receipt"]["created"].as_bool(), Some(true));
+    let post_hash = v["receipt"]["post_hash"].as_str().unwrap().to_owned();
+    assert!(v["receipt"]["pre_hash"].is_null());
+
+    // Update with correct CAS
+    let res = write_file(
+        &json!({ "path": "b.txt", "content": "world\n", "if_hash": post_hash }),
+        &state,
+    )
+    .unwrap();
+    let v = result_json(&res);
+    assert_eq!(v["ok"].as_bool(), Some(true));
+    assert_eq!(v["receipt"]["created"].as_bool(), Some(false));
+
+    // Update with stale CAS — should fail
+    let res = write_file(
+        &json!({ "path": "b.txt", "content": "boom", "if_hash": "deadbeef" }),
+        &state,
+    )
+    .unwrap();
+    let v = result_json(&res);
+    assert_eq!(v["error"].as_bool(), Some(true));
+    assert_eq!(v["code"].as_str(), Some("precondition_failed"));
+
+    assert_eq!(
+        std::fs::read_to_string(root.join("b.txt")).unwrap(),
+        "world\n"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn write_file_dry_run_does_not_touch_disk() {
+    let root = mutate_temp_root();
+    let state = state_with_cwd(&root);
+    let res = write_file(
+        &json!({ "path": "c.txt", "content": "x", "dry_run": true }),
+        &state,
+    )
+    .unwrap();
+    let v = result_json(&res);
+    assert_eq!(v["ok"].as_bool(), Some(true));
+    assert_eq!(v["receipt"]["dry_run"].as_bool(), Some(true));
+    assert!(!root.join("c.txt").exists());
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn write_file_create_dirs_makes_parents() {
+    let root = mutate_temp_root();
+    let state = state_with_cwd(&root);
+    let res = write_file(
+        &json!({
+            "path": "nested/deep/d.txt",
+            "content": "k",
+            "create_dirs": true,
+        }),
+        &state,
+    )
+    .unwrap();
+    let v = result_json(&res);
+    assert_eq!(v["ok"].as_bool(), Some(true));
+    assert!(root.join("nested/deep/d.txt").exists());
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn edit_file_unique_replace_succeeds() {
+    let root = mutate_temp_root();
+    let state = state_with_cwd(&root);
+    std::fs::write(root.join("e.txt"), "alpha beta gamma").unwrap();
+
+    let res = edit_file(
+        &json!({ "path": "e.txt", "find": "beta", "replace": "BETA" }),
+        &state,
+    )
+    .unwrap();
+    let v = result_json(&res);
+    assert_eq!(v["ok"].as_bool(), Some(true));
+    assert_eq!(
+        std::fs::read_to_string(root.join("e.txt")).unwrap(),
+        "alpha BETA gamma"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn edit_file_refuses_when_pattern_not_unique() {
+    let root = mutate_temp_root();
+    let state = state_with_cwd(&root);
+    std::fs::write(root.join("f.txt"), "x x x").unwrap();
+
+    let res = edit_file(
+        &json!({ "path": "f.txt", "find": "x", "replace": "y" }),
+        &state,
+    )
+    .unwrap();
+    let v = result_json(&res);
+    assert_eq!(v["error"].as_bool(), Some(true));
+    assert_eq!(v["code"].as_str(), Some("pattern_not_unique"));
+    assert_eq!(v["detail"]["count"].as_u64(), Some(3));
+    assert_eq!(
+        std::fs::read_to_string(root.join("f.txt")).unwrap(),
+        "x x x"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn edit_file_pattern_not_found() {
+    let root = mutate_temp_root();
+    let state = state_with_cwd(&root);
+    std::fs::write(root.join("g.txt"), "abc").unwrap();
+
+    let res = edit_file(
+        &json!({ "path": "g.txt", "find": "zzz", "replace": "y" }),
+        &state,
+    )
+    .unwrap();
+    let v = result_json(&res);
+    assert_eq!(v["code"].as_str(), Some("pattern_not_found"));
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn sed_file_substitutes_and_counts() {
+    let root = mutate_temp_root();
+    let state = state_with_cwd(&root);
+    std::fs::write(root.join("h.txt"), "foo1 foo2 foo3").unwrap();
+
+    let res = sed_file(
+        &json!({
+            "path":        "h.txt",
+            "pattern":     "foo(\\d)",
+            "replacement": "bar$1",
+        }),
+        &state,
+    )
+    .unwrap();
+    let v = result_json(&res);
+    assert_eq!(v["ok"].as_bool(), Some(true));
+    assert_eq!(v["substitutions"].as_u64(), Some(3));
+    assert_eq!(
+        std::fs::read_to_string(root.join("h.txt")).unwrap(),
+        "bar1 bar2 bar3"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn sed_file_invalid_regex_returns_structured_error() {
+    let root = mutate_temp_root();
+    let state = state_with_cwd(&root);
+    std::fs::write(root.join("i.txt"), "x").unwrap();
+
+    let res = sed_file(
+        &json!({ "path": "i.txt", "pattern": "(unbalanced", "replacement": "" }),
+        &state,
+    )
+    .unwrap();
+    let v = result_json(&res);
+    assert_eq!(v["code"].as_str(), Some("invalid_regex"));
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn apply_patch_round_trips() {
+    let root = mutate_temp_root();
+    let state = state_with_cwd(&root);
+    std::fs::write(root.join("j.txt"), "line1\nline2\nline3\n").unwrap();
+
+    let diff = "@@ -1,3 +1,3 @@\n line1\n-line2\n+LINE2\n line3\n";
+    let res = apply_patch(&json!({ "path": "j.txt", "diff": diff }), &state).unwrap();
+    let v = result_json(&res);
+    assert_eq!(v["ok"].as_bool(), Some(true), "patch should apply: {v}");
+    assert_eq!(
+        std::fs::read_to_string(root.join("j.txt")).unwrap(),
+        "line1\nLINE2\nline3\n"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn apply_patch_rejects_drifted_context() {
+    let root = mutate_temp_root();
+    let state = state_with_cwd(&root);
+    std::fs::write(root.join("k.txt"), "different\ncontent\n").unwrap();
+
+    let diff = "@@ -1,2 +1,2 @@\n line1\n-line2\n+LINE2\n";
+    let res = apply_patch(&json!({ "path": "k.txt", "diff": diff }), &state).unwrap();
+    let v = result_json(&res);
+    assert_eq!(v["error"].as_bool(), Some(true));
+    assert_eq!(v["code"].as_str(), Some("patch_rejected"));
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn stat_file_reports_metadata_and_hash() {
+    let root = mutate_temp_root();
+    let state = state_with_cwd(&root);
+    std::fs::write(root.join("m.txt"), "abcd").unwrap();
+
+    let res = stat_file(&json!({ "path": "m.txt" }), &state).unwrap();
+    let v = result_json(&res);
+    assert_eq!(v["exists"].as_bool(), Some(true));
+    assert_eq!(v["type"].as_str(), Some("file"));
+    assert_eq!(v["size"].as_u64(), Some(4));
+    assert!(v["content_hash"].as_str().is_some());
+    assert_eq!(v["encoding"].as_str(), Some("utf-8"));
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn stat_file_handles_missing_path_totally() {
+    let root = mutate_temp_root();
+    let state = state_with_cwd(&root);
+    let res = stat_file(&json!({ "path": "nope.txt" }), &state).unwrap();
+    let v = result_json(&res);
+    assert_eq!(v["exists"].as_bool(), Some(false));
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn read_bytes_returns_slice() {
+    let root = mutate_temp_root();
+    let state = state_with_cwd(&root);
+    std::fs::write(root.join("n.txt"), "abcdefghij").unwrap();
+    let res = read_bytes(&json!({ "path": "n.txt", "start": 2, "end": 6 }), &state).unwrap();
+    let v = result_json(&res);
+    assert_eq!(v["content"].as_str(), Some("cdef"));
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn diff_files_emits_unified_diff() {
+    let root = mutate_temp_root();
+    let state = state_with_cwd(&root);
+    std::fs::write(root.join("p.txt"), "one\ntwo\nthree\n").unwrap();
+    std::fs::write(root.join("q.txt"), "one\nTWO\nthree\n").unwrap();
+
+    let res = diff_files(&json!({ "a": "p.txt", "b": "q.txt" }), &state).unwrap();
+    let v = result_json(&res);
+    assert_eq!(v["identical"].as_bool(), Some(false));
+    let diff = v["diff"].as_str().unwrap();
+    assert!(diff.contains("-two"));
+    assert!(diff.contains("+TWO"));
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn diff_files_identical_flag() {
+    let root = mutate_temp_root();
+    let state = state_with_cwd(&root);
+    std::fs::write(root.join("r.txt"), "same\n").unwrap();
+    std::fs::write(root.join("s.txt"), "same\n").unwrap();
+    let res = diff_files(&json!({ "a": "r.txt", "b": "s.txt" }), &state).unwrap();
+    let v = result_json(&res);
+    assert_eq!(v["identical"].as_bool(), Some(true));
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn hash_file_returns_blake3_hash() {
+    let root = mutate_temp_root();
+    let state = state_with_cwd(&root);
+    std::fs::write(root.join("t.txt"), "x").unwrap();
+    let res = hash_file(&json!({ "path": "t.txt" }), &state).unwrap();
+    let v = result_json(&res);
+    let h = v["content_hash"].as_str().unwrap();
+    assert_eq!(h.len(), 64, "blake3 hex should be 64 chars: {h}");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn edit_transaction_commits_multiple_files_atomically() {
+    let root = mutate_temp_root();
+    let state = state_with_cwd(&root);
+    std::fs::write(root.join("u.txt"), "old1").unwrap();
+    std::fs::write(root.join("v.txt"), "old2").unwrap();
+
+    let res = edit_transaction(
+        &json!({
+            "ops": [
+                {"op": "edit", "path": "u.txt", "find": "old1", "replace": "new1"},
+                {"op": "edit", "path": "v.txt", "find": "old2", "replace": "new2"},
+            ]
+        }),
+        &state,
+    )
+    .unwrap();
+    let v = result_json(&res);
+    assert_eq!(v["ok"].as_bool(), Some(true), "txn should commit: {v}");
+    assert_eq!(v["transaction"]["ops"].as_array().unwrap().len(), 2);
+    assert_eq!(std::fs::read_to_string(root.join("u.txt")).unwrap(), "new1");
+    assert_eq!(std::fs::read_to_string(root.join("v.txt")).unwrap(), "new2");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn edit_transaction_aborts_all_on_validation_failure() {
+    let root = mutate_temp_root();
+    let state = state_with_cwd(&root);
+    std::fs::write(root.join("w.txt"), "alpha").unwrap();
+    std::fs::write(root.join("x.txt"), "x x x").unwrap(); // not unique
+
+    let res = edit_transaction(
+        &json!({
+            "ops": [
+                {"op": "edit", "path": "w.txt", "find": "alpha", "replace": "ALPHA"},
+                {"op": "edit", "path": "x.txt", "find": "x", "replace": "y"},
+            ]
+        }),
+        &state,
+    )
+    .unwrap();
+    let v = result_json(&res);
+    assert_eq!(v["error"].as_bool(), Some(true), "should abort: {v}");
+    assert_eq!(v["code"].as_str(), Some("pattern_not_unique"));
+    // First file must be untouched.
+    assert_eq!(
+        std::fs::read_to_string(root.join("w.txt")).unwrap(),
+        "alpha"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn edit_transaction_dry_run_does_not_write() {
+    let root = mutate_temp_root();
+    let state = state_with_cwd(&root);
+    std::fs::write(root.join("y.txt"), "before").unwrap();
+    let res = edit_transaction(
+        &json!({
+            "dry_run": true,
+            "ops": [
+                {"op": "edit", "path": "y.txt", "find": "before", "replace": "after"},
+            ]
+        }),
+        &state,
+    )
+    .unwrap();
+    let v = result_json(&res);
+    assert_eq!(v["transaction"]["dry_run"].as_bool(), Some(true));
+    assert_eq!(
+        std::fs::read_to_string(root.join("y.txt")).unwrap(),
+        "before"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn replace_in_files_walks_and_edits() {
+    let root = mutate_temp_root();
+    let state = state_with_cwd(&root);
+    std::fs::create_dir_all(root.join("sub")).unwrap();
+    std::fs::write(root.join("a.txt"), "FOO and BAR").unwrap();
+    std::fs::write(root.join("sub/b.txt"), "BAR only").unwrap();
+    std::fs::write(root.join("c.txt"), "untouched").unwrap();
+
+    let res = replace_in_files(
+        &json!({ "find": "BAR", "replace": "BAZ", "glob": "**/*.txt" }),
+        &state,
+    )
+    .unwrap();
+    let v = result_json(&res);
+    assert_eq!(v["ok"].as_bool(), Some(true), "{v}");
+    assert_eq!(v["matched"].as_u64(), Some(2));
+    assert_eq!(
+        std::fs::read_to_string(root.join("a.txt")).unwrap(),
+        "FOO and BAZ"
+    );
+    assert_eq!(
+        std::fs::read_to_string(root.join("sub/b.txt")).unwrap(),
+        "BAZ only"
+    );
+    assert_eq!(
+        std::fs::read_to_string(root.join("c.txt")).unwrap(),
+        "untouched"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn replace_in_files_aborts_on_non_unique_match() {
+    let root = mutate_temp_root();
+    let state = state_with_cwd(&root);
+    std::fs::write(root.join("d.txt"), "x x").unwrap();
+
+    let res = replace_in_files(
+        &json!({ "find": "x", "replace": "y", "glob": "**/*.txt" }),
+        &state,
+    )
+    .unwrap();
+    let v = result_json(&res);
+    assert_eq!(v["error"].as_bool(), Some(true));
+    assert_eq!(v["code"].as_str(), Some("pattern_not_unique"));
+    assert_eq!(std::fs::read_to_string(root.join("d.txt")).unwrap(), "x x");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn replace_in_files_allow_multi_replaces_all() {
+    let root = mutate_temp_root();
+    let state = state_with_cwd(&root);
+    std::fs::write(root.join("e.txt"), "x x x").unwrap();
+
+    let res = replace_in_files(
+        &json!({
+            "find": "x",
+            "replace": "y",
+            "glob": "**/*.txt",
+            "allow_multi": true,
+        }),
+        &state,
+    )
+    .unwrap();
+    let v = result_json(&res);
+    assert_eq!(v["ok"].as_bool(), Some(true), "{v}");
+    assert_eq!(
+        std::fs::read_to_string(root.join("e.txt")).unwrap(),
+        "y y y"
+    );
     let _ = std::fs::remove_dir_all(&root);
 }

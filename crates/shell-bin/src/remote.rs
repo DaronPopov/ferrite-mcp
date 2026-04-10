@@ -153,10 +153,7 @@ fn run_login_shell(session: Option<&str>) -> Result<()> {
 
 fn run_mcp_config(host: Option<&String>, user: Option<&String>) -> Result<()> {
     let host = host.ok_or_else(|| anyhow!("usage: ferrite remote mcp-config <host> [user]"))?;
-    let user = user
-        .cloned()
-        .or_else(|| env::var("USER").ok())
-        .unwrap_or_else(|| "daron".to_owned());
+    let user = user.cloned().unwrap_or_else(current_user);
     let ferrite_bin = env::current_exe().unwrap_or_else(|_| PathBuf::from("~/.cargo/bin/ferrite"));
     let remote_bin = ferrite_bin.display().to_string();
 
@@ -224,12 +221,11 @@ impl Report {
     }
 
     fn ssh_command(&self) -> String {
-        let user = env::var("USER").unwrap_or_else(|_| "daron".to_owned());
-        format!("ssh {}@{}", user, self.best_host_display())
+        format!("ssh {}@{}", current_user(), self.best_host_display())
     }
 
     fn ssh_dns_command(&self) -> Option<String> {
-        let user = env::var("USER").unwrap_or_else(|_| "daron".to_owned());
+        let user = current_user();
         self.best_dns_display()
             .map(|host| format!("ssh {}@{}", user, host))
     }
@@ -496,7 +492,6 @@ fn check_tmux(session: &str) -> TmuxCheck {
     }
 }
 
-
 fn check_vivado() -> Check {
     let cfg = shell_mcp::FerriteConfig::load();
     if !cfg.paths.vivado.is_empty() {
@@ -638,8 +633,33 @@ fn best_host_for_login() -> String {
     check_tailscale().ip.unwrap_or_else(local_hostname)
 }
 
+/// Resolve the current Unix login name.
+///
+/// Resolution order:
+///   1. `$USER` env var
+///   2. `$LOGNAME` env var
+///   3. `id -un` (asks the kernel/passwd database directly)
+///   4. last resort: `unknown` — never a personal name
 fn current_user() -> String {
-    env::var("USER").unwrap_or_else(|_| "daron".to_owned())
+    if let Ok(u) = env::var("USER") {
+        if !u.is_empty() {
+            return u;
+        }
+    }
+    if let Ok(u) = env::var("LOGNAME") {
+        if !u.is_empty() {
+            return u;
+        }
+    }
+    if let Ok(out) = Command::new("id").arg("-un").output() {
+        if out.status.success() {
+            let u = String::from_utf8_lossy(&out.stdout).trim().to_owned();
+            if !u.is_empty() {
+                return u;
+            }
+        }
+    }
+    "unknown".to_owned()
 }
 
 fn home_dir() -> Result<PathBuf> {

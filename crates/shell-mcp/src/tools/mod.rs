@@ -1,48 +1,117 @@
-pub mod bg_control;
-pub mod bg_interact;
-pub mod bg_pipeline;
-pub mod bg_query;
-pub mod bg_spawn;
-pub mod bg_window;
-pub mod binary;
-pub mod code;
-pub mod config_ux;
-pub mod control;
-pub mod cuda;
-pub mod debug;
-pub mod discovery;
-pub mod dynamic;
-pub mod eda;
-pub mod env_doctor;
-pub mod execution;
-pub mod filesystem;
-pub mod git;
-pub mod git_guard;
-pub mod git_new;
-pub mod git_write;
-pub mod github;
-pub mod hardware;
-pub mod health;
-pub mod history;
-pub mod http;
-pub mod ml;
-pub mod mobile_session;
-pub mod network;
-pub mod notify;
-pub mod perf_tools;
-pub mod permissions_tool;
-pub mod profiling;
-pub mod project;
-pub mod remote;
-pub mod rust_tools;
-pub mod session;
+// ── Infrastructure (top-level, no subdir) ────────────────────────────────────
+pub mod edit;
+pub mod hash;
 pub mod state;
+pub mod text;
+pub mod walk;
+
+// ── fs/ — filesystem & code inspection ──────────────────────────────────────
+#[path = "fs/code.rs"]
+pub mod code;
+#[path = "fs/filesystem.rs"]
+pub mod filesystem;
+#[path = "fs/mutate.rs"]
+pub mod mutate;
+#[path = "fs/symbols.rs"]
 pub mod symbols;
-pub mod system;
-pub mod tmux;
+
+// ── process/ — command execution & background jobs ─────────────────────────
+#[path = "process/bg_control.rs"]
+pub mod bg_control;
+#[path = "process/bg_interact.rs"]
+pub mod bg_interact;
+#[path = "process/bg_pipeline.rs"]
+pub mod bg_pipeline;
+#[path = "process/bg_query.rs"]
+pub mod bg_query;
+#[path = "process/bg_spawn.rs"]
+pub mod bg_spawn;
+#[path = "process/bg_window.rs"]
+pub mod bg_window;
+#[path = "process/execution.rs"]
+pub mod execution;
+#[path = "process/tty_exec.rs"]
 pub mod tty_exec;
-pub mod ux_wizard;
+
+// ── git/ — version control & github ─────────────────────────────────────────
+#[path = "git/git.rs"]
+pub mod git;
+#[path = "git/git_guard.rs"]
+pub mod git_guard;
+#[path = "git/git_new.rs"]
+pub mod git_new;
+#[path = "git/git_write.rs"]
+pub mod git_write;
+#[path = "git/github.rs"]
+pub mod github;
+
+// ── sys/ — system info, networking, discovery ───────────────────────────────
+#[path = "sys/binary.rs"]
+pub mod binary;
+#[path = "sys/discovery.rs"]
+pub mod discovery;
+#[path = "sys/env_doctor.rs"]
+pub mod env_doctor;
+#[path = "sys/http.rs"]
+pub mod http;
+#[path = "sys/network.rs"]
+pub mod network;
+#[path = "sys/system.rs"]
+pub mod system;
+
+// ── hw/ — hardware, CUDA, EDA toolchains ────────────────────────────────────
+#[path = "hw/cuda.rs"]
+pub mod cuda;
+#[path = "hw/eda.rs"]
+pub mod eda;
+#[path = "hw/hardware.rs"]
+pub mod hardware;
+
+// ── perf/ — profiling, debugging, benchmarks, ML ────────────────────────────
+#[path = "perf/debug.rs"]
+pub mod debug;
+#[path = "perf/history.rs"]
+pub mod history;
+#[path = "perf/ml.rs"]
+pub mod ml;
+#[path = "perf/perf_tools.rs"]
+pub mod perf_tools;
+#[path = "perf/profiling.rs"]
+pub mod profiling;
+
+// ── session/ — session, project, workspace, remote, notify ──────────────────
+#[path = "session/mobile_session.rs"]
+pub mod mobile_session;
+#[path = "session/notify.rs"]
+pub mod notify;
+#[path = "session/project.rs"]
+pub mod project;
+#[path = "session/remote.rs"]
+pub mod remote;
+#[path = "session/session.rs"]
+pub mod session;
+#[path = "session/tmux.rs"]
+pub mod tmux;
+#[path = "session/workspace.rs"]
 pub mod workspace;
+
+// ── meta/ — health, permissions, dynamic tools, UX, control plane ───────────
+#[path = "meta/config_ux.rs"]
+pub mod config_ux;
+#[path = "meta/control/mod.rs"]
+pub mod control;
+#[path = "meta/dynamic.rs"]
+pub mod dynamic;
+#[path = "meta/health.rs"]
+pub mod health;
+#[path = "meta/permissions_tool.rs"]
+pub mod permissions_tool;
+#[path = "meta/ux_wizard.rs"]
+pub mod ux_wizard;
+
+// ── lang/ — language-specific tools ─────────────────────────────────────────
+#[path = "lang/rust_tools.rs"]
+pub mod rust_tools;
 
 use crate::protocol::ToolDef;
 use serde_json::json;
@@ -544,7 +613,7 @@ pub fn all_tool_definitions() -> Vec<ToolDef> {
                     "depth":   { "type": "integer", "description": "Directory tree depth (default 2)" },
                     "ports":   { "type": "boolean", "description": "Include listening ports filtered to named processes (default false)" },
                     "bg_jobs": { "type": "boolean", "description": "Include running + recent background jobs (default false)" },
-                    "chips":   { "type": "boolean", "description": "Scan processor_lab chips — sim/bit/WNS status. Auto-detects lab path from cwd (default false)" },
+                    "chips":   { "type": "boolean", "description": "Scan a chip workspace (a directory containing chips/) — sim/bit/WNS status. Walks up from cwd looking for one (default false)" },
                     "synth":   { "type": "boolean", "description": "Parse Vivado timing/utilization reports near cwd — WNS, LUT%, DSP% (default false)" },
                     "diff":    { "type": "boolean", "description": "Show compact git diff --stat for dirty repos (default false)" },
                     "hw":      { "type": "boolean", "description": "Include live GPU utilization + VRAM (default false)" }
@@ -642,8 +711,8 @@ pub fn all_tool_definitions() -> Vec<ToolDef> {
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "chip":         { "type": "string",  "description": "Chip name under processor_lab/chips" },
-                    "lab_path":     { "type": "string",  "description": "Path to processor_lab (default ~/processor_lab)" },
+                    "chip":         { "type": "string",  "description": "Chip name (subdirectory of <lab_path>/chips/)" },
+                    "lab_path":     { "type": "string",  "description": "Chip workspace root containing chips/. Default: walk up from server cwd looking for a directory containing chips/" },
                     "manifest_path": { "type": "string",  "description": "Optional explicit path to ferrite_fpga.toml" },
                     "board":        { "type": "string",  "description": "Board target (default basys3)" },
                     "sim_target":   { "type": "string",  "description": "Optional named cocotb entry from ferrite_fpga.toml" },
@@ -662,8 +731,8 @@ pub fn all_tool_definitions() -> Vec<ToolDef> {
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "chip":         { "type": "string",  "description": "Chip name under processor_lab/chips" },
-                    "lab_path":     { "type": "string",  "description": "Path to processor_lab (default ~/processor_lab)" },
+                    "chip":         { "type": "string",  "description": "Chip name (subdirectory of <lab_path>/chips/)" },
+                    "lab_path":     { "type": "string",  "description": "Chip workspace root containing chips/. Default: walk up from server cwd looking for a directory containing chips/" },
                     "manifest_path": { "type": "string",  "description": "Optional explicit path to ferrite_fpga.toml" },
                     "board":        { "type": "string",  "description": "Board target (default basys3)" },
                     "sim_target":   { "type": "string",  "description": "Optional named cocotb entry from ferrite_fpga.toml" },
@@ -682,8 +751,8 @@ pub fn all_tool_definitions() -> Vec<ToolDef> {
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "chip":         { "type": "string",  "description": "Chip name under processor_lab/chips" },
-                    "lab_path":     { "type": "string",  "description": "Path to processor_lab (default ~/processor_lab)" },
+                    "chip":         { "type": "string",  "description": "Chip name (subdirectory of <lab_path>/chips/)" },
+                    "lab_path":     { "type": "string",  "description": "Chip workspace root containing chips/. Default: walk up from server cwd looking for a directory containing chips/" },
                     "manifest_path": { "type": "string",  "description": "Optional explicit path to ferrite_fpga.toml" },
                     "board":        { "type": "string",  "description": "Board target (default basys3)" },
                     "sim_target":   { "type": "string",  "description": "Optional named cocotb entry from ferrite_fpga.toml" },
@@ -701,8 +770,8 @@ pub fn all_tool_definitions() -> Vec<ToolDef> {
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "chip":         { "type": "string",  "description": "Chip name under processor_lab/chips" },
-                    "lab_path":     { "type": "string",  "description": "Path to processor_lab (default ~/processor_lab)" },
+                    "chip":         { "type": "string",  "description": "Chip name (subdirectory of <lab_path>/chips/)" },
+                    "lab_path":     { "type": "string",  "description": "Chip workspace root containing chips/. Default: walk up from server cwd looking for a directory containing chips/" },
                     "manifest_path": { "type": "string",  "description": "Optional explicit path to ferrite_fpga.toml" },
                     "sim_target":   { "type": "string",  "description": "Optional named cocotb entry from ferrite_fpga.toml" },
                     "synth_target": { "type": "string",  "description": "Optional named synth entry from ferrite_fpga.toml" }
@@ -898,6 +967,194 @@ pub fn all_tool_definitions() -> Vec<ToolDef> {
                     "path": { "type": "string", "description": "File path to delete" }
                 },
                 "required": ["path"]
+            }),
+        },
+
+        // ── Determinism-layer mutations ───────────────────────────────────────
+        // These tools share a strict contract: every mutation goes through
+        // an atomic write (sibling tmp → fsync → rename), every successful
+        // call returns a `receipt` with pre/post content_hash, and every
+        // failure returns a structured `{error, code, detail}` object so
+        // agents can branch without parsing English.
+        //
+        // Compare-and-swap: pass `if_hash` (the prior content_hash from
+        // read_file/stat_file) to refuse the write if the file drifted.
+        // Use `dry_run: true` to preview a change without touching disk.
+        ToolDef {
+            name: "write_file",
+            description: "Atomically write a UTF-8 file. Default refuses to clobber an existing file — \
+                           pass `if_hash` for compare-and-swap, or `unconditional: true` for blind overwrite. \
+                           Returns a receipt with pre/post content_hash.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "path":          { "type": "string",  "description": "Target path (absolute or session-cwd-relative)" },
+                    "content":       { "type": "string",  "description": "File contents" },
+                    "if_hash":       { "type": "string",  "description": "Required prior content_hash (CAS). Mutually exclusive with unconditional/if_exists." },
+                    "if_exists":     { "type": "boolean", "description": "Require the file to already exist (any content)." },
+                    "if_not_exists": { "type": "boolean", "description": "Require the file to NOT exist (the default)." },
+                    "unconditional": { "type": "boolean", "description": "Skip all preconditions. Use only when you manage your own locking." },
+                    "create_dirs":   { "type": "boolean", "description": "Create parent directories as needed (default false)." },
+                    "dry_run":       { "type": "boolean", "description": "Compute the receipt without touching disk." },
+                    "mode":          { "type": "integer", "description": "Unix mode for newly-created files (e.g. 0o644)." }
+                },
+                "required": ["path", "content"]
+            }),
+        },
+        ToolDef {
+            name: "edit_file",
+            description: "Replace a UNIQUE occurrence of `find` with `replace`. Refuses to act if the pattern \
+                           is missing or matches more than once — no guess-the-right-match behaviour. \
+                           Pass `if_hash` for compare-and-swap. Returns a receipt.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "path":    { "type": "string", "description": "File to edit" },
+                    "find":    { "type": "string", "description": "Exact substring to replace (must occur exactly once)" },
+                    "replace": { "type": "string", "description": "Replacement substring" },
+                    "if_hash": { "type": "string", "description": "Required prior content_hash (CAS)" },
+                    "dry_run": { "type": "boolean", "description": "Preview without writing" }
+                },
+                "required": ["path", "find", "replace"]
+            }),
+        },
+        ToolDef {
+            name: "sed_file",
+            description: "Apply a regex substitution to every match in a file. Standard `regex` crate \
+                           replacement syntax ($1, ${name}, $$). Returns the receipt plus substitution count.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "path":        { "type": "string", "description": "File to edit" },
+                    "pattern":     { "type": "string", "description": "Rust regex pattern" },
+                    "replacement": { "type": "string", "description": "Replacement template" },
+                    "if_hash":     { "type": "string", "description": "Required prior content_hash (CAS)" },
+                    "dry_run":     { "type": "boolean", "description": "Preview without writing" }
+                },
+                "required": ["path", "pattern", "replacement"]
+            }),
+        },
+        ToolDef {
+            name: "apply_patch",
+            description: "Apply a unified diff to a single file. Validates every context and removal line \
+                           against the source — rejects with a structured error if context drifts.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "path":    { "type": "string", "description": "File to patch" },
+                    "diff":    { "type": "string", "description": "Unified diff body (--- / +++ headers optional)" },
+                    "if_hash": { "type": "string", "description": "Required prior content_hash (CAS)" },
+                    "dry_run": { "type": "boolean", "description": "Preview without writing" }
+                },
+                "required": ["path", "diff"]
+            }),
+        },
+        ToolDef {
+            name: "stat_file",
+            description: "Return metadata for a path: type, size, mtime, unix mode, content_hash, encoding. \
+                           Total — never errors on missing files (returns exists=false). \
+                           Use to obtain a content_hash before edit_file/apply_patch CAS.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "description": "Path to stat" }
+                },
+                "required": ["path"]
+            }),
+        },
+        ToolDef {
+            name: "read_bytes",
+            description: "Read a half-open byte range [start, end) from a file. Returns UTF-8-snapped \
+                           content (slice boundaries are widened to char boundaries to keep output valid).",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "path":  { "type": "string",  "description": "File to read" },
+                    "start": { "type": "integer", "description": "Inclusive start byte (default 0)" },
+                    "end":   { "type": "integer", "description": "Exclusive end byte" }
+                },
+                "required": ["path", "end"]
+            }),
+        },
+        ToolDef {
+            name: "diff_files",
+            description: "Compute a unified diff between two files. Returns the diff text and an \
+                           `identical` flag. Use `context_lines` to control hunk context (default 3).",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "a":             { "type": "string",  "description": "Left side path" },
+                    "b":             { "type": "string",  "description": "Right side path" },
+                    "context_lines": { "type": "integer", "description": "Lines of context per hunk (default 3)" }
+                },
+                "required": ["a", "b"]
+            }),
+        },
+        ToolDef {
+            name: "hash_file",
+            description: "Return the blake3 content_hash of a file. Cheap, deterministic, used to seed CAS.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "description": "File to hash" }
+                },
+                "required": ["path"]
+            }),
+        },
+        ToolDef {
+            name: "edit_transaction",
+            description: "Stage and commit several mutations across multiple files as a unit. \
+                           Validates every op up front (no partial-failure surface), then writes \
+                           in submission order. On commit failure, restores previously-written \
+                           files from in-memory snapshots (best-effort transactional).",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "ops": {
+                        "type": "array",
+                        "description": "Operations to apply. Each op needs {op, path, ...}.",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "op":            { "type": "string", "enum": ["write","edit","sed","patch"] },
+                                "path":          { "type": "string" },
+                                "content":      { "type": "string", "description": "Required for op=write" },
+                                "find":         { "type": "string", "description": "Required for op=edit" },
+                                "replace":      { "type": "string", "description": "Required for op=edit" },
+                                "pattern":      { "type": "string", "description": "Required for op=sed" },
+                                "replacement":  { "type": "string", "description": "Required for op=sed" },
+                                "diff":         { "type": "string", "description": "Required for op=patch" },
+                                "if_hash":      { "type": "string", "description": "Per-op CAS hash" },
+                                "if_exists":    { "type": "boolean" },
+                                "if_not_exists":{ "type": "boolean" },
+                                "unconditional":{ "type": "boolean" }
+                            },
+                            "required": ["op", "path"]
+                        }
+                    },
+                    "dry_run":     { "type": "boolean", "description": "Validate + stage without committing." },
+                    "create_dirs": { "type": "boolean", "description": "Create parent dirs as needed." }
+                },
+                "required": ["ops"]
+            }),
+        },
+        ToolDef {
+            name: "replace_in_files",
+            description: "Walk a tree, find every file containing `find` exactly once, and replace it. \
+                           Files with zero matches are skipped silently. Files with >1 matches abort \
+                           the whole operation unless `allow_multi: true` (then a regex substitution \
+                           is used per file). Runs as one transaction.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "find":        { "type": "string",  "description": "Literal substring to find" },
+                    "replace":     { "type": "string",  "description": "Replacement substring" },
+                    "path":        { "type": "string",  "description": "Root directory (default: cwd)" },
+                    "glob":        { "type": "string",  "description": "Include pattern (default: **/*)" },
+                    "allow_multi": { "type": "boolean", "description": "Replace every occurrence per file (default false)" },
+                    "dry_run":     { "type": "boolean", "description": "Preview without writing" }
+                },
+                "required": ["find", "replace"]
             }),
         },
 
@@ -1376,10 +1633,11 @@ pub fn all_tool_definitions() -> Vec<ToolDef> {
         // ── Project / chip awareness (Tier 1) ────────────────────────────────
         ToolDef {
             name: "project_context",
-            description: "Auto-detect workspace type from path. Walks up from path to find \
-                known project roots (processor_lab, verilogchill, ferrite*, ferrite-mcp). \
-                Returns project_name, project_type, root, context_hints, and active_targets \
-                (chips with .bit or workspace crates).",
+            description: "Auto-detect workspace type from path using structural markers \
+                (chips/, rtl/, ip/, top/, Cargo.toml, pyproject.toml, package.json). \
+                Walks up from path to find the project root. Returns project_name, project_type \
+                (rtl_lab, rtl_project, rust_workspace, rust_project, python_project, node_project), \
+                root, context_hints, and active_targets (chips with .bit or workspace crates).",
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -1389,14 +1647,14 @@ pub fn all_tool_definitions() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "chip_status",
-            description: "Scan all chips in processor_lab. For each chip dir under chips/: \
-                finds .bit files in build/, checks sim results (results.xml or .log), \
+            description: "Scan all chips in a chip workspace (a directory containing chips/<name>/). \
+                For each chip dir: finds .bit files in build/, checks sim results (results.xml or .log), \
                 and parses timing/utilization reports if present. Returns array of \
                 [{chip, sim_ok, bit_built, bit_path, wns, lut_pct, last_built}].",
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "lab_path": { "type": "string", "description": "Path to processor_lab (default: ~/processor_lab)" }
+                    "lab_path": { "type": "string", "description": "Chip workspace root containing chips/. Default: walk up from server cwd looking for a directory containing chips/" }
                 }
             }),
         },
@@ -1408,8 +1666,8 @@ pub fn all_tool_definitions() -> Vec<ToolDef> {
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "chip":     { "type": "string", "description": "Chip name (required, e.g. 'rope_attn')" },
-                    "lab_path": { "type": "string", "description": "Path to processor_lab (default: ~/processor_lab)" },
+                    "chip":     { "type": "string", "description": "Chip name (required; subdirectory of <lab_path>/chips/)" },
+                    "lab_path": { "type": "string", "description": "Chip workspace root containing chips/. Default: walk up from server cwd looking for a directory containing chips/" },
                     "manifest_path": { "type": "string", "description": "Optional explicit path to ferrite_fpga.toml" },
                     "board":    { "type": "string", "description": "Target board (default: basys3)" },
                     "sim_target":   { "type": "string", "description": "Optional named cocotb entry from ferrite_fpga.toml" },
@@ -1507,11 +1765,15 @@ pub fn all_tool_definitions() -> Vec<ToolDef> {
                 Initialises a directory, runs git init, scaffolds files by project_type \
                 (bare, rust, rust-lib, rust-workspace, python, rtl), makes an initial commit, \
                 and optionally creates a GitHub repo via REST API (needs GITHUB_TOKEN env var) \
-                and pushes. Returns {root, files_created, ssh_url, next_steps}.",
+                and pushes. The GitHub owner is resolved from `owner` arg, $GITHUB_USER / $GH_USER \
+                env, or `git config github.user`. If no owner can be resolved, the project is \
+                still created locally and the remote step is skipped. \
+                Returns {root, owner, files_created, ssh_url, next_steps}.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "name":         { "type": "string",  "description": "Project / repo name (required)" },
+                    "name":         { "type": "string",  "description": "Project / repo name (required, [A-Za-z0-9._-])" },
+                    "owner":        { "type": "string",  "description": "GitHub owner (optional; falls back to $GITHUB_USER or git config github.user)" },
                     "path":         { "type": "string",  "description": "Parent directory (default: ~)" },
                     "project_type": {
                         "type": "string",
@@ -1528,12 +1790,15 @@ pub fn all_tool_definitions() -> Vec<ToolDef> {
         // ── GitHub SSH tools ──────────────────────────────────────────────────
         ToolDef {
             name: "gh_clone",
-            description: "Clone a repo from DaronPopov GitHub via SSH (git@github.com:DaronPopov/<repo>.git). \
-                Returns {success, local_path, repo, branch, stdout, stderr}.",
+            description: "Clone a repo from GitHub via SSH (git@github.com:<owner>/<repo>.git). \
+                Owner is resolved from (in priority): `repo` of form 'owner/name', explicit `owner` arg, \
+                $GITHUB_USER / $GH_USER env, or `git config github.user`. \
+                Returns {success, owner, repo, ssh_url, local_path, branch, stdout, stderr}.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "repo":    { "type": "string", "description": "Repository name (required, e.g. 'processor_lab')" },
+                    "repo":    { "type": "string", "description": "Repo name or 'owner/name' (required)" },
+                    "owner":   { "type": "string", "description": "GitHub owner (optional; overrides env/git config)" },
                     "dest":    { "type": "string", "description": "Local destination path (default: ~/<repo>)" },
                     "branch":  { "type": "string", "description": "Branch to clone" },
                     "shallow": { "type": "boolean", "description": "Shallow clone --depth 1 (default: false)" }
@@ -1557,17 +1822,17 @@ pub fn all_tool_definitions() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "gh_status",
-            description: "Git status across all known project roots. Scans ~/processor_lab, \
-                ~/verilogchill, ~/ferrite-os-clean, ~/cpp_importable_test, ~/rust_shell, \
-                ~/aws_tool (or custom paths). Returns [{path, project, branch, ahead, behind, \
-                dirty, last_commit}] for each git repo found.",
+            description: "Git status across one or more paths. With no args, scans the server cwd. \
+                With `path` or `paths`, scans those locations (depth-2). \
+                Returns [{path, project, branch, ahead, behind, dirty, last_commit}] for each git repo found.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
+                    "path":  { "type": "string", "description": "Single path to scan (default: server cwd)" },
                     "paths": {
                         "type": "array",
                         "items": { "type": "string" },
-                        "description": "Override scan list (default: well-known project roots)"
+                        "description": "Multiple paths to scan (overrides `path`)"
                     }
                 }
             }),

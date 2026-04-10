@@ -5,8 +5,8 @@
 
 use std::io::{BufRead, Write};
 use std::path::PathBuf;
-use std::sync::mpsc::{self, Sender};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, Mutex, RwLock};
 use std::thread;
 use std::time::Instant;
@@ -282,10 +282,7 @@ impl McpServer {
     }
 
     fn handle_notification(&self, method: &str) {
-        match method {
-            "notifications/initialized" => {}
-            _ => {}
-        }
+        if method == "notifications/initialized" {}
     }
 
     fn dispatch(&self, method: &str, params: Option<&Value>) -> Result<Value, String> {
@@ -355,6 +352,10 @@ impl McpServer {
             | "read_context"
             | "grep_code"
             | "read_file"
+            | "stat_file"
+            | "read_bytes"
+            | "diff_files"
+            | "hash_file"
             | "list_dir"
             | "glob"
             | "which"
@@ -407,24 +408,26 @@ impl McpServer {
 
             // Global session/process state mutations should remain serialized even
             // after parallel dispatch exists.
-            "set_cwd"
-            | "control_reconcile"
-            | "config_ux"
-            | "ux_wizard"
-            | "note"
-            | "project_new"
-            | "notify"
-            | "session_restart" => ToolExecutionPolicy {
+            "set_cwd" | "control_reconcile" | "config_ux" | "ux_wizard" | "note"
+            | "project_new" | "notify" | "session_restart" => ToolExecutionPolicy {
                 lane: ToolConcurrencyLane::SerializedState,
                 resource_key: None,
                 reason: "mutates shared server or process-global state",
             },
 
             // Filesystem and repo mutations should serialize by target resource.
-            "move_file" | "mkdir" | "delete_file" => ToolExecutionPolicy {
+            "move_file" | "mkdir" | "delete_file" | "write_file" | "edit_file" | "sed_file"
+            | "apply_patch" => ToolExecutionPolicy {
                 lane: ToolConcurrencyLane::SerializedResource,
                 resource_key: self.path_resource_key(args["path"].as_str()),
                 reason: "mutates filesystem state under a target path",
+            },
+            // Multi-file mutations: serialize globally on the state lane
+            // since we don't know all paths until we walk the args.
+            "edit_transaction" | "replace_in_files" => ToolExecutionPolicy {
+                lane: ToolConcurrencyLane::SerializedState,
+                resource_key: None,
+                reason: "multi-file mutation; lock global to avoid overlap",
             },
             "git_log" | "git_diff" | "git_status" | "gh_sync" | "git_checkpoint" | "git_commit" => {
                 ToolExecutionPolicy {
@@ -461,7 +464,10 @@ impl McpServer {
                     .or(Some("pipelines:shared".to_owned())),
                 reason: "mutates pipeline orchestration state",
             },
-            "fpga_program" | "fpga_serial" | "fpga_tcfp_status" | "fpga_tcfp_tile_read"
+            "fpga_program"
+            | "fpga_serial"
+            | "fpga_tcfp_status"
+            | "fpga_tcfp_tile_read"
             | "fpga_monitor" => ToolExecutionPolicy {
                 lane: ToolConcurrencyLane::SerializedResource,
                 resource_key: args["target"]
@@ -492,7 +498,8 @@ impl McpServer {
             | "tty_exec"
             | "tmux_ctl" => ToolExecutionPolicy {
                 lane: ToolConcurrencyLane::SerializedResource,
-                resource_key: self.path_resource_key(args["cwd"].as_str().or_else(|| args["path"].as_str())),
+                resource_key: self
+                    .path_resource_key(args["cwd"].as_str().or_else(|| args["path"].as_str())),
                 reason: "runs external commands that may mutate a working tree or tool state",
             },
 
@@ -611,6 +618,17 @@ impl McpServer {
             "move_file" => tools::filesystem::move_file(args),
             "mkdir" => tools::filesystem::make_dir(args),
             "delete_file" => tools::filesystem::delete_file(args),
+            // Determinism-layer mutations & probes
+            "write_file" => tools::mutate::write_file(args, &self.state),
+            "edit_file" => tools::mutate::edit_file(args, &self.state),
+            "sed_file" => tools::mutate::sed_file(args, &self.state),
+            "apply_patch" => tools::mutate::apply_patch(args, &self.state),
+            "stat_file" => tools::mutate::stat_file(args, &self.state),
+            "read_bytes" => tools::mutate::read_bytes(args, &self.state),
+            "diff_files" => tools::mutate::diff_files(args, &self.state),
+            "hash_file" => tools::mutate::hash_file(args, &self.state),
+            "edit_transaction" => tools::mutate::edit_transaction(args, &self.state),
+            "replace_in_files" => tools::mutate::replace_in_files(args, &self.state),
             // Workspace
             "orient" => tools::workspace::orient(args, &self.state, &self.store),
             "note" => tools::workspace::note(args, &self.state),
@@ -645,12 +663,14 @@ impl McpServer {
             "live_window" => tools::bg_window::live_window(args, &self.store),
             // Project / chip awareness (Tier 1)
             "project_context" => tools::project::project_context(args, &self.state),
-            "chip_status" => tools::project::chip_status(args),
-            "chip_build_pipeline" => tools::project::chip_build_pipeline(args, &self.store),
-            "rtl_regression_run" => tools::project::rtl_regression_run(args),
-            "rtl_regression_report" => tools::project::rtl_regression_report(args),
-            "fpga_triage" => tools::project::fpga_triage(args),
-            "fpga_artifacts" => tools::project::fpga_artifacts(args),
+            "chip_status" => tools::project::chip_status(args, &self.state),
+            "chip_build_pipeline" => {
+                tools::project::chip_build_pipeline(args, &self.store, &self.state)
+            }
+            "rtl_regression_run" => tools::project::rtl_regression_run(args, &self.state),
+            "rtl_regression_report" => tools::project::rtl_regression_report(args, &self.state),
+            "fpga_triage" => tools::project::fpga_triage(args, &self.state),
+            "fpga_artifacts" => tools::project::fpga_artifacts(args, &self.state),
             "board_status" => tools::project::board_status(args),
             "fpga_monitor" => tools::project::fpga_monitor(args, &self.store),
             // Remote SSH (Tier 2)

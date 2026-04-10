@@ -558,15 +558,15 @@ fn rewrite_rustup(cmd: &str, env: &mut HashMap<String, String>) -> (String, bool
     }
     // For `rustup update` / `rustup install`, the --no-modify-path is useful
     // but -y is the key non-interactive flag
-    if tokens.len() >= 2 && matches!(tokens[1].as_str(), "update" | "install" | "toolchain") {
-        if !tokens
+    if tokens.len() >= 2
+        && matches!(tokens[1].as_str(), "update" | "install" | "toolchain")
+        && !tokens
             .iter()
             .any(|t| t == "-y" || t == "--no-update-default-toolchain")
-        {
-            let mut out = tokens;
-            out.push("-y".to_owned());
-            return (out.join(" "), true);
-        }
+    {
+        let mut out = tokens;
+        out.push("-y".to_owned());
+        return (out.join(" "), true);
     }
     (cmd.to_owned(), false)
 }

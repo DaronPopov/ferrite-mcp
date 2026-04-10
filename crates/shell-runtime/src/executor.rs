@@ -25,20 +25,14 @@ impl Executor {
         let mut last = ExitStatus::SUCCESS;
 
         for (i, item) in list.items.iter().enumerate() {
-            let should_run = match item.separator {
-                // These separators govern whether the *previous* item's
-                // status allows the current item to run.
-                _ => {
-                    if i == 0 {
-                        true
-                    } else {
-                        let prev_sep = &list.items[i - 1].separator;
-                        match prev_sep {
-                            Separator::And => last.success(),
-                            Separator::Or => !last.success(),
-                            _ => true,
-                        }
-                    }
+            // The *previous* item's separator governs whether this item runs.
+            let should_run = if i == 0 {
+                true
+            } else {
+                match &list.items[i - 1].separator {
+                    Separator::And => last.success(),
+                    Separator::Or => !last.success(),
+                    _ => true,
                 }
             };
 
