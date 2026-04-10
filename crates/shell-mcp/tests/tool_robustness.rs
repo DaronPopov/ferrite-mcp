@@ -24,6 +24,7 @@ use shell_mcp::tools::mutate::{
     sed_file, stat_file, write_file,
 };
 use shell_mcp::tools::project::project_context;
+use shell_mcp::tools::rust_tools::test_run;
 use shell_mcp::tools::state::shell_state;
 use shell_mcp::tools::symbols::symbol_index;
 use shell_mcp::tools::tty_exec::tty_exec;
@@ -166,6 +167,38 @@ fn which_handles_binary_that_leaks_stdio_fds() {
         elapsed.as_secs() < 10,
         "which must not hang; took {}s",
         elapsed.as_secs()
+    );
+}
+
+#[test]
+fn test_run_succeeds_on_minimal_cargo_project() {
+    let root = std::env::temp_dir().join(format!("ferrite_test_run_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(
+        root.join("Cargo.toml"),
+        "[package]\nname = \"ferrite-test-run-fixture\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("src/lib.rs"),
+        "#[cfg(test)]\nmod tests {\n    #[test]\n    fn fixture_passes() { assert_eq!(2 + 2, 4); }\n}\n",
+    )
+    .unwrap();
+
+    let state = state_with_cwd(&root);
+    let result = test_run(&json!({ "timeout_secs": 30 }), &state).unwrap();
+    let v = result_json(&result);
+    let _ = std::fs::remove_dir_all(&root);
+
+    assert_eq!(v["success"].as_bool(), Some(true), "{v}");
+    assert!(
+        v["passed"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|test| test["name"].as_str() == Some("tests::fixture_passes")),
+        "{v}"
     );
 }
 
