@@ -316,7 +316,7 @@ impl McpServer {
 
         // Cross-cutting: keyword filter + size cap applied to every response.
         // Callers may override max_chars (0 = unlimited); filter is opt-in.
-        let filter = args["filter"].as_str().unwrap_or("");
+        let filter = self.response_filter(name, args);
         let max_chars = args["max_chars"]
             .as_u64()
             .map(|v| v as usize)
@@ -338,6 +338,23 @@ impl McpServer {
         let result = self.call_tool(name, args)?;
         let result = cap_and_filter(result, filter, max_chars);
         serde_json::to_value(&result).map_err(|e| e.to_string())
+    }
+
+    fn response_filter<'a>(&self, name: &str, args: &'a Value) -> &'a str {
+        args["response_filter"]
+            .as_str()
+            .or_else(|| {
+                if Self::tool_owns_filter_arg(name) {
+                    None
+                } else {
+                    args["filter"].as_str()
+                }
+            })
+            .unwrap_or("")
+    }
+
+    fn tool_owns_filter_arg(name: &str) -> bool {
+        matches!(name, "test_run" | "process_tree")
     }
 
     fn tool_execution_policy(&self, name: &str, args: &Value) -> ToolExecutionPolicy {
@@ -887,5 +904,26 @@ mod tests {
         let policy = server.tool_execution_policy("set_cwd", &json!({"path": "/tmp"}));
         assert_eq!(policy.lane, ToolConcurrencyLane::SerializedState);
         assert_eq!(policy.resource_key, None);
+    }
+
+    #[test]
+    fn response_filter_does_not_steal_tool_filter_args() {
+        let server = McpServer::new();
+        let args = json!({"filter": "some_test"});
+        assert_eq!(server.response_filter("test_run", &args), "");
+    }
+
+    #[test]
+    fn response_filter_keeps_legacy_filter_for_other_tools() {
+        let server = McpServer::new();
+        let args = json!({"filter": "needle"});
+        assert_eq!(server.response_filter("exec", &args), "needle");
+    }
+
+    #[test]
+    fn response_filter_explicit_arg_overrides_tool_filter_arg() {
+        let server = McpServer::new();
+        let args = json!({"filter": "some_test", "response_filter": "needle"});
+        assert_eq!(server.response_filter("test_run", &args), "needle");
     }
 }
