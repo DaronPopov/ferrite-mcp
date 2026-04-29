@@ -41,6 +41,39 @@ Current workspace members:
 - `crates/shell-tui`
 - `crates/shell-mcp`
 - `crates/shell-bin`
+- `crates/xtask`
+
+The vendored Warp UI slice lives outside the main workspace at
+`third_party/warp-ui`. The root workspace exposes `warpui` and `warpui_core` as
+workspace dependencies, but the copied upstream crates keep their own workspace
+so their pinned toolchain and support crates do not leak into the server build.
+
+The crate boundaries are part of the design, not just folder organization. See
+[ARCHITECTURE.md](ARCHITECTURE.md) and run `./scripts/check-boundaries.sh`
+before moving functionality between layers.
+
+For agent configuration, copy or reference [PROMPT.md](PROMPT.md) in Codex,
+Claude Code, or other MCP-capable coding agents so they consistently use the
+Ferrite toolset and editing model.
+
+## Build And Verification
+
+Use the Cargo xtask entrypoint for the full local check suite:
+
+```sh
+cargo run -p xtask -- check-all
+```
+
+Available checks:
+
+- `check-main`: boundary checks, root workspace `cargo check`, and `shell-mcp`
+  tests
+- `check-ui`: vendored Warp UI `warpui` library check
+- `check-macos`: root workspace checks for installed macOS Rust targets
+
+The main Ferrite workspace is intended to build on Linux and macOS. The Warp UI
+macOS target check requires Apple SDK headers and `xcrun`/`metal`, so it is
+skipped automatically when run from Linux.
 
 ## Main Capabilities
 
@@ -76,12 +109,7 @@ This is the core rule set the server uses today. It is intentionally conservativ
 curl -fsSL https://raw.githubusercontent.com/DaronPopov/ferrite-mcp/main/install.sh | sh
 ```
 
-The installer builds `ferrite` from source.
-
-Today, the `ferrite install` CLI path auto-registers both:
-
-- Claude Code via `~/.claude.json`
-- OpenAI Codex via `~/.codex/config.toml`
+The installer builds `ferrite` from source and registers it with supported MCP clients when their config files are present.
 
 Manual registration example:
 
@@ -164,15 +192,3 @@ Important modes:
 - `ferrite install`
 - `ferrite uninstall`
 - `ferrite status`
-
-## What This README Is Describing
-
-This README describes the system as it exists in this repo now:
-
-- local MCP server
-- generic tool surface
-- selective request parallelism
-- no `fercuda` runtime coupling
-- no dependency on the removed `ferrite-notify` crate
-
-If the CLI surface changes again, the README should be updated from the current workspace and `shell-mcp` server behavior rather than from older deployment workflows.

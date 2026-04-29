@@ -9,6 +9,7 @@ members = [
     "crates/shell-tui",
     "crates/shell-mcp",
     "crates/shell-bin",
+    "crates/xtask",
 ]
 
 [workspace.package]
@@ -27,6 +28,8 @@ shell-runtime = { path = "crates/shell-runtime" }
 shell-hooks   = { path = "crates/shell-hooks" }
 shell-tui     = { path = "crates/shell-tui" }
 shell-mcp     = { path = "crates/shell-mcp" }
+warpui        = { path = "third_party/warp-ui/crates/warpui" }
+warpui_core   = { path = "third_party/warp-ui/crates/warpui_core" }
 
 thiserror  = "2"
 serde      = { version = "1", features = ["derive"] }

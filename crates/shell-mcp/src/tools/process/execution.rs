@@ -173,7 +173,8 @@ fn run_observed(
 
     let start = Instant::now();
 
-    let mut child = match Command::new("/bin/sh")
+    let mut command = Command::new("/bin/sh");
+    command
         .arg("-c")
         .arg(cmd)
         .current_dir(cwd)
@@ -184,9 +185,22 @@ fn run_observed(
             Stdio::piped()
         })
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
+        .stderr(Stdio::piped());
+
+    #[cfg(unix)]
     {
+        use std::os::unix::process::CommandExt;
+        unsafe {
+            command.pre_exec(|| {
+                if libc::setpgid(0, 0) == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+    }
+
+    let mut child = match command.spawn() {
         Ok(c) => c,
         Err(e) => {
             return json!({
@@ -282,7 +296,7 @@ fn run_observed(
             Ok(Some(status)) => break Some(status),
             Ok(None) => {
                 if Instant::now() >= deadline {
-                    let _ = child.kill();
+                    kill_child_tree(&mut child);
                     break None;
                 }
                 std::thread::sleep(Duration::from_millis(50));
@@ -342,6 +356,27 @@ fn run_observed(
         result["observer_pid_file"] = json!(pid_file);
     }
     result
+}
+
+fn kill_child_tree(child: &mut std::process::Child) {
+    #[cfg(unix)]
+    {
+        let pgid = child.id() as i32;
+        unsafe {
+            let _ = libc::kill(-pgid, libc::SIGTERM);
+        }
+        std::thread::sleep(Duration::from_millis(200));
+        if matches!(child.try_wait(), Ok(None)) {
+            unsafe {
+                let _ = libc::kill(-pgid, libc::SIGKILL);
+            }
+        }
+    }
+
+    #[cfg(not(unix))]
+    {
+        let _ = child.kill();
+    }
 }
 
 // ── build_check ───────────────────────────────────────────────────────────────
@@ -1069,4 +1104,24 @@ fn cuda_include_dir() -> Option<String> {
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::run;
+    use std::time::Duration;
+
+    #[test]
+    fn run_reports_timeout_for_long_command() {
+        let result = run(
+            "sleep 5",
+            std::path::Path::new("."),
+            &[],
+            "",
+            Duration::from_millis(100),
+        );
+
+        assert_eq!(result["timed_out"].as_bool(), Some(true));
+        assert_eq!(result["exit_code"].as_i64(), Some(-1));
+    }
 }

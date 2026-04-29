@@ -30,7 +30,7 @@ encoding_rs   = "0.8"
 tempfile      = "3"
 fs2           = "0.4"
 rayon         = "1"
-blake3        = "1"
+blake3        = { version = "1", features = ["pure"] }
 similar       = "2"
 
 [dev-dependencies]

@@ -34,7 +34,7 @@ pub fn run_enable(session: Option<&str>) -> Result<()> {
     println!("FERRITE UP");
     println!("tailscale  : {tailscale_note}");
     println!("sshd       : {sshd_note}");
-    println!("password   : use your Linux account password");
+    println!("password   : use your local account password");
     println!(
         "next       : ssh {}@{}",
         current_user(),
@@ -436,6 +436,7 @@ fn check_sshd() -> Check {
         return Check::ok("listening on tcp/22");
     }
 
+    #[cfg(target_os = "linux")]
     for unit in ["ssh", "sshd"] {
         let output = Command::new("systemctl").args(["is-active", unit]).output();
         if let Ok(output) = output {
@@ -446,9 +447,22 @@ fn check_sshd() -> Check {
         }
     }
 
-    Check::warn("not listening on tcp/22 and no active ssh/sshd systemd unit detected")
+    #[cfg(target_os = "macos")]
+    {
+        let output = Command::new("launchctl")
+            .args(["print", "system/com.openssh.sshd"])
+            .output();
+        if let Ok(output) = output {
+            if output.status.success() {
+                return Check::ok("launchd com.openssh.sshd loaded");
+            }
+        }
+    }
+
+    Check::warn("not listening on tcp/22 and no active sshd service detected")
 }
 
+#[cfg(target_os = "linux")]
 fn port_22_listening() -> bool {
     let output = Command::new("ss").args(["-ltn"]).output();
     let Ok(output) = output else {
@@ -458,6 +472,27 @@ fn port_22_listening() -> bool {
     String::from_utf8_lossy(&output.stdout)
         .lines()
         .any(|line| line.contains(":22 ") || line.ends_with(":22"))
+}
+
+#[cfg(target_os = "macos")]
+fn port_22_listening() -> bool {
+    let output = Command::new("lsof")
+        .args(["-nP", "-iTCP:22", "-sTCP:LISTEN"])
+        .output();
+    let Ok(output) = output else {
+        return false;
+    };
+
+    output.status.success()
+        && String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .skip(1)
+            .any(|line| !line.trim().is_empty())
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn port_22_listening() -> bool {
+    false
 }
 
 fn check_tmux(session: &str) -> TmuxCheck {

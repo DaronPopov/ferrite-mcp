@@ -895,7 +895,7 @@ pub fn all_tool_definitions() -> Vec<ToolDef> {
         // ── System ────────────────────────────────────────────────────────────
         ToolDef {
             name: "process_tree",
-            description: "List running processes from /proc. Returns [{pid, ppid, name, state, mem_kb, cmdline}]. \
+            description: "List running processes. Uses /proc on Linux and ps on macOS. Returns [{pid, ppid, name, state, mem_kb, cmdline}]. \
                            Filter by process name substring.",
             input_schema: json!({
                 "type": "object",
@@ -907,7 +907,7 @@ pub fn all_tool_definitions() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "port_list",
-            description: "List listening TCP/UDP ports via ss. Returns [{proto, addr, port, pid, process}].",
+            description: "List listening TCP/UDP ports. Uses ss on Linux and lsof on macOS. Returns [{proto, addr, port, pid, process}].",
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -917,8 +917,7 @@ pub fn all_tool_definitions() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "journal_query",
-            description: "Query systemd journal via journalctl. Returns [{time, unit, pid, message}]. \
-                           Filter by unit, time range, grep pattern.",
+            description: "Query system logs. Uses journalctl on Linux and log show on macOS. Returns log entries filtered by unit/process, time range, or grep pattern.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -1181,9 +1180,7 @@ pub fn all_tool_definitions() -> Vec<ToolDef> {
         // ── CPU profiling ─────────────────────────────────────────────────────
         ToolDef {
             name: "flamegraph",
-            description: "Profile a command with Linux perf and generate a CPU flamegraph. \
-                           Returns top hotspot functions. Generates SVG if inferno or flamegraph.pl is installed. \
-                           May require: echo 0 | sudo tee /proc/sys/kernel/perf_event_paranoid",
+            description: "Profile a command and generate a CPU flamegraph where supported. Linux uses perf; macOS returns an Instruments/xctrace hint.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -1197,8 +1194,7 @@ pub fn all_tool_definitions() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "perf_stat",
-            description: "Run a command under Linux perf stat. Returns CPU counters: cycles, instructions, \
-                           cache-misses, branch-misses, IPC, task-clock. Structured output, no text parsing needed.",
+            description: "Measure command CPU counters where supported. Linux uses perf stat; macOS returns an Instruments/xctrace hint.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -1418,7 +1414,7 @@ pub fn all_tool_definitions() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "bg_attach",
-            description: "Attach to an existing running process by PID. Tracks it via /proc so \
+            description: "Attach to an existing running process by PID. Tracks process liveness so \
                 bg_status can tell you when it finishes. Output is not captured (use bg_spawn for that).",
             input_schema: json!({
                 "type": "object",

@@ -6,7 +6,7 @@
 //! 2. Parse nvidia-smi --query-gpu output                           ← no CUDA SDK needed
 //! 3. Return "no GPU detected"
 //!
-//! gpu_info strategy — macOS (Apple Silicon):
+//! gpu_info strategy — macOS:
 //! Returns GPU name from system_profiler; utilization unavailable without sudo.
 //!
 //! cpu_info strategy — Linux:
@@ -247,7 +247,7 @@ fn which_bin(name: &str) -> Option<String> {
 // ── GPU info — macOS ──────────────────────────────────────────────────────────
 
 /// Return Apple GPU name from system_profiler.
-#[cfg(not(target_os = "linux"))]
+#[cfg(target_os = "macos")]
 fn apple_gpu_name() -> Option<String> {
     let out = std::process::Command::new("system_profiler")
         .args(["SPDisplaysDataType"])
@@ -260,12 +260,21 @@ fn apple_gpu_name() -> Option<String> {
         .map(|s| s.trim().to_owned())
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(target_os = "macos")]
 pub fn gpu_info(_args: &Value) -> Result<ToolResult, String> {
     let name = apple_gpu_name().unwrap_or_else(|| "Apple GPU".to_owned());
     Ok(ToolResult::json(&json!({
         "source":  "system_profiler",
         "devices": [{ "name": name }],
+    })))
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+pub fn gpu_info(_args: &Value) -> Result<ToolResult, String> {
+    Ok(ToolResult::json(&json!({
+        "source": "unsupported",
+        "devices": [],
+        "note": "gpu_info currently supports Linux NVIDIA GPUs and macOS display devices",
     })))
 }
 
@@ -292,13 +301,6 @@ fn collect_cpu_info() -> Value {
         .filter(|l| l.starts_with("processor"))
         .count();
 
-    let physical_cores = cpuinfo
-        .lines()
-        .find(|l| l.starts_with("cpu cores"))
-        .and_then(|l| l.split(':').nth(1))
-        .and_then(|s| s.trim().parse::<usize>().ok())
-        .unwrap_or(logical_cores);
-
     let sockets = cpuinfo
         .lines()
         .filter(|l| l.starts_with("physical id"))
@@ -310,6 +312,16 @@ fn collect_cpu_info() -> Value {
         .max()
         .map(|m| m + 1)
         .unwrap_or(1);
+
+    let physical_cores = linux_physical_core_count(&cpuinfo).unwrap_or_else(|| {
+        cpuinfo
+            .lines()
+            .find(|l| l.starts_with("cpu cores"))
+            .and_then(|l| l.split(':').nth(1))
+            .and_then(|s| s.trim().parse::<usize>().ok())
+            .map(|cores_per_socket| cores_per_socket.saturating_mul(sockets))
+            .unwrap_or(logical_cores)
+    });
 
     // SIMD flags
     let flags_line = cpuinfo
@@ -340,6 +352,43 @@ fn collect_cpu_info() -> Value {
         "simd": simd,
         "caches": caches,
     })
+}
+
+#[cfg(target_os = "linux")]
+fn linux_physical_core_count(cpuinfo: &str) -> Option<usize> {
+    use std::collections::HashSet;
+
+    let mut cores = HashSet::new();
+    let mut physical_id: Option<String> = None;
+    let mut core_id: Option<String> = None;
+    let mut saw_topology = false;
+
+    for line in cpuinfo.lines().chain(std::iter::once("")) {
+        if line.trim().is_empty() {
+            if let Some(core) = core_id.take() {
+                let socket = physical_id.take().unwrap_or_else(|| "0".to_owned());
+                cores.insert((socket, core));
+            }
+            physical_id = None;
+            continue;
+        }
+
+        if let Some((key, value)) = line.split_once(':') {
+            let key = key.trim();
+            let value = value.trim();
+            if key == "physical id" {
+                physical_id = Some(value.to_owned());
+                saw_topology = true;
+            } else if key == "core id" {
+                core_id = Some(value.to_owned());
+                saw_topology = true;
+            }
+        }
+    }
+
+    saw_topology
+        .then_some(cores.len())
+        .filter(|count| *count > 0)
 }
 
 #[cfg(target_os = "linux")]
@@ -395,11 +444,11 @@ fn read_sysfs(base: &std::path::Path, file: &str) -> Option<String> {
 
 // ── CPU info — macOS ──────────────────────────────────────────────────────────
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(target_os = "macos")]
 fn collect_cpu_info() -> Value {
     let model = sysctl_str("machdep.cpu.brand_string")
         .or_else(|| sysctl_str("hw.model"))
-        .unwrap_or_else(|| "Apple Silicon".to_owned());
+        .unwrap_or_else(|| "unknown".to_owned());
     let logical = sysctl_u64("hw.logicalcpu").unwrap_or(0) as usize;
     let physical = sysctl_u64("hw.physicalcpu").unwrap_or(0) as usize;
 
@@ -414,12 +463,7 @@ fn collect_cpu_info() -> Value {
         caches.push(json!({"level": 3, "type": "Unified", "size": s}));
     }
 
-    // Apple Silicon always has NEON; no x86 SIMD
-    let simd = json!({
-        "neon": true, "sve": false,
-        "avx": false, "avx2": false, "avx512f": false,
-        "fma": false, "sse4_2": false,
-    });
+    let simd = macos_simd_flags();
 
     json!({
         "model":          model,
@@ -432,7 +476,78 @@ fn collect_cpu_info() -> Value {
     })
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+fn macos_simd_flags() -> Value {
+    json!({
+        "sse4_2": false,
+        "avx": false,
+        "avx2": false,
+        "avx512f": false,
+        "avx512bw": false,
+        "avx512cd": false,
+        "avx512vl": false,
+        "fma": false,
+        "neon": true,
+        "sve": false,
+        "sve2": false,
+    })
+}
+
+#[cfg(all(target_os = "macos", any(target_arch = "x86", target_arch = "x86_64")))]
+fn macos_simd_flags() -> Value {
+    let features = sysctl_str("machdep.cpu.features").unwrap_or_default();
+    let leaf7 = sysctl_str("machdep.cpu.leaf7_features").unwrap_or_default();
+    let flags = format!("{} {}", features.to_lowercase(), leaf7.to_lowercase());
+    json!({
+        "sse4_2": flags.contains("sse4.2"),
+        "avx": flags.split_whitespace().any(|f| f == "avx1.0" || f == "avx"),
+        "avx2": flags.split_whitespace().any(|f| f == "avx2"),
+        "avx512f": flags.split_whitespace().any(|f| f == "avx512f"),
+        "avx512bw": flags.split_whitespace().any(|f| f == "avx512bw"),
+        "avx512cd": flags.split_whitespace().any(|f| f == "avx512cd"),
+        "avx512vl": flags.split_whitespace().any(|f| f == "avx512vl"),
+        "fma": flags.split_whitespace().any(|f| f == "fma"),
+        "neon": false,
+        "sve": false,
+        "sve2": false,
+    })
+}
+
+#[cfg(all(
+    target_os = "macos",
+    not(any(target_arch = "aarch64", target_arch = "x86", target_arch = "x86_64"))
+))]
+fn macos_simd_flags() -> Value {
+    json!({
+        "sse4_2": false,
+        "avx": false,
+        "avx2": false,
+        "avx512f": false,
+        "avx512bw": false,
+        "avx512cd": false,
+        "avx512vl": false,
+        "fma": false,
+        "neon": false,
+        "sve": false,
+        "sve2": false,
+    })
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn collect_cpu_info() -> Value {
+    json!({
+        "model": "unknown",
+        "sockets": null,
+        "physical_cores": std::thread::available_parallelism().map(|n| n.get()).ok(),
+        "logical_cores": std::thread::available_parallelism().map(|n| n.get()).ok(),
+        "freq_mhz": null,
+        "simd": {},
+        "caches": [],
+        "note": "Detailed cpu_info currently supports Linux and macOS",
+    })
+}
+
+#[cfg(target_os = "macos")]
 fn sysctl_str(name: &str) -> Option<String> {
     std::process::Command::new("sysctl")
         .args(["-n", name])
@@ -442,7 +557,7 @@ fn sysctl_str(name: &str) -> Option<String> {
         .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_owned())
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(target_os = "macos")]
 fn sysctl_u64(name: &str) -> Option<u64> {
     sysctl_str(name)?.parse().ok()
 }

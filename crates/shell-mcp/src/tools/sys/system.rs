@@ -211,25 +211,64 @@ pub fn port_list(args: &Value) -> Result<ToolResult, String> {
     })))
 }
 
-/// List listening TCP ports using `lsof -iTCP -sTCP:LISTEN -nP` on macOS.
+/// List listening TCP ports and open UDP sockets using `lsof` on macOS.
 #[cfg(not(target_os = "linux"))]
 pub fn port_list(args: &Value) -> Result<ToolResult, String> {
     let proto_filter = args["proto"].as_str().unwrap_or("");
 
-    let out = std::process::Command::new("lsof")
-        .args(["-iTCP", "-sTCP:LISTEN", "-nP"])
-        .output()
-        .map_err(|e| format!("port_list: lsof: {e}"))?;
+    let mut ports: Vec<Value> = Vec::new();
 
-    if !out.status.success() {
-        let err = String::from_utf8_lossy(&out.stderr);
-        return Ok(ToolResult::error(format!("port_list: lsof failed: {err}")));
+    if proto_filter.is_empty() || proto_filter == "tcp" {
+        let out = std::process::Command::new("lsof")
+            .args(["-nP", "-iTCP", "-sTCP:LISTEN"])
+            .output()
+            .map_err(|e| format!("port_list: lsof tcp: {e}"))?;
+
+        if !out.status.success() {
+            let err = String::from_utf8_lossy(&out.stderr);
+            return Ok(ToolResult::error(format!(
+                "port_list: lsof tcp failed: {err}"
+            )));
+        }
+
+        ports.extend(parse_lsof_ports(
+            &String::from_utf8_lossy(&out.stdout),
+            "tcp",
+        ));
     }
 
-    // lsof output: COMMAND PID USER FD TYPE DEVICE SIZE/OFF NODE NAME
-    let mut ports: Vec<Value> = String::from_utf8_lossy(&out.stdout)
+    if proto_filter.is_empty() || proto_filter == "udp" {
+        let out = std::process::Command::new("lsof")
+            .args(["-nP", "-iUDP"])
+            .output()
+            .map_err(|e| format!("port_list: lsof udp: {e}"))?;
+
+        if !out.status.success() {
+            let err = String::from_utf8_lossy(&out.stderr);
+            return Ok(ToolResult::error(format!(
+                "port_list: lsof udp failed: {err}"
+            )));
+        }
+
+        ports.extend(parse_lsof_ports(
+            &String::from_utf8_lossy(&out.stdout),
+            "udp",
+        ));
+    }
+
+    ports.sort_by_key(|p| p["port"].as_u64().unwrap_or(0));
+
+    Ok(ToolResult::json(&json!({
+        "count": ports.len(),
+        "ports": ports,
+    })))
+}
+
+#[cfg(not(target_os = "linux"))]
+fn parse_lsof_ports(output: &str, proto: &str) -> Vec<Value> {
+    output
         .lines()
-        .skip(1) // skip header
+        .skip(1)
         .filter_map(|line| {
             let cols: Vec<&str> = line.split_whitespace().collect();
             if cols.len() < 9 {
@@ -240,25 +279,18 @@ pub fn port_list(args: &Value) -> Result<ToolResult, String> {
             // NAME column: "*:8080" or "127.0.0.1:3000 (LISTEN)"
             let addr_raw = cols[8].trim_end_matches(" (LISTEN)");
             let (addr, port) = split_addr_port(addr_raw);
-            if !proto_filter.is_empty() && proto_filter != "tcp" {
+            if port == 0 {
                 return None;
             }
             Some(json!({
-                "proto":   "tcp",
+                "proto":   proto,
                 "addr":    addr,
                 "port":    port,
                 "pid":     pid,
                 "process": proc_name,
             }))
         })
-        .collect();
-
-    ports.sort_by_key(|p| p["port"].as_u64().unwrap_or(0));
-
-    Ok(ToolResult::json(&json!({
-        "count": ports.len(),
-        "ports": ports,
-    })))
+        .collect()
 }
 
 fn split_addr_port(s: &str) -> (String, u64) {

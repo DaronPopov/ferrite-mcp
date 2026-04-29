@@ -842,6 +842,7 @@ pub fn execute_transaction(
 
     let mut committed: Vec<usize> = Vec::with_capacity(staged.len());
     for (idx, entry) in staged.iter().enumerate() {
+        verify_staged_entry_still_current(entry)?;
         match write_bytes(&entry.path, &entry.new_bytes, &commit_opts) {
             Ok(_) => committed.push(idx),
             Err(commit_err) => {
@@ -948,6 +949,25 @@ fn require_text(path: &Path, bytes: &[u8], exists: bool) -> Result<(), EditError
         return Err(EditError::Text(text::TextError::Binary {
             path: path.to_path_buf(),
         }));
+    }
+    Ok(())
+}
+
+fn verify_staged_entry_still_current(entry: &StagedEntry) -> Result<(), EditError> {
+    let (current_hash, _, current_exists) = probe(&entry.path)?;
+    if current_exists != entry.pre_existed || current_hash != entry.pre_hash {
+        return Err(EditError::PreconditionFailed {
+            path: entry.path.clone(),
+            expected: match &entry.pre_hash {
+                Some(hash) => format!("hash={hash}"),
+                None => "file not to exist".to_owned(),
+            },
+            actual: match current_hash {
+                Some(hash) => format!("hash={hash}"),
+                None if current_exists => "file exists without content hash".to_owned(),
+                None => "file not found".to_owned(),
+            },
+        });
     }
     Ok(())
 }
@@ -1285,5 +1305,23 @@ mod tests {
         let r = write_bytes(f.path(), b"v2", &opts).unwrap();
         assert_eq!(r.pre_hash.as_deref(), Some(pre_hash.as_str()));
         assert_eq!(r.post_hash, hash::hash_bytes(b"v2"));
+    }
+
+    #[test]
+    fn staged_transaction_entry_rejects_external_drift() {
+        let f = write_tmp(b"v1");
+        let staged = StagedEntry {
+            path: f.path().to_path_buf(),
+            pre_bytes: b"v1".to_vec(),
+            pre_hash: Some(hash::hash_bytes(b"v1")),
+            pre_existed: true,
+            new_bytes: b"v2".to_vec(),
+            post_hash: hash::hash_bytes(b"v2"),
+        };
+
+        fs::write(f.path(), b"external").unwrap();
+
+        let err = verify_staged_entry_still_current(&staged).unwrap_err();
+        assert!(matches!(err, EditError::PreconditionFailed { .. }));
     }
 }

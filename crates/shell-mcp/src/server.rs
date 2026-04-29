@@ -3,6 +3,7 @@
 //! Reads newline-delimited JSON from stdin, writes responses to stdout.
 //! Stderr is reserved for diagnostics — never written during normal MCP operation.
 
+use std::collections::HashMap;
 use std::io::{BufRead, Write};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -120,8 +121,68 @@ pub enum ToolConcurrencyLane {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ToolExecutionPolicy {
     pub lane: ToolConcurrencyLane,
-    pub resource_key: Option<String>,
+    pub resource_keys: Vec<String>,
     pub reason: &'static str,
+}
+
+#[derive(Debug, Default)]
+pub struct ExecutionScheduler {
+    state_lock: RwLock<()>,
+    resource_locks: Mutex<HashMap<String, Arc<RwLock<()>>>>,
+}
+
+impl ExecutionScheduler {
+    fn resource_lock(&self, key: &str) -> Arc<RwLock<()>> {
+        let mut locks = crate::tools::state::lock_mutex(&self.resource_locks, "resource locks");
+        Arc::clone(
+            locks
+                .entry(key.to_owned())
+                .or_insert_with(|| Arc::new(RwLock::new(()))),
+        )
+    }
+
+    fn sorted_resource_keys(policy: &ToolExecutionPolicy) -> Vec<String> {
+        let mut keys = policy.resource_keys.clone();
+        keys.sort();
+        keys.dedup();
+        keys
+    }
+
+    fn run<T>(&self, policy: &ToolExecutionPolicy, f: impl FnOnce() -> T) -> T {
+        match policy.lane {
+            ToolConcurrencyLane::ParallelRead => {
+                let _state = crate::tools::state::read_rwlock(&self.state_lock, "state scheduler");
+                let keys = Self::sorted_resource_keys(policy);
+                let locks: Vec<_> = keys.iter().map(|key| self.resource_lock(key)).collect();
+                let _resources: Vec<_> = locks
+                    .iter()
+                    .zip(keys.iter())
+                    .map(|(lock, key)| crate::tools::state::read_rwlock(lock, key))
+                    .collect();
+                f()
+            }
+            ToolConcurrencyLane::SerializedState => {
+                let _state = crate::tools::state::write_rwlock(&self.state_lock, "state scheduler");
+                f()
+            }
+            ToolConcurrencyLane::SerializedResource => {
+                let _state = crate::tools::state::read_rwlock(&self.state_lock, "state scheduler");
+                let keys = Self::sorted_resource_keys(policy);
+                let keys = if keys.is_empty() {
+                    vec!["resource:unknown".to_owned()]
+                } else {
+                    keys
+                };
+                let locks: Vec<_> = keys.iter().map(|key| self.resource_lock(key)).collect();
+                let _resources: Vec<_> = locks
+                    .iter()
+                    .zip(keys.iter())
+                    .map(|(lock, key)| crate::tools::state::write_rwlock(lock, key))
+                    .collect();
+                f()
+            }
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -130,6 +191,7 @@ pub struct McpServer {
     pub store: Arc<JobStore>,
     pub pipelines: Arc<PipelineStore>,
     pub metrics: Arc<ServerMetrics>,
+    scheduler: Arc<ExecutionScheduler>,
 }
 
 enum RunEvent {
@@ -149,6 +211,7 @@ impl McpServer {
             store,
             pipelines,
             metrics: Arc::new(ServerMetrics::default()),
+            scheduler: Arc::new(ExecutionScheduler::default()),
         }
     }
 
@@ -195,11 +258,11 @@ impl McpServer {
 
                     match self.parse_message(trimmed) {
                         Ok(msg) => {
-                            if self.should_run_in_parallel(&msg) {
+                            if msg.is_notification() {
+                                self.handle_notification(&msg.method);
+                            } else {
                                 in_flight += 1;
-                                self.spawn_parallel_request(msg, tx.clone());
-                            } else if let Some(resp) = self.response_for_message(msg) {
-                                Self::write_response(&mut out, &resp)?;
+                                self.spawn_scheduled_request(msg, tx.clone());
                             }
                         }
                         Err(e) => {
@@ -255,24 +318,7 @@ impl McpServer {
         })
     }
 
-    fn should_run_in_parallel(&self, msg: &InboundMessage) -> bool {
-        if msg.is_notification() || msg.method != "tools/call" {
-            return false;
-        }
-        let Some(params) = msg.params.as_ref() else {
-            return false;
-        };
-        let Some(name) = params["name"].as_str() else {
-            return false;
-        };
-        let args = &params["arguments"];
-        matches!(
-            self.tool_execution_policy(name, args).lane,
-            ToolConcurrencyLane::ParallelRead
-        )
-    }
-
-    fn spawn_parallel_request(&self, msg: InboundMessage, tx: Sender<RunEvent>) {
+    fn spawn_scheduled_request(&self, msg: InboundMessage, tx: Sender<RunEvent>) {
         let server = self.clone();
         thread::spawn(move || {
             if let Some(resp) = server.response_for_message(msg) {
@@ -312,7 +358,7 @@ impl McpServer {
             .as_str()
             .ok_or("tools/call: missing 'name'")?;
         let args = &params["arguments"];
-        let _policy = self.tool_execution_policy(name, args);
+        let policy = self.tool_execution_policy(name, args);
 
         // Cross-cutting: keyword filter + size cap applied to every response.
         // Callers may override max_chars (0 = unlimited); filter is opt-in.
@@ -333,9 +379,10 @@ impl McpServer {
             ));
         }
 
-        crate::tools::git_guard::maybe_auto_checkpoint(name, args, &self.state)?;
-
-        let result = self.call_tool(name, args)?;
+        let result = self.scheduler.run(&policy, || {
+            crate::tools::git_guard::maybe_auto_checkpoint(name, args, &self.state)?;
+            self.call_tool(name, args)
+        })?;
         let result = cap_and_filter(result, filter, max_chars);
         serde_json::to_value(&result).map_err(|e| e.to_string())
     }
@@ -359,6 +406,29 @@ impl McpServer {
 
     fn tool_execution_policy(&self, name: &str, args: &Value) -> ToolExecutionPolicy {
         match name {
+            "read_context" | "grep_code" | "list_dir" | "glob" | "changed_since"
+            | "symbol_index" | "find_symbol" => ToolExecutionPolicy {
+                lane: ToolConcurrencyLane::ParallelRead,
+                resource_keys: self
+                    .path_resource_keys([args["path"].as_str().or_else(|| args["cwd"].as_str())]),
+                reason: "read-only filesystem query scoped to a path",
+            },
+            "read_file" | "stat_file" | "read_bytes" | "hash_file" => ToolExecutionPolicy {
+                lane: ToolConcurrencyLane::ParallelRead,
+                resource_keys: self.path_resource_keys([args["path"].as_str()]),
+                reason: "read-only file query scoped to a path",
+            },
+            "diff_files" => ToolExecutionPolicy {
+                lane: ToolConcurrencyLane::ParallelRead,
+                resource_keys: self.path_resource_keys([args["a"].as_str(), args["b"].as_str()]),
+                reason: "read-only diff scoped to both input paths",
+            },
+            "git_log" | "git_diff" | "git_status" | "gh_status" => ToolExecutionPolicy {
+                lane: ToolConcurrencyLane::ParallelRead,
+                resource_keys: self.repo_resource_keys([args["path"].as_str()]),
+                reason: "read-only git query scoped to a repository",
+            },
+
             // Pure read-only operations that can run concurrently once request-level
             // dispatch is parallelized.
             "find_lib"
@@ -366,52 +436,27 @@ impl McpServer {
             | "gpu_info"
             | "cpu_info"
             | "occupancy_calc"
-            | "read_context"
-            | "grep_code"
-            | "read_file"
-            | "stat_file"
-            | "read_bytes"
-            | "diff_files"
-            | "hash_file"
-            | "list_dir"
-            | "glob"
             | "which"
             | "inspect_binary"
             | "cargo_tree"
-            | "test_run"
             | "gpu_live"
             | "ptx_inspect"
-            | "ncu_profile"
-            | "compute_sanitizer"
             | "bench_history"
-            | "changed_since"
             | "http_request"
-            | "flamegraph"
-            | "perf_stat"
-            | "gdb_run"
             | "tensor_inspect"
             | "checkpoint_list"
-            | "symbol_index"
-            | "find_symbol"
             | "process_tree"
             | "port_list"
             | "journal_query"
             | "orient"
-            | "verilog_lint"
-            | "verilog_sim"
-            | "xsim_elab"
-            | "cocotb_run"
             | "waveform_query"
             | "synth_report"
             | "pipeline_status"
             | "chip_status"
-            | "rtl_regression_run"
             | "rtl_regression_report"
             | "fpga_triage"
             | "fpga_artifacts"
             | "board_status"
-            | "remote_exec"
-            | "gh_status"
             | "pre_validate"
             | "health"
             | "env_doctor"
@@ -419,7 +464,7 @@ impl McpServer {
             | "session_status"
             | "tailscale_status" => ToolExecutionPolicy {
                 lane: ToolConcurrencyLane::ParallelRead,
-                resource_key: None,
+                resource_keys: Vec::new(),
                 reason: "read-only tool with no shared mutable resource",
             },
 
@@ -428,7 +473,7 @@ impl McpServer {
             "set_cwd" | "control_reconcile" | "config_ux" | "ux_wizard" | "note"
             | "project_new" | "notify" | "session_restart" => ToolExecutionPolicy {
                 lane: ToolConcurrencyLane::SerializedState,
-                resource_key: None,
+                resource_keys: Vec::new(),
                 reason: "mutates shared server or process-global state",
             },
 
@@ -436,49 +481,51 @@ impl McpServer {
             "move_file" | "mkdir" | "delete_file" | "write_file" | "edit_file" | "sed_file"
             | "apply_patch" => ToolExecutionPolicy {
                 lane: ToolConcurrencyLane::SerializedResource,
-                resource_key: self.path_resource_key(args["path"].as_str()),
+                resource_keys: self.path_resource_keys([args["path"].as_str()]),
                 reason: "mutates filesystem state under a target path",
             },
             // Multi-file mutations: serialize globally on the state lane
             // since we don't know all paths until we walk the args.
             "edit_transaction" | "replace_in_files" => ToolExecutionPolicy {
                 lane: ToolConcurrencyLane::SerializedState,
-                resource_key: None,
+                resource_keys: Vec::new(),
                 reason: "multi-file mutation; lock global to avoid overlap",
             },
-            "git_log" | "git_diff" | "git_status" | "gh_sync" | "git_checkpoint" | "git_commit" => {
-                ToolExecutionPolicy {
-                    lane: ToolConcurrencyLane::SerializedResource,
-                    resource_key: self.repo_resource_key(args["path"].as_str()),
-                    reason: "touches a git repository that should serialize per repo",
-                }
-            }
+            "gh_sync" | "git_checkpoint" | "git_commit" => ToolExecutionPolicy {
+                lane: ToolConcurrencyLane::SerializedResource,
+                resource_keys: self.repo_resource_keys([args["path"].as_str()]),
+                reason: "mutates a git repository that should serialize per repo",
+            },
 
             // Background jobs, pipelines, and hardware endpoints keep their own
             // internal concurrency, but top-level mutations should serialize by ID
             // or endpoint to avoid conflicting control-plane actions.
             "bg_spawn" | "bg_attach" | "bg_list" => ToolExecutionPolicy {
                 lane: ToolConcurrencyLane::SerializedState,
-                resource_key: None,
+                resource_keys: Vec::new(),
                 reason: "mutates shared background job registry",
             },
             "bg_send" | "bg_status" | "bg_wait" | "bg_tail" | "bg_kill" | "wait_for_pattern"
             | "wait_for_idle" | "output_summary" | "live_window" => ToolExecutionPolicy {
                 lane: ToolConcurrencyLane::SerializedResource,
-                resource_key: args["job_id"]
-                    .as_str()
-                    .map(|id| format!("job:{id}"))
-                    .or_else(|| args["pid_file"].as_str().map(|p| format!("observer:{p}")))
-                    .or_else(|| args["port"].as_str().map(|p| format!("uart:{p}")))
-                    .or(Some("jobs:shared".to_owned())),
+                resource_keys: Self::one_resource_key(
+                    args["job_id"]
+                        .as_str()
+                        .map(|id| format!("job:{id}"))
+                        .or_else(|| args["pid_file"].as_str().map(|p| format!("observer:{p}")))
+                        .or_else(|| args["port"].as_str().map(|p| format!("uart:{p}")))
+                        .or(Some("jobs:shared".to_owned())),
+                ),
                 reason: "targets a specific background job or observer handle",
             },
             "pipeline_run" | "pipeline_cancel" => ToolExecutionPolicy {
                 lane: ToolConcurrencyLane::SerializedResource,
-                resource_key: args["pipeline_id"]
-                    .as_str()
-                    .map(|id| format!("pipeline:{id}"))
-                    .or(Some("pipelines:shared".to_owned())),
+                resource_keys: Self::one_resource_key(
+                    args["pipeline_id"]
+                        .as_str()
+                        .map(|id| format!("pipeline:{id}"))
+                        .or(Some("pipelines:shared".to_owned())),
+                ),
                 reason: "mutates pipeline orchestration state",
             },
             "fpga_program"
@@ -487,11 +534,13 @@ impl McpServer {
             | "fpga_tcfp_tile_read"
             | "fpga_monitor" => ToolExecutionPolicy {
                 lane: ToolConcurrencyLane::SerializedResource,
-                resource_key: args["target"]
-                    .as_str()
-                    .map(|v| format!("fpga-target:{v}"))
-                    .or_else(|| args["port"].as_str().map(|v| format!("uart:{v}")))
-                    .or(Some("fpga:shared".to_owned())),
+                resource_keys: Self::one_resource_key(
+                    args["target"]
+                        .as_str()
+                        .map(|v| format!("fpga-target:{v}"))
+                        .or_else(|| args["port"].as_str().map(|v| format!("uart:{v}")))
+                        .or(Some("fpga:shared".to_owned())),
+                ),
                 reason: "talks to exclusive hardware control-plane resources",
             },
 
@@ -501,6 +550,7 @@ impl McpServer {
             "exec"
             | "build_check"
             | "task_run"
+            | "test_run"
             | "launch"
             | "close_observer"
             | "cuda_env_doctor"
@@ -508,24 +558,39 @@ impl McpServer {
             | "cuda_triage"
             | "cuda_regression_run"
             | "cuda_regression_report"
+            | "ncu_profile"
+            | "compute_sanitizer"
+            | "flamegraph"
+            | "perf_stat"
+            | "gdb_run"
+            | "verilog_lint"
+            | "verilog_sim"
+            | "xsim_elab"
+            | "cocotb_run"
             | "vivado_tcl"
             | "chip_build_pipeline"
+            | "rtl_regression_run"
+            | "remote_exec"
             | "remote_build"
             | "sync_project"
             | "tty_exec"
             | "tmux_ctl" => ToolExecutionPolicy {
                 lane: ToolConcurrencyLane::SerializedResource,
-                resource_key: self
-                    .path_resource_key(args["cwd"].as_str().or_else(|| args["path"].as_str())),
+                resource_keys: self
+                    .path_resource_keys([args["cwd"].as_str().or_else(|| args["path"].as_str())]),
                 reason: "runs external commands that may mutate a working tree or tool state",
             },
 
             _ => ToolExecutionPolicy {
                 lane: ToolConcurrencyLane::SerializedState,
-                resource_key: None,
+                resource_keys: Vec::new(),
                 reason: "unclassified tool defaults to conservative serialization",
             },
         }
+    }
+
+    fn one_resource_key(key: Option<String>) -> Vec<String> {
+        key.into_iter().collect()
     }
 
     fn path_resource_key(&self, raw: Option<&str>) -> Option<String> {
@@ -549,6 +614,24 @@ impl McpServer {
             let path = key.trim_start_matches("path:");
             format!("repo:{path}")
         })
+    }
+
+    fn path_resource_keys<'a>(
+        &self,
+        raws: impl IntoIterator<Item = Option<&'a str>>,
+    ) -> Vec<String> {
+        raws.into_iter()
+            .filter_map(|raw| self.path_resource_key(raw))
+            .collect()
+    }
+
+    fn repo_resource_keys<'a>(
+        &self,
+        raws: impl IntoIterator<Item = Option<&'a str>>,
+    ) -> Vec<String> {
+        raws.into_iter()
+            .filter_map(|raw| self.repo_resource_key(raw))
+            .collect()
     }
 
     fn should_recycle(&self) -> bool {
@@ -837,9 +920,14 @@ fn current_rss_bytes() -> Option<u64> {
 
 #[cfg(test)]
 mod tests {
-    use super::{HealthSnapshot, McpServer, RecyclePolicy, ToolConcurrencyLane};
+    use super::{
+        ExecutionScheduler, HealthSnapshot, McpServer, RecyclePolicy, ToolConcurrencyLane,
+        ToolExecutionPolicy,
+    };
     use crate::job_store::JobStoreStats;
     use serde_json::json;
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
 
     fn snapshot() -> HealthSnapshot {
         HealthSnapshot {
@@ -887,15 +975,32 @@ mod tests {
         let server = McpServer::new();
         let policy = server.tool_execution_policy("read_file", &json!({"path": "Cargo.toml"}));
         assert_eq!(policy.lane, ToolConcurrencyLane::ParallelRead);
-        assert_eq!(policy.resource_key, None);
+        assert_eq!(
+            policy.resource_keys,
+            vec![format!(
+                "path:{}",
+                std::env::current_dir()
+                    .unwrap()
+                    .join("Cargo.toml")
+                    .display()
+            )]
+        );
     }
 
     #[test]
-    fn execution_policy_serializes_git_tools_by_repo() {
+    fn execution_policy_marks_git_reads_parallel_by_repo() {
         let server = McpServer::new();
         let policy = server.tool_execution_policy("git_status", &json!({"path": "/tmp/repo"}));
+        assert_eq!(policy.lane, ToolConcurrencyLane::ParallelRead);
+        assert_eq!(policy.resource_keys, vec!["repo:/tmp/repo".to_owned()]);
+    }
+
+    #[test]
+    fn execution_policy_serializes_git_writes_by_repo() {
+        let server = McpServer::new();
+        let policy = server.tool_execution_policy("git_commit", &json!({"path": "/tmp/repo"}));
         assert_eq!(policy.lane, ToolConcurrencyLane::SerializedResource);
-        assert_eq!(policy.resource_key, Some("repo:/tmp/repo".to_owned()));
+        assert_eq!(policy.resource_keys, vec!["repo:/tmp/repo".to_owned()]);
     }
 
     #[test]
@@ -903,7 +1008,151 @@ mod tests {
         let server = McpServer::new();
         let policy = server.tool_execution_policy("set_cwd", &json!({"path": "/tmp"}));
         assert_eq!(policy.lane, ToolConcurrencyLane::SerializedState);
-        assert_eq!(policy.resource_key, None);
+        assert!(policy.resource_keys.is_empty());
+    }
+
+    #[test]
+    fn execution_policy_serializes_commands_that_may_mutate_or_run_code() {
+        let server = McpServer::new();
+        for tool in [
+            "test_run",
+            "ncu_profile",
+            "compute_sanitizer",
+            "flamegraph",
+            "perf_stat",
+            "gdb_run",
+            "verilog_sim",
+            "cocotb_run",
+            "rtl_regression_run",
+            "remote_exec",
+        ] {
+            let policy = server.tool_execution_policy(tool, &json!({"cwd": "/tmp/project"}));
+            assert_eq!(
+                policy.lane,
+                ToolConcurrencyLane::SerializedResource,
+                "{tool}"
+            );
+            assert_eq!(
+                policy.resource_keys,
+                vec!["path:/tmp/project".to_owned()],
+                "{tool}"
+            );
+        }
+    }
+
+    #[test]
+    fn execution_policy_tracks_both_diff_paths() {
+        let server = McpServer::new();
+        let policy = server
+            .tool_execution_policy("diff_files", &json!({"a": "/tmp/a.txt", "b": "/tmp/b.txt"}));
+        assert_eq!(policy.lane, ToolConcurrencyLane::ParallelRead);
+        assert_eq!(
+            policy.resource_keys,
+            vec!["path:/tmp/a.txt".to_owned(), "path:/tmp/b.txt".to_owned()]
+        );
+    }
+
+    #[test]
+    fn scheduler_allows_different_resources_to_overlap() {
+        let scheduler = Arc::new(ExecutionScheduler::default());
+        let start = Instant::now();
+        let mut handles = Vec::new();
+
+        for key in ["path:/tmp/a", "path:/tmp/b"] {
+            let scheduler = Arc::clone(&scheduler);
+            let policy = ToolExecutionPolicy {
+                lane: ToolConcurrencyLane::SerializedResource,
+                resource_keys: vec![key.to_owned()],
+                reason: "test",
+            };
+            handles.push(std::thread::spawn(move || {
+                scheduler.run(&policy, || std::thread::sleep(Duration::from_millis(120)));
+            }));
+        }
+
+        for handle in handles {
+            handle.join().unwrap();
+        }
+        assert!(start.elapsed() < Duration::from_millis(220));
+    }
+
+    #[test]
+    fn scheduler_serializes_same_resource() {
+        let scheduler = Arc::new(ExecutionScheduler::default());
+        let start = Instant::now();
+        let mut handles = Vec::new();
+
+        for _ in 0..2 {
+            let scheduler = Arc::clone(&scheduler);
+            let policy = ToolExecutionPolicy {
+                lane: ToolConcurrencyLane::SerializedResource,
+                resource_keys: vec!["path:/tmp/shared".to_owned()],
+                reason: "test",
+            };
+            handles.push(std::thread::spawn(move || {
+                scheduler.run(&policy, || std::thread::sleep(Duration::from_millis(120)));
+            }));
+        }
+
+        for handle in handles {
+            handle.join().unwrap();
+        }
+        assert!(start.elapsed() >= Duration::from_millis(220));
+    }
+
+    #[test]
+    fn scheduler_allows_same_resource_reads_to_overlap() {
+        let scheduler = Arc::new(ExecutionScheduler::default());
+        let start = Instant::now();
+        let mut handles = Vec::new();
+
+        for _ in 0..2 {
+            let scheduler = Arc::clone(&scheduler);
+            let policy = ToolExecutionPolicy {
+                lane: ToolConcurrencyLane::ParallelRead,
+                resource_keys: vec!["path:/tmp/shared".to_owned()],
+                reason: "test",
+            };
+            handles.push(std::thread::spawn(move || {
+                scheduler.run(&policy, || std::thread::sleep(Duration::from_millis(120)));
+            }));
+        }
+
+        for handle in handles {
+            handle.join().unwrap();
+        }
+        assert!(start.elapsed() < Duration::from_millis(220));
+    }
+
+    #[test]
+    fn scheduler_blocks_same_resource_write_behind_read() {
+        let scheduler = Arc::new(ExecutionScheduler::default());
+        let (locked_tx, locked_rx) = std::sync::mpsc::channel();
+
+        let read_scheduler = Arc::clone(&scheduler);
+        let reader = std::thread::spawn(move || {
+            let policy = ToolExecutionPolicy {
+                lane: ToolConcurrencyLane::ParallelRead,
+                resource_keys: vec!["path:/tmp/shared".to_owned()],
+                reason: "test",
+            };
+            read_scheduler.run(&policy, || {
+                locked_tx.send(()).unwrap();
+                std::thread::sleep(Duration::from_millis(150));
+            });
+        });
+
+        locked_rx.recv().unwrap();
+        let write_start = Instant::now();
+        let write_policy = ToolExecutionPolicy {
+            lane: ToolConcurrencyLane::SerializedResource,
+            resource_keys: vec!["path:/tmp/shared".to_owned()],
+            reason: "test",
+        };
+        scheduler.run(&write_policy, || {});
+
+        reader.join().unwrap();
+        assert!(write_start.elapsed() >= Duration::from_millis(120));
     }
 
     #[test]

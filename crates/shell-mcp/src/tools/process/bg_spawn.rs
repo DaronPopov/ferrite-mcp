@@ -79,6 +79,6 @@ pub fn bg_attach(args: &Value, store: &Arc<JobStore>) -> Result<ToolResult, Stri
         "pid":     job.pid,
         "label":   job.label,
         "status":  "attached",
-        "note":    "Monitoring PID via /proc. Use bg_status to check completion. Output not captured for attached jobs."
+        "note":    "Monitoring PID liveness. Use bg_status to check completion. Output not captured for attached jobs."
     })))
 }
