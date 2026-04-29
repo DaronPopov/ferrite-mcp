@@ -1539,7 +1539,7 @@ fn uart_read_reg(f: &mut std::fs::File, addr: u8) -> Result<u32, String> {
 
 fn parse_hex_bytes(s: &str) -> Result<Vec<u8>, String> {
     let clean: String = s.chars().filter(|c| c.is_ascii_hexdigit()).collect();
-    if !clean.len().is_multiple_of(2) {
+    if clean.len() % 2 != 0 {
         return Err(format!("parse_hex_bytes: odd nibble count in '{s}'"));
     }
     clean

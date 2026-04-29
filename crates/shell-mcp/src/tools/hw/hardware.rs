@@ -741,7 +741,7 @@ pub fn occupancy_calc(args: &Value) -> Result<ToolResult, String> {
 
     // ── Recommendations ───────────────────────────────────────────────────────
     let mut tips = Vec::new();
-    if !threads_per_block.is_multiple_of(warp_size) {
+    if threads_per_block % warp_size != 0 {
         tips.push(format!(
             "threads_per_block ({threads_per_block}) is not a multiple of warp size ({warp_size}) — \
              {} threads wasted per block",

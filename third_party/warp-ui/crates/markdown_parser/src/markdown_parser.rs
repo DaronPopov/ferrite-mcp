@@ -1795,8 +1795,8 @@ impl Delimiter {
         // This check implements rules 9 and 10 from https://spec.commonmark.org/0.30/#can-open-emphasis.
         // It's odd, but results in the behavior you'd expect for overlapping cases like `*nest**ing***`.
         if (self.can_close || other.can_open)
-            && (self.original_count + other.original_count).is_multiple_of(3)
-            && (!self.original_count.is_multiple_of(3) || !other.original_count.is_multiple_of(3))
+            && (self.original_count + other.original_count) % 3 == 0
+            && (self.original_count % 3 != 0 || other.original_count % 3 != 0)
         {
             return false;
         }

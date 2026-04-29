@@ -47,13 +47,13 @@ impl RootView {
 
     fn make_list_item(index: usize, font_family: FamilyId) -> Container {
         // Alternate colors to make it easy to see which items are rendered
-        let bg_color = if index.is_multiple_of(2) {
+        let bg_color = if index % 2 == 0 {
             ColorU::new(240, 240, 240, 255) // Light gray
         } else {
             ColorU::new(255, 255, 255, 255) // White
         };
 
-        let border_color = if index.is_multiple_of(10) {
+        let border_color = if index % 10 == 0 {
             ColorU::new(255, 0, 0, 255) // Red border for every 10th item
         } else {
             ColorU::new(200, 200, 200, 255) // Light gray border
@@ -73,7 +73,7 @@ impl RootView {
                         Container::new(
                             ConstrainedBox::new(
                                 Text::new_inline(
-                                    if index.is_multiple_of(10) {
+                                    if index % 10 == 0 {
                                         " (MILESTONE)".to_string()
                                     } else {
                                         format!(" - Height: {height}px")
